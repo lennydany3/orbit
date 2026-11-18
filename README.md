@@ -38,7 +38,12 @@ The router prefers the API layer over OS and browser. Login uses PKCE, so there 
 
 ## Browser layer
 
-Orbit opens its own visible **Brave** window (or Chrome: `python -m orbit --browser chrome`, or set `ORBIT_BROWSER=chrome`) with a separate profile in `.browser-profile/` (gitignored). It stays open between requests and closes when Orbit exits. Your everyday browser window, tabs and logins are never touched: Chromium does not allow remote control of a profile that is already open, so Orbit cannot reuse your normal Brave profile. Log in to a site once in Orbit's window and the login is kept for next time. "open my github" opens your profile (`github.com/lennydany3`; change it with the `ORBIT_GITHUB_USER` environment variable); "open github" opens the site. Words like "in brave" are ignored ("open github in brave" opens github in Orbit's browser). Only http(s) links are opened. Clicking a button whose text looks risky (buy, send, delete, pay...) asks you first. Web search uses DuckDuckGo.
+Two ways to use a browser, chosen with `--browser-mode` (or `ORBIT_BROWSER_MODE`):
+
+- **`mine` (default): your own Brave profile.** "open my github", "open youtube", "search cats" ask Brave to open the link in your **Personal** profile (change with `ORBIT_BRAVE_PROFILE`; names are the ones in Brave's profile menu), where you are already logged in. This is not automation, so Google and other sites do not block it. Orbit can confirm Brave answered and is in front, but **cannot read or click inside these pages**.
+- **`orbit`: Orbit's own automated window** (also used for "play X on youtube" + fullscreen, which Orbit verifies from the video element). It has a separate profile in `.browser-profile/` and never touches your everyday profiles. Sites that distrust automated browsers refuse sign-in there (Google shows "Couldn't sign you in"); GitHub's own username/password login works. Switch the browser itself with `--browser chrome`.
+
+"open my github" opens `github.com/lennydany3` (change with `ORBIT_GITHUB_USER`); "open github" opens the site. Words like "in brave" are ignored. Only http(s) links are opened. Clicking a button whose text looks risky (buy, send, delete, pay...) asks you first. Web search uses DuckDuckGo.
 
 ## Known limits (honest list)
 

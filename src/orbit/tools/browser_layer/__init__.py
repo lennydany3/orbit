@@ -11,8 +11,10 @@ from urllib.parse import quote_plus, urlparse
 from playwright.sync_api import Error as PlaywrightError
 from pydantic import BaseModel, Field
 
+from ... import config
 from ..base import Registry, Tool, ToolResult, VerifyResult, read_only_verify
-from .session import BrowserUnavailable, session
+from . import real
+from .session import BrowserUnavailable, find_brave, session
 
 SETTLE_TIMEOUT_S = 4.0
 _ALLOWED_SCHEMES = {"http", "https"}
@@ -38,6 +40,11 @@ def _first_line(e: Exception) -> str:
 
 
 def _page_or_error():
+    if _use_my_browser() and not session.running:
+        return None, ToolResult.failure(
+            "Orbit opens websites in your own Brave, which it cannot read or click in. "
+            "To read, click or fullscreen a page, ask for it in Orbit's own window (for example: play something on youtube).",
+            retryable=False)
     try:
         return session.page(), None
     except BrowserUnavailable as e:
@@ -84,11 +91,31 @@ class NoParams(BaseModel):
     pass
 
 
+def _use_my_browser() -> bool:
+    return config.BROWSER_MODE == "mine" and session.browser == "brave"
+
+
+def _open_in_my_browser(url: str) -> ToolResult:
+    exe = find_brave()
+    if exe is None:
+        return ToolResult.failure("Brave was not found. Install it, or use --browser chrome", retryable=False)
+    try:
+        folder = real.profile_folder(config.BRAVE_PROFILE)
+    except real.ProfileNotFound as e:
+        return ToolResult.failure(str(e), retryable=False)
+    real.open_link(url, exe, folder)
+    result = ToolResult.success(f"opened {url} in your Brave ({config.BRAVE_PROFILE} profile)")
+    result.context.update(requested=url, mine=True)
+    return result
+
+
 def open_url(p: OpenParams) -> ToolResult:
     try:
         url = normalize_url(p.url)
     except ValueError as e:
         return ToolResult.failure(str(e), retryable=False)
+    if _use_my_browser():
+        return _open_in_my_browser(url)
     page, err = _page_or_error()
     if err:
         return err
@@ -104,6 +131,12 @@ def open_url(p: OpenParams) -> ToolResult:
 
 
 def verify_open(p: OpenParams, r: ToolResult) -> VerifyResult:
+    if r.context.get("mine"):
+        # Orbit cannot see inside your own browser, only that Brave answered and is in front.
+        fg = real.brave_in_front()
+        if fg:
+            return VerifyResult(True, f"Brave is in front, showing '{fg.title}' (I cannot read the page itself)")
+        return VerifyResult(False, "Brave did not come to the front")
     page, err = _page_or_error()
     if err:
         return VerifyResult(False, err.error)

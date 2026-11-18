@@ -23,6 +23,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # --- Browser layer ---
 BROWSER = os.environ.get("ORBIT_BROWSER", "brave").lower()  # "brave" or "chrome": which installed browser Orbit drives
+# Where "open <website>" goes: "mine" = a link opened in your own Brave profile (your logins work, but Orbit cannot read or
+# click in that page); "orbit" = Orbit's separate automated window (Orbit can read and click, but sites that distrust
+# automated browsers, like Google sign-in, refuse to log you in there).
+BROWSER_MODE = os.environ.get("ORBIT_BROWSER_MODE", "mine").lower()
+BRAVE_PROFILE = os.environ.get("ORBIT_BRAVE_PROFILE", "Personal")  # the Brave profile name shown in Brave's profile menu
 BROWSER_HEADLESS = False        # visible window: you can watch it work, and fullscreen is real
 BROWSER_PROFILE_DIR = PROJECT_ROOT / ".browser-profile"  # Orbit-only profile: never your real browser data
 BRAVE_PATHS = [

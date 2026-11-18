@@ -52,6 +52,10 @@ class BrowserSession:
         self.browser = browser
 
     @property
+    def running(self) -> bool:
+        return self._ctx is not None
+
+    @property
     def profile_dir(self) -> Path:
         # Chrome keeps the folder it always used; Brave gets its own, so the two never share a profile.
         return self.profile_root if self.browser == "chrome" else self.profile_root / self.browser

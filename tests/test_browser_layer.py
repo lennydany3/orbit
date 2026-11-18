@@ -99,6 +99,7 @@ def env(monkeypatch, logs):
     page = FakePage()
     monkeypatch.setattr(session, "page", lambda: page)
     monkeypatch.setattr("orbit.tools.browser_layer.SETTLE_TIMEOUT_S", 0.3)
+    monkeypatch.setattr("orbit.config.BROWSER_MODE", "orbit")  # these tests are about Orbit's own automated window
     reg = Registry()
     register_browser_tools(reg)
     router = Router(lambda k, m: logs.append((k, m)))
@@ -216,3 +217,82 @@ def test_profile_in_use_is_recognised_and_explained():
     m = importlib.import_module("orbit.tools.browser_layer.session")
     assert m.looks_like_profile_in_use("BrowserType.launch_persistent_context: Opening in existing browser session. This usually means that the profile is already in use")
     assert not m.looks_like_profile_in_use("executable doesn't exist at C:/x/brave.exe")
+
+
+# ---------- opening links in your own Brave profile ----------
+LOCAL_STATE = {"profile": {"info_cache": {
+    "Default": {"name": "Personal"}, "Profile 1": {"name": "Research"}, "Profile 3": {"name": "Sidhanth Bibi"}}}}
+
+
+def _write_state(tmp_path):
+    import json
+    path = tmp_path / "Local State"
+    path.write_text(json.dumps(LOCAL_STATE), encoding="utf-8")
+    return path
+
+
+def test_profile_names_map_to_brave_folders(tmp_path):
+    from orbit.tools.browser_layer import real
+    state = _write_state(tmp_path)
+    assert real.profile_folder("Personal", state) == "Default"
+    assert real.profile_folder("research", state) == "Profile 1"  # case does not matter
+    assert real.profile_folder("Profile 3", state) == "Profile 3"
+
+
+def test_unknown_profile_lists_the_real_ones(tmp_path):
+    from orbit.tools.browser_layer import real
+    with pytest.raises(real.ProfileNotFound, match="Personal, Research, Sidhanth Bibi"):
+        real.profile_folder("Work", _write_state(tmp_path))
+
+
+def test_no_profile_list_falls_back_to_default(tmp_path):
+    from orbit.tools.browser_layer import real
+    assert real.profile_folder("Personal", tmp_path / "missing") == "Default"
+
+
+@pytest.fixture
+def mine(monkeypatch, tmp_path):
+    from orbit.tools.browser_layer import real
+    launched = []
+    monkeypatch.setattr("orbit.config.BROWSER_MODE", "mine")
+    monkeypatch.setattr("orbit.config.BRAVE_PROFILE", "Personal")
+    monkeypatch.setattr(real, "LOCAL_STATE", _write_state(tmp_path))
+    monkeypatch.setattr(real, "profile_folder", lambda name, local_state=None: {"Personal": "Default"}[name])
+    monkeypatch.setattr(real, "open_link", lambda url, exe, folder: launched.append((url, folder)))
+    monkeypatch.setattr("orbit.tools.browser_layer.find_brave", lambda candidates=None: tmp_path / "brave.exe")
+    monkeypatch.setattr(session, "browser", "brave")
+    monkeypatch.setattr(session, "_ctx", None)  # Orbit's own window is not running
+    return launched, real
+
+
+def test_open_goes_to_your_own_brave_profile_not_the_automated_window(env, mine, monkeypatch):
+    page, run, _ = env
+    launched, real = mine
+    from orbit.tools.os_layer.windows import Window
+    monkeypatch.setattr(real, "brave_in_front", lambda wait_s=8.0: Window(1, "lennydany3 (Lenny Dany . D) - Brave", "brave"))
+    r = run("browser_open", OpenParams(url="https://github.com/lennydany3"))
+    assert r.ok and r.verified and launched == [("https://github.com/lennydany3", "Default")]
+    assert page.url == "about:blank"  # the automated browser was never used
+
+
+def test_open_in_your_brave_that_never_comes_forward_is_a_failure(env, mine, monkeypatch):
+    _, run, _ = env
+    _, real = mine
+    monkeypatch.setattr(real, "brave_in_front", lambda wait_s=8.0: None)
+    r = run("browser_open", OpenParams(url="https://github.com"))
+    assert not r.ok and "did not come to the front" in r.error
+
+
+def test_reading_a_page_opened_in_your_own_brave_is_refused_clearly(env, mine):
+    from orbit.tools.browser_layer import NoParams
+    _, run, _ = env
+    r = run("browser_page_info", NoParams())
+    assert not r.ok and "cannot read or click" in r.error
+
+
+def test_orbit_mode_still_uses_the_automated_window(env, mine, monkeypatch):
+    page, run, _ = env
+    launched, _ = mine
+    monkeypatch.setattr("orbit.config.BROWSER_MODE", "orbit")
+    r = run("browser_open", OpenParams(url="github.com"))
+    assert r.ok and r.verified and launched == [] and page.url == "https://github.com"
