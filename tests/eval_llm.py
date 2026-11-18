@@ -40,6 +40,7 @@ STATIC_FACTS = {
                      "Kora desktop automation - kora - Visual Studio Code (code); YouTube - Brave (brave)"),
     "Now playing": "playing: 'Empty Space' by SadBois (SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify)",
     "Volume": "volume is 87%, not muted",
+    "Monitors": "2 monitor(s). monitor 1 (primary): 1920x1080, at x=0; monitor 2 (secondary): 1920x1080, at x=-1920",
 }
 
 

@@ -21,6 +21,9 @@ user32.GetForegroundWindow.restype = wintypes.HWND
 user32.SetForegroundWindow.argtypes = [wintypes.HWND]
 user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.IsZoomed.argtypes = [wintypes.HWND]
+user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
 user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_void_p]
 dwmapi.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
 kernel32.GetConsoleWindow.restype = wintypes.HWND
@@ -33,6 +36,10 @@ _GWL_EXSTYLE = -20
 _WS_EX_TOOLWINDOW = 0x80
 _DWMWA_CLOAKED = 14
 _SW_RESTORE = 9
+_SW_MAXIMIZE = 3
+_SW_MINIMIZE = 6
+_DWMWA_EXTENDED_FRAME_BOUNDS = 9
+_SWP_NOZORDER_NOACTIVATE = 0x0004 | 0x0010
 _WM_CLOSE = 0x0010
 _VK_MENU = 0x12
 _KEYEVENTF_KEYUP = 2
@@ -164,3 +171,47 @@ def console_hwnd() -> int:
 def close(hwnd: int) -> None:
     """Ask a window to close, like clicking its X. The app may still ask to save; nothing is force-killed."""
     user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0)
+
+
+# ---- size, position and state (maximize / minimize / move) ----
+def is_maximized(hwnd: int) -> bool:
+    return bool(user32.IsZoomed(hwnd))
+
+
+def is_minimized(hwnd: int) -> bool:
+    return bool(user32.IsIconic(hwnd))
+
+
+def maximize(hwnd: int) -> None:
+    user32.ShowWindow(hwnd, _SW_MAXIMIZE)
+
+
+def minimize(hwnd: int) -> None:
+    user32.ShowWindow(hwnd, _SW_MINIMIZE)
+
+
+def restore(hwnd: int) -> None:
+    user32.ShowWindow(hwnd, _SW_RESTORE)
+
+
+def rect(hwnd: int) -> tuple[int, int, int, int]:
+    """Outer rectangle (left, top, right, bottom), including the invisible resize border Windows adds."""
+    r = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(r))
+    return r.left, r.top, r.right, r.bottom
+
+
+def visible_rect(hwnd: int) -> tuple[int, int, int, int]:
+    """The rectangle you actually see (without the invisible border)."""
+    r = wintypes.RECT()
+    if dwmapi.DwmGetWindowAttribute(hwnd, _DWMWA_EXTENDED_FRAME_BOUNDS, ctypes.byref(r), ctypes.sizeof(r)) == 0:
+        return r.left, r.top, r.right, r.bottom
+    return rect(hwnd)
+
+
+def set_rect(hwnd: int, left: int, top: int, width: int, height: int) -> None:
+    """Place the VISIBLE part of a window exactly here (the invisible border is compensated for)."""
+    out, vis = rect(hwnd), visible_rect(hwnd)
+    d_left, d_top = vis[0] - out[0], vis[1] - out[1]
+    d_width, d_height = (out[2] - out[0]) - (vis[2] - vis[0]), (out[3] - out[1]) - (vis[3] - vis[1])
+    user32.SetWindowPos(hwnd, None, left - d_left, top - d_top, width + d_width, height + d_height, _SWP_NOZORDER_NOACTIVATE)

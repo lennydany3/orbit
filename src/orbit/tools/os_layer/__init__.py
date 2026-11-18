@@ -5,7 +5,7 @@ from typing import Callable, Literal
 from pydantic import BaseModel, Field
 
 from ..base import Registry, Tool, ToolResult, VerifyResult, read_only_verify
-from . import apps, media, volume, windows
+from . import apps, media, monitors, volume, windows
 
 APP_START_TIMEOUT_S = 12.0
 SETTLE_TIMEOUT_S = 3.0
@@ -142,6 +142,129 @@ def _close_needs_confirm(p: CloseParams) -> bool:
     return bool(matches) and (matches[0].title.startswith("*") or "unsaved" in matches[0].title.lower())
 
 
+# ---------------------------------------------------------------- monitors and window layout
+class MoveParams(BaseModel):
+    title: str = Field(description="part of the window title or app name, e.g. Brave")
+    monitor: str = Field(description="which monitor: primary, secondary, other, left, right, or a number")
+
+
+class ArrangeParams(BaseModel):
+    title: str = Field(description="part of the window title or app name, e.g. Spotify")
+    action: Literal["maximize", "minimize", "restore", "left", "right", "top", "bottom", "center"] = Field(
+        description="maximize, minimize, restore, or snap to the left/right/top/bottom half of its monitor, or center")
+
+
+def _movable(query: str) -> list[windows.Window]:
+    return _closable(query)  # same rules as closing: best match first, never Orbit's own terminal window
+
+
+def _no_window(query: str) -> ToolResult:
+    open_now = ", ".join(repr(w.title[:40]) for w in windows.list_windows()[:8])
+    return ToolResult.failure(
+        f"no open window matches '{query}'. Open windows include: {open_now}. "
+        "If one of these is what the user meant, call again with that title.", retryable=False, not_found=True)
+
+
+def list_monitors(p: NoParams) -> ToolResult:
+    found = monitors.list_monitors()
+    return ToolResult.success(f"{len(found)} monitor(s)", data="\n".join(m.describe(i) for i, m in enumerate(found, 1)))
+
+
+def move_window(p: MoveParams) -> ToolResult:
+    matches = _movable(p.title)
+    if not matches:
+        return _no_window(p.title)
+    win = matches[0]
+    found = monitors.list_monitors()
+    src = monitors.monitor_of(win.hwnd, found)
+    try:
+        dst = monitors.resolve(p.monitor, found, src)
+    except monitors.MonitorNotFound as e:
+        return ToolResult.failure(str(e), retryable=False, not_found=True)
+    result = ToolResult.success("")
+    result.context.update(hwnd=win.hwnd, target=dst.handle)
+    names = {m.handle: f"monitor {i} ({'primary' if m.primary else 'secondary'})" for i, m in enumerate(found, 1)}
+    if src is not None and src.handle == dst.handle:
+        result.summary = f"'{win.title[:40]}' is already on {names[dst.handle]}"
+        return result
+    was_maximized, was_minimized = windows.is_maximized(win.hwnd), windows.is_minimized(win.hwnd)
+    if was_maximized or was_minimized:
+        windows.restore(win.hwnd)  # a maximized window must be normal-sized before it can be moved
+    left, top, right, bottom = windows.visible_rect(win.hwnd)
+    width, height = right - left, bottom - top
+    sl, st, sr, sb = src.work if src else dst.work
+    dl, dt, dr, db = dst.work
+    new_w, new_h = min(width, dr - dl), min(height, db - dt)
+    # keep the window at the same relative spot (a window in the middle stays in the middle)
+    rel_x = (left - sl) / max(1, sr - sl)
+    rel_y = (top - st) / max(1, sb - st)
+    new_l = min(max(dl + round(rel_x * (dr - dl)), dl), dr - new_w)
+    new_t = min(max(dt + round(rel_y * (db - dt)), dt), db - new_h)
+    windows.set_rect(win.hwnd, new_l, new_t, new_w, new_h)
+    if was_maximized:
+        windows.maximize(win.hwnd)
+    result.summary = f"moved '{win.title[:40]}' to {names[dst.handle]}" + (" (still maximized)" if was_maximized else "")
+    return result
+
+
+def verify_move_window(p: MoveParams, r: ToolResult) -> VerifyResult:
+    def on_target():
+        here = monitors.monitor_of(r.context["hwnd"])
+        return here is not None and here.handle == r.context["target"]
+
+    if _wait_for(on_target, SETTLE_TIMEOUT_S):
+        return VerifyResult(True, "Windows reports the window on that monitor")
+    return VerifyResult(False, "the window is still on a different monitor")
+
+
+def arrange_window(p: ArrangeParams) -> ToolResult:
+    matches = _movable(p.title)
+    if not matches:
+        return _no_window(p.title)
+    win = matches[0]
+    result = ToolResult.success(f"{p.action}: '{win.title[:40]}'")
+    result.context.update(hwnd=win.hwnd, action=p.action)
+    if p.action == "maximize":
+        windows.maximize(win.hwnd)
+    elif p.action == "minimize":
+        windows.minimize(win.hwnd)
+    elif p.action == "restore":
+        windows.restore(win.hwnd)
+    else:
+        if windows.is_maximized(win.hwnd) or windows.is_minimized(win.hwnd):
+            windows.restore(win.hwnd)
+        here = monitors.monitor_of(win.hwnd) or monitors.list_monitors()[0]
+        wl, wt, wr, wb = here.work
+        w, h = wr - wl, wb - wt
+        cur = windows.visible_rect(win.hwnd)
+        target = {
+            "left": (wl, wt, w // 2, h), "right": (wl + w // 2, wt, w // 2, h),
+            "top": (wl, wt, w, h // 2), "bottom": (wl, wt + h // 2, w, h // 2),
+            "center": (wl + (w - (cur[2] - cur[0])) // 2, wt + (h - (cur[3] - cur[1])) // 2, cur[2] - cur[0], cur[3] - cur[1]),
+        }[p.action]
+        windows.set_rect(win.hwnd, *target)
+        result.context["target_rect"] = (target[0], target[1], target[0] + target[2], target[1] + target[3])
+    return result
+
+
+def verify_arrange_window(p: ArrangeParams, r: ToolResult) -> VerifyResult:
+    hwnd, action = r.context["hwnd"], r.context["action"]
+
+    def done():
+        if action == "maximize":
+            return windows.is_maximized(hwnd)
+        if action == "minimize":
+            return windows.is_minimized(hwnd)
+        if action == "restore":
+            return not windows.is_maximized(hwnd) and not windows.is_minimized(hwnd)
+        got, want = windows.visible_rect(hwnd), r.context["target_rect"]
+        return all(abs(a - b) <= 24 for a, b in zip(got, want))  # apps may enforce a minimum size; allow a little slack
+
+    if _wait_for(done, SETTLE_TIMEOUT_S):
+        return VerifyResult(True, f"the window is now {action}")
+    return VerifyResult(False, f"the window did not end up {action} (the app may enforce its own size)")
+
+
 def list_windows(p: NoParams) -> ToolResult:
     wins = windows.list_windows()
     lines = [w.label() for w in wins[:30]]
@@ -256,6 +379,13 @@ def register_os_tools(registry: Registry) -> None:
         name="os_close_window", description="Close an open window or app by part of its title or name.",
         params=CloseParams, layer="os", risk="low", run=close_window, verify=verify_close_window,
         idempotent=False, needs_confirm=_close_needs_confirm))
+    registry.register(Tool(
+        name="os_move_window", description="Move a window to another monitor (primary, secondary, left, right, other).",
+        params=MoveParams, layer="os", risk="low", run=move_window, verify=verify_move_window, idempotent=False))
+    registry.register(Tool(
+        name="os_arrange_window", description="Maximize, minimize, restore, or snap a window to the left/right/top/bottom half of its monitor.",
+        params=ArrangeParams, layer="os", risk="low", run=arrange_window, verify=verify_arrange_window, idempotent=False))
+    add("os_list_monitors", "List the monitors (primary, secondary, sizes).", NoParams, list_monitors, read_only_verify)
     add("os_list_windows", "List the open windows.", NoParams, list_windows, read_only_verify)
     add("os_media_key", "Play, pause, skip to next or go to previous track of the current media.", MediaKeyParams, media_key, verify_media_key)
     add("os_media_status", "Say what media is playing now and whether it is paused.", NoParams, media_status, read_only_verify)

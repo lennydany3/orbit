@@ -29,7 +29,9 @@ SYSTEM_PROMPT = (
     "Examples: \"move the music to echo\" -> api_spotify_transfer(device=<exact device name>); "
     "\"put it on my phone at 20%\" -> api_spotify_transfer(device=<phone name>, volume=20); "
     "\"close the notes\" -> os_close_window(title=\"Notepad\"); \"turn it down to 20\" -> os_set_volume(level=20); "
-    "\"what is playing\" -> os_media_status()."
+    "\"what is playing\" -> os_media_status(); "
+    "\"move brave to my secondary monitor\" -> os_move_window(title=\"Brave\", monitor=\"secondary\"); "
+    "\"put spotify on the left half\" -> os_arrange_window(title=\"Spotify\", action=\"left\")."
 )
 
 _REMEMBERED_RESULT_CHARS = 300
@@ -41,7 +43,7 @@ _CLAIMS_ACTION = re.compile(
 _ASKS_STATE = re.compile(
     r"^(?:what|whats|what's|which|tell|show|list|is|are)\b.*\b(?:windows?|playing|volume|devices?|apps?|tabs?|page|song|track|music|open)\b", re.I)
 # Tools whose success tells us what "it" means next time, and which argument names the thing.
-_SUBJECT_PARAM = {"os_open_app": "name", "os_focus_window": "title"}
+_SUBJECT_PARAM = {"os_open_app": "name", "os_focus_window": "title", "os_move_window": "title", "os_arrange_window": "title"}
 
 
 class Agent:

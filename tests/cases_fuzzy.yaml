@@ -29,3 +29,13 @@
    expect: [{tool: os_set_volume, args: {level: 60}}]}
 - {request: "i want to see the calculator", via: llm, step: 2,
    expect: [{tool: [os_focus_window, os_open_app], args: {}}]}
+- {request: "can you throw notepad onto my other screen", via: llm, step: 2,
+   expect: [{tool: os_move_window, args: {"title~": "Notepad"}}]}
+- {request: "spotify should be on the second monitor", via: llm, step: 2,
+   expect: [{tool: os_move_window, args: {"title~": "Spotify", "monitor~": "second"}}]}
+- {request: "make the calculator fill the whole screen", via: llm, step: 2,
+   expect: [{tool: os_arrange_window, args: {"title~": "Calculator", action: maximize}}]}
+- {request: "get the clock out of the way", via: llm, step: 2,
+   expect: [{tool: os_arrange_window, args: {"title~": "Clock", action: minimize}}]}
+- {request: "i want brave on the left half", via: llm, step: 2,
+   expect: [{tool: os_arrange_window, args: {"title~": "Brave", action: left}}]}

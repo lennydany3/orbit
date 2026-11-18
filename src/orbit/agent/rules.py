@@ -42,7 +42,7 @@ _VERB = r"(?:please )?(?:open|go to|visit|launch)"
 
 
 # --- Spotify devices: "switch playback to echo with 30% volume" = move playback, then set that device's volume ---
-_DEV = r"(?P<dev>(?!(?:again|it|that|this|next|previous|prev|something|music|the music)\b)[\w .'-]+?)"
+_DEV = r"(?P<dev>(?!(?:again|it|that|this|next|previous|prev|something|music|the music)\b)(?![\w .'-]*\b(?:monitor|screen|display|half|side)\b)[\w .'-]+?)"
 _DEV_TAIL = (
     r"(?:\s+(?:with|at|and)\s+(?:the\s+)?(?:volume\s+(?:at|to|of)\s+)?(?P<n>\d{1,3})\s*(?:%|percent)?(?:\s+volume)?(?:\s+on it)?)?"
     r"(?:\s+instead of [\w .'-]+)?"
@@ -63,6 +63,17 @@ _TRANSFER_EXPLICIT = re.compile(
 # Only right after a Spotify request, because "switch to chrome" normally means a window.
 _TRANSFER_CONTEXT = re.compile(
     rf"^(?:switch to|move to|go to|change to|try|use|play on|play it on|send it to|put it on|cast to)\s+(?:the\s+)?{_DEV}{_DEV_TAIL}$", re.I)
+
+# "move brave to my secondary monitor" / "send spotify to the other screen" / "put chrome on monitor 2"
+_MON = (r"(?:primary|main|secondary|second|other|another|next|external|first|2nd|1st|\d|(?:left|right)\s+(?:monitor|screen|display)"
+        r"|(?:monitor|screen|display)\s+\d)(?:\s+(?:monitor|screen|display))?")
+_ACTIONS = {"max": "maximize", "min": "minimize", "res": "restore"}
+_MOVE_TO_MONITOR = re.compile(
+    rf"^(?:move|put|send|shift|drag|take|bring)\s+(?:the\s+|my\s+)?(?!(?:it|that|this|them)\b)(?P<t>[\w .+&'-]+?)(?:\s+(?:app|window))?\s+"
+    rf"(?:to|onto|on|over to)\s+(?:the\s+|my\s+)?(?P<mon>{_MON})$", re.I)
+_SNAP = re.compile(
+    r"^(?:snap|put|move|send|dock)\s+(?:the\s+|my\s+)?(?!(?:it|that|this|them)\b)(?P<t>[\w .+&'-]+?)(?:\s+(?:app|window))?\s+(?:to|on|onto|at)\s+(?:the\s+)?"
+    r"(?P<side>left|right|top|bottom)(?: half| side| of the screen)?$", re.I)
 
 # (rule name, pattern, builder). Patterns are matched against the whole sentence, case-insensitively.
 # Anything with extra clauses ("open X and play Y") deliberately does not match and goes to the model.
@@ -101,6 +112,10 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
      lambda m: ("os_set_volume", {"level": int(m["n"])})),
     ("volume-step", re.compile(rf"^(?:turn )?{_THE}volume (?P<dir>up|down)$|^turn it (?P<dir2>up|down)$", re.I),
      lambda m: ("os_change_volume", {"delta": 10 if (m["dir"] or m["dir2"]).lower() == "up" else -10})),
+    ("move-window", _MOVE_TO_MONITOR, lambda m: ("os_move_window", {"title": m["t"].strip().title(), "monitor": m["mon"].strip().lower()})),
+    ("arrange-state", re.compile(r"^(?P<act>maximi[sz]e|minimi[sz]e|restore)\s+(?:the\s+|my\s+)?(?!(?:it|that|this|them|window|app)$)(?P<t>[\w .+&'-]+?)(?: (?:app|window))?$", re.I),
+     lambda m: ("os_arrange_window", {"title": m["t"].strip().title(), "action": _ACTIONS[m["act"][:3].lower()]})),
+    ("arrange-snap", _SNAP, lambda m: ("os_arrange_window", {"title": m["t"].strip().title(), "action": m["side"].lower()})),
     ("close-window", re.compile(r"^(?:please )?close\s+(?:the )?(?!(?:it|that|this|them|window|app|tab|both|all|everything|everything i opened|them all|all of them|both of them)$)(?P<t>[\w .+&'-]+?)(?: (?:app|window))?$", re.I),
      lambda m: ("os_close_window", {"title": m["t"].strip().title()})),
     ("mute", re.compile(r"^(?P<un>un)?mute(?: the (?:sound|volume|audio))?$", re.I),
@@ -132,14 +147,21 @@ _ON_PAGE = r"(?:in|on)\s+(?:the\s+)?(?:youtube|github|google|this page|the page|
 _BROWSER_HEAD = re.compile(rf"^(?:{_IN_BROWSER}|{_ON_PAGE}),?\s+(?=(?:click|press|tap|select)\b)|^{_IN_BROWSER},?\s+", re.I)  # "in brave open my github", "in youtube click X"
 _BROWSER_TAIL = re.compile(rf"\s+{_IN_BROWSER}$", re.I)         # "open my github in brave"
 _FILLER_TAIL = re.compile(r"(?:,?\s*(?:please|pls|for me|thanks|thank you))?[\s?.!]*$", re.I)
+_PRONOUN_MOVE = re.compile(rf"^(?:move|put|send|shift|bring)\s+(?:it|that|this)\s+(?:to|onto|on|over to)\s+(?:the\s+|my\s+)?(?P<mon>{_MON})$", re.I)
+_PRONOUN_ARRANGE = re.compile(r"^(?P<act>maximi[sz]e|minimi[sz]e|restore)\s+(?:it|that|this)$", re.I)
 _PRONOUN_CLOSE = re.compile(r"^close (?:it|that|this)$", re.I)
 _PLURAL_CLOSE = re.compile(r"^close (?:both|them|them all|all|all of them|both of them|everything)(?: i opened)?$", re.I)
 _PRONOUN_OPEN = re.compile(r"^(?:(?:re)?open|launch|start) (?:it|that|this|them)(?: again)?$|^(?:re)?open again$", re.I)
 
 
+# "now brave is in primary monitor move it to secondary monitor": the leading statement is background, the command follows
+_STATEMENT_HEAD = re.compile(r"^(?:now|ok|okay|so|and|well)?\s*[\w .'-]+?\s+(?:is|are)\s+(?:now\s+)?(?:in|on|at)\s+[\w .'-]+?,?\s+(?=(?:move|put|send|shift|maximi[sz]e|minimi[sz]e|snap|close|open)\b)", re.I)
+
+
 def normalize(text: str) -> str:
     """Drop polite filler and "in brave": Orbit has one browser (set with --browser), so the words add nothing."""
     text = _FILLER_HEAD.sub("", text.strip())
+    text = _STATEMENT_HEAD.sub("", text)
     text = _BROWSER_HEAD.sub("", _FILLER_HEAD.sub("", text))
     text = _FILLER_TAIL.sub("", text).strip()
     return _BROWSER_TAIL.sub("", text).strip()
@@ -189,6 +211,14 @@ def match(text: str, subject: str | None = None, closed: str | None = None, spot
         first, *rest = subjects
         return RuleMatch(rule="close-them", tool="os_close_window", args={"title": first},
                          then=[("os_close_window", {"title": name}) for name in rest])
+    if subject:
+        m = _PRONOUN_MOVE.match(text)
+        if m:
+            return RuleMatch(rule="move-it", tool="os_move_window", args={"title": subject, "monitor": m["mon"].strip().lower()})
+        m = _PRONOUN_ARRANGE.match(text)
+        if m:
+            return RuleMatch(rule="arrange-it", tool="os_arrange_window",
+                             args={"title": subject, "action": _ACTIONS[m["act"][:3].lower()]})
     if (subject or closed) and _PRONOUN_OPEN.match(text):
         return RuleMatch(rule="open-it", tool="os_open_app", args={"name": subject or closed})
     if spotify_active:

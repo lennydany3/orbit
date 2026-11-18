@@ -159,3 +159,54 @@ def test_click_goes_to_the_click_tool_not_the_model(text, target):
 
 def test_click_it_is_left_to_the_model():
     assert rules.match("click it") is None
+
+
+@pytest.mark.parametrize("text, title, monitor", [
+    ("move brave to my secondary monitor", "Brave", "secondary monitor"),
+    ("send spotify to the other screen", "Spotify", "other screen"),     # not a Spotify DEVICE: a window
+    ("put chrome on monitor 2", "Chrome", "monitor 2"),
+    ("can you move the clock app to the left monitor", "Clock", "left monitor"),
+    ("move notepad to the primary display", "Notepad", "primary display"),
+    ("shift brave to my second monitor please", "Brave", "second monitor"),
+])
+def test_move_a_window_to_another_monitor(text, title, monitor):
+    m = rules.match(text)
+    assert m and (m.tool, m.args) == ("os_move_window", {"title": title, "monitor": monitor})
+
+
+@pytest.mark.parametrize("text, title, action", [
+    ("maximize brave", "Brave", "maximize"), ("minimise spotify", "Spotify", "minimize"), ("restore the calculator", "Calculator", "restore"),
+    ("snap chrome to the left half", "Chrome", "left"), ("put notepad on the right side", "Notepad", "right"),
+    ("move brave to the left", "Brave", "left"),                      # no word "monitor": a half of the screen
+    ("dock the clock to the top", "Clock", "top"),
+])
+def test_arrange_a_window(text, title, action):
+    m = rules.match(text)
+    assert m and (m.tool, m.args) == ("os_arrange_window", {"title": title, "action": action})
+
+
+def test_move_it_and_maximize_it_use_the_last_window_mentioned():
+    assert rules.match("move it to the secondary monitor") is None
+    m = rules.match("move it to the secondary monitor", subject="Brave")
+    assert m and m.args == {"title": "Brave", "monitor": "secondary monitor"}
+    m = rules.match("maximize it", subject="Brave")
+    assert m and m.args == {"title": "Brave", "action": "maximize"}
+
+
+def test_spotify_transfer_to_a_device_is_unchanged():
+    assert rules.match("move the music to echo").tool == "api_spotify_transfer"
+    assert rules.match("switch playback to my speaker").tool == "api_spotify_transfer"
+
+
+@pytest.mark.parametrize("text", [
+    "now brave is in primary monitor move it to secondary monitor",
+    "ok brave is on my primary screen, move it to the secondary screen",
+])
+def test_a_leading_statement_is_background_and_the_command_still_runs(text):
+    m = rules.match(text, subject="Brave")
+    assert m and (m.tool, m.args["title"]) == ("os_move_window", "Brave") and "secondary" in m.args["monitor"]
+
+
+def test_statement_stripping_does_not_swallow_real_commands():
+    assert rules.match("open spotify").tool == "os_open_app"
+    assert rules.match("close the clock").tool == "os_close_window"
