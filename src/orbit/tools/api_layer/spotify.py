@@ -267,7 +267,7 @@ def play(p: PlayParams) -> ToolResult:
             found = client.call("GET", "/search", params={"q": query, "type": "track,artist,album,playlist", "limit": 5})
             target = choose_target(query, found or {})
             if target is None:
-                return ToolResult.failure(f"nothing found on Spotify for '{query}'", retryable=False)
+                return ToolResult.failure(f"nothing found on Spotify for '{query}'", retryable=False, not_found=True)
         try:
             _start_playback(client, params, target.body, started)
         except SpotifyError as e:
@@ -481,7 +481,7 @@ def set_device_volume(p: VolumeParams) -> ToolResult:
             state = _player(client)
             device = state["device"] if state else None
         if device is None:
-            return ToolResult.failure(f"no Spotify device matches '{p.device or 'the playing one'}'", retryable=False)
+            return ToolResult.failure(f"no Spotify device matches '{p.device or 'the playing one'}'", retryable=False, not_found=True)
         client.call("PUT", "/me/player/volume", params={"volume_percent": p.level, "device_id": device["id"]})
     except SpotifyError as e:
         return _fail(e)
@@ -534,8 +534,8 @@ def register_spotify_tools(registry: Registry) -> None:
         registry.register(Tool(name=name, description=description, params=params, layer="api", risk="low", run=run, verify=verify, **kw))
 
     add("api_spotify_play", "Play a song, artist, album or playlist on Spotify; 'my favourite music' plays liked songs.", PlayParams, play, verify_play)
-    add("api_spotify_transfer", "Move Spotify playback to a device, 'this' meaning this computer.", TransferParams, transfer, verify_transfer)
-    add("api_spotify_volume", "Set the volume of a Spotify device (a speaker, phone or this PC's Spotify app).", VolumeParams, set_device_volume, verify_device_volume)
+    add("api_spotify_transfer", "Move Spotify playback to a device (\"put the music on the speaker\", \"play it on my phone\"), optionally setting its volume; 'this' = this computer.", TransferParams, transfer, verify_transfer)
+    add("api_spotify_volume", "ONLY change the volume of a Spotify device; it does not move playback (use api_spotify_transfer for that).", VolumeParams, set_device_volume, verify_device_volume)
     add("api_spotify_control", "Play, pause, next or previous on Spotify, on whichever device is playing.", ControlParams, control, verify_control)
     add("api_spotify_devices", "List the devices Spotify can play on.", NoParams, devices, read_only_verify)
     add("api_spotify_now_playing", "Say what is playing on Spotify right now.", NoParams, now_playing, read_only_verify)

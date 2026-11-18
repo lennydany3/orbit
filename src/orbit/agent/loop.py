@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from .. import config
 from ..llm.base import LLM, LLMError
 from ..tools.base import Registry, ToolResult
-from . import rules
+from . import context, rescue, rules
 from .router import Log, Router
 from .safety import Safety
 
@@ -23,7 +23,13 @@ SYSTEM_PROMPT = (
     "If a request has several parts, do them one after another with separate tool calls, and pass only the "
     "device or app name as the name (never extra words like a volume). "
     "Earlier messages in this chat are context: use them to understand words like 'it', 'that' or 'again'. "
-    "When the task is done, or if no tool fits, answer in one short sentence."
+    "When the task is done, or if no tool fits, answer in one short sentence. "
+    "The user types casually and loosely: work out what they mean (\"echo\" = the Echo speaker in the facts, \"the notes\" = "
+    "the Notepad window) and use the exact names from the facts. "
+    "Examples: \"move the music to echo\" -> api_spotify_transfer(device=<exact device name>); "
+    "\"put it on my phone at 20%\" -> api_spotify_transfer(device=<phone name>, volume=20); "
+    "\"close the notes\" -> os_close_window(title=\"Notepad\"); \"turn it down to 20\" -> os_set_volume(level=20); "
+    "\"what is playing\" -> os_media_status()."
 )
 
 _REMEMBERED_RESULT_CHARS = 300
@@ -48,6 +54,7 @@ class Agent:
         log: Log,
         max_steps: int = config.MAX_STEPS,
         max_failures: int = config.MAX_CONSECUTIVE_FAILURES,
+        facts_provider: context.FactsProvider | None = None,
     ):
         self.llm = llm
         self.registry = registry
@@ -56,6 +63,8 @@ class Agent:
         self.log = log
         self.max_steps = max_steps
         self.max_failures = max_failures
+        # What the model is told about the PC right now (real device/window names). Replaceable for tests and evals.
+        self.facts_provider = facts_provider or (lambda text, previous: context.gather(self.registry, text, previous))
         self.turns: list[list[dict]] = []  # short-term memory: one list of messages per earlier request
         self.last_request = ""
         self.last_subject: str | None = None  # app/window Orbit last opened or focused: what "it" means
@@ -133,10 +142,11 @@ class Agent:
         if m:
             self.log("rule", f"'{m.rule}' matched, no model call")
             ok, reply, not_found = self._run_rule(m)
-            if ok or not (m.soft and not_found):
+            if ok or not (not_found and self.llm is not None):
                 return self._finish(user, reply)
-            # "switch to chrome" right after a Spotify request: there is no Spotify device called that, so it meant a window.
-            self.log("rule", f"'{m.rule}' was only a guess from context and nothing matched; asking the model instead")
+            # The words did not match any real app, window or device ("close the notes", "switch to chrome" after a Spotify
+            # request). Rules only match literally; the model has the real names and can work out what was meant.
+            self.log("rule", f"'{m.rule}' found nothing called that; asking the model, which can see the real names")
         if self.llm is None:
             self._part_failed = True
             return "No rule matches that, and the model is switched off (--no-llm)."
@@ -162,18 +172,42 @@ class Agent:
             said.append(result.summary)
         return True, "; ".join(said), False
 
-    def _llm_loop(self, text: str, previous: str = "") -> str:
+    def prepare(self, text: str, previous: str = "") -> tuple[list[dict], list[dict], list[dict]]:
+        """Everything the model gets for one request: (messages, tool schemas, this turn's messages)."""
         # Rank tools using this request plus the previous one, so a follow-up like "close it" keeps the right tools.
         tools = self.registry.relevant(f"{text} {previous}", config.MAX_TOOLS_PER_REQUEST)
         schemas = [t.schema() for t in tools]
+        facts = self.facts_provider(text, previous)
+        if facts:
+            self.log("context", facts.splitlines()[1:] and " | ".join(line[2:] for line in facts.splitlines()[1:]))
         turn: list[dict] = [{"role": "user", "content": text}]
-        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}, *[m for t in self.turns for m in t], *turn]
+        system = SYSTEM_PROMPT + ("\n\n" + facts if facts else "")
+        messages = [{"role": "system", "content": system}, *[m for t in self.turns for m in t], *turn]
+        return messages, schemas, turn
+
+    def rescue(self, resp):
+        """If the model wrote a tool call as text ("os_set_volume(level=60)"), turn it into a real call."""
+        if not resp.tool_calls:
+            calls = rescue.parse_text_calls(resp.content, {t.name for t in self.registry.exposed()})
+            if calls:
+                self.log("warn", "the model wrote its tool call as text instead of making it; running it")
+                resp.tool_calls, resp.content = calls, ""
+        return resp
+
+    def _llm_loop(self, text: str, previous: str = "") -> str:
+        messages, schemas, turn = self.prepare(text, previous)
         failures = 0
         last_error = ""
         nudged = False
+        asked_for_an_answer = False
         for step in range(1, self.max_steps + 1):
-            resp = self.llm.chat(messages, schemas)
+            resp = self.rescue(self.llm.chat(messages, schemas))
             self.log("llm", f"step {step}/{self.max_steps}: {len(resp.tool_calls)} tool call(s) in {resp.elapsed_s:.1f}s")
+            if not resp.tool_calls and not resp.content.strip() and not asked_for_an_answer:
+                asked_for_an_answer = True  # an empty reply happens with the small model: ask once more
+                self.log("warn", "the model gave an empty reply; asking again")
+                messages.append({"role": "user", "content": "You gave no answer. Call the right tool now, or say plainly that you cannot do it."})
+                continue
             if not resp.tool_calls:
                 reply = resp.content.strip() or "(the model gave no reply)"
                 if len(turn) == 1 and (_CLAIMS_ACTION.search(reply) or _ASKS_STATE.search(text)):
@@ -212,6 +246,23 @@ class Agent:
                         return self._finish(turn, f"I stopped after {failures} failed attempts in a row. Last error: {last_error}")
         return self._finish(turn, f"I stopped: reached the step limit ({self.max_steps}) before the task finished.")
 
+    def _without_invented_numbers(self, tool, args: dict) -> dict:
+        """A small model fills optional numbers nobody asked for (a transfer "at volume 100" for a speaker in someone's
+        living room). An optional number that is not in the user's request is dropped."""
+        wanted = set(re.findall(r"\d+", self.last_request))
+        kept = {}
+        for key, value in args.items():
+            field = tool.params.model_fields.get(key)
+            invented = (
+                field is not None and not field.is_required() and isinstance(value, (int, float))
+                and not isinstance(value, bool) and str(int(value)) not in wanted
+            )
+            if invented:
+                self.log("warn", f"dropped {key}={value}: you did not ask for that number")
+            else:
+                kept[key] = value
+        return kept
+
     def execute(self, name: str, args: dict) -> ToolResult:
         """validate -> print -> safety gate -> router (run + verify + retry + fallback)."""
         tool = self.registry.get_exposed(name)
@@ -223,6 +274,7 @@ class Agent:
             self._part_failed = True
             return ToolResult.failure(error)
 
+        args = self._without_invented_numbers(tool, args)
         try:
             params = tool.params.model_validate(args)
         except ValidationError as e:

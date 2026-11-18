@@ -1,0 +1,31 @@
+# Loose, casual requests where the model must work out WHICH real thing is meant ("echo" = "Lenny's Echo Pop").
+# Scored by tests/eval_llm.py --file cases_fuzzy.yaml against fixed facts (see STATIC_FACTS there), with and without
+# the facts, to measure what giving the model real names buys. An arg key ending in ~ means "contains" (case-insensitive).
+- {request: "transfer playback to echo", via: llm, step: 4,
+   expect: [{tool: api_spotify_transfer, args: {"device~": "echo"}}]}
+- {request: "put the music on my speaker", via: llm, step: 4,
+   expect: [{tool: api_spotify_transfer, args: {"device~": "echo"}}]}
+- {request: "play it on my phone", via: llm, step: 4,
+   expect: [{tool: api_spotify_transfer, args: {"device~": "nothing phone"}}]}
+- {request: "move playback to echo at 30 percent", via: llm, step: 4,
+   expect: [{tool: api_spotify_transfer, args: {"device~": "echo", volume: 30}}]}
+- {request: "put it on the echo and make it quiet, 15%", via: llm, step: 4,
+   expect: [{tool: api_spotify_transfer, args: {"device~": "echo", volume: 15}}]}
+- {request: "which devices can spotify use", via: llm, step: 4,
+   expect: [{tool: api_spotify_devices, args: {}}]}
+- {request: "what's playing right now", via: llm, step: 4,
+   expect: [{tool: [os_media_status, api_spotify_now_playing], args: {}}]}
+- {request: "close the notes", via: llm, step: 2,
+   expect: [{tool: os_close_window, args: {"title~": "Notepad"}}]}
+- {request: "bring up the notes window", via: llm, step: 2,
+   expect: [{tool: os_focus_window, args: {"title~": "Notepad"}}]}
+- {request: "switch to the clock", via: llm, step: 2,
+   expect: [{tool: os_focus_window, args: {"title~": "Clock"}}]}
+- {request: "shut the speed test", via: llm, step: 2,
+   expect: [{tool: os_close_window, args: {"title~": "Speedtest"}}]}
+- {request: "turn it down to 20", via: llm, step: 2,
+   expect: [{tool: os_set_volume, args: {level: 20}}]}
+- {request: "make it louder, like 60", via: llm, step: 2,
+   expect: [{tool: os_set_volume, args: {level: 60}}]}
+- {request: "i want to see the calculator", via: llm, step: 2,
+   expect: [{tool: [os_focus_window, os_open_app], args: {}}]}

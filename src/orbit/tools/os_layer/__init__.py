@@ -49,7 +49,7 @@ def _resolve(name: str) -> tuple[apps.App | None, str]:
 def open_app(p: OpenAppParams) -> ToolResult:
     app, err = _resolve(p.name)
     if app is None:
-        return ToolResult.failure(err, retryable=False)
+        return ToolResult.failure(err, retryable=False, not_found=True)
     existing = _app_windows(app)
     if existing:
         windows.focus(existing[0].hwnd)
@@ -90,7 +90,7 @@ def focus_window(p: FocusParams) -> ToolResult:
         open_now = ", ".join(repr(w.title[:40]) for w in windows.list_windows()[:8])
         return ToolResult.failure(
             f"no window matches '{p.title}'. Open windows include: {open_now}. "
-            "If one of these is what the user meant, call again with that title.", retryable=False)
+            "If one of these is what the user meant, call again with that title.", retryable=False, not_found=True)
     windows.focus(matches[0].hwnd)
     return ToolResult.success(f"focused '{matches[0].title}'")
 
@@ -121,7 +121,7 @@ def close_window(p: CloseParams) -> ToolResult:
         open_now = ", ".join(repr(w.title[:40]) for w in windows.list_windows()[:8])
         return ToolResult.failure(
             f"no open window matches '{p.title}'. Open windows include: {open_now}. "
-            "If one of these is what the user meant, call again with that title.", retryable=False)
+            "If one of these is what the user meant, call again with that title.", retryable=False, not_found=True)
     target = matches[0]
     windows.close(target.hwnd)
     result = ToolResult.success(f"asked '{target.title}' to close")

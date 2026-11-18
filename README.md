@@ -40,6 +40,15 @@ The router prefers the API layer over OS and browser. Login uses PKCE, so there 
 
 Orbit opens its own visible Chrome window with a separate profile in `.browser-profile/` (gitignored; your real Chrome and tabs are never touched). It stays open between requests and closes when Orbit exits. Log in to sites once in that window and the login is kept. Only http(s) links are opened. Clicking a button whose text looks risky (buy, send, delete, pay...) asks you first. Web search uses DuckDuckGo.
 
+## Making the small model smarter
+
+A 7B model does not know that "echo" means "Lenny's Echo Pop". Orbit helps it in code instead of hoping:
+
+- **Facts first.** Before the model answers, Orbit looks up what the request could need (Spotify devices, open window titles, what is playing, the volume) with the same read-only tools and puts the real names in front of it. Only relevant facts are fetched, so it stays small and fast.
+- **Rules that find nothing hand over to the model.** "close the notes" fails the literal rule (no window called "Notes"), so the model, which can see the windows, picks the Notepad one.
+- **Repairs.** A tool call written as text (`os_set_volume(level=60)`) is run as a real call; a garbled tool name is corrected when exactly one real name is close; an empty reply is asked again; a reply that describes an action or invents data without calling a tool is nudged, then flagged; an optional number the user never said (a speaker "at volume 100") is dropped.
+- **Measure, don't guess.** `python tests/eval_llm.py --file cases_fuzzy.yaml` scores loose requests ("put the music on my speaker", "turn it down to 20") with and without the facts (`--no-facts`).
+
 ## Several commands in one sentence
 
 "open spotify and play my fav music", "close the clock and the calculator", "open calculator and clock then close both" and "open the clock app and tell me what windows are open" are split into separate requests and done one at a time, in order. Each part uses a fast rule if one fits, otherwise the model sees just that part (a small model is far more reliable on one thing at a time). "it" and "both" refer to what the earlier parts opened. The chain stops at the first part that fails and says so. A sentence is only split when every part starts like a request, so "play rock and roll" or "search cats and dogs" stay whole.

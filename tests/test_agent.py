@@ -1,4 +1,5 @@
 from conftest import ScriptedLLM, call
+from orbit.tools.base import ToolResult
 from orbit.llm.base import LLMError, LLMResponse
 
 
@@ -397,3 +398,74 @@ def test_chitchat_is_not_nudged(make_agent):
     llm = ScriptedLLM(LLMResponse(content="I am Orbit."))
     reply = make_agent(llm).handle("who are you")
     assert reply == "I am Orbit." and len(llm.calls) == 1
+
+
+# ---------- making the small model smarter ----------
+def test_a_tool_call_written_as_text_is_still_run(make_agent):
+    llm = ScriptedLLM(LLMResponse(content='fake_echo(text="hello")'), LLMResponse(content="Done."))
+    agent = make_agent(llm)
+    assert agent.handle("say hello back") == "Done."
+    assert "echoed 'hello'" in llm.calls[1][-1]["content"]  # the call really ran and its result went back to the model
+
+
+def test_empty_reply_is_asked_again_once(make_agent):
+    llm = ScriptedLLM(LLMResponse(content=""), call("fake_echo", text="x"), LLMResponse(content="Done."))
+    assert make_agent(llm).handle("say x back please") == "Done."
+    assert "You gave no answer" in llm.calls[1][-1]["content"]
+
+
+def test_facts_about_the_pc_are_given_to_the_model(make_agent):
+    llm = ScriptedLLM(LLMResponse(content="ok"))
+    agent = make_agent(llm, facts_provider=lambda text, prev: "Facts:\n- Spotify devices: Lenny's Echo Pop (Speaker)")
+    agent.handle("what is going on")
+    system = llm.calls[0][0]["content"]
+    assert system.startswith("You are") and "Lenny's Echo Pop (Speaker)" in system
+
+
+def test_facts_are_not_kept_in_memory_between_requests(make_agent):
+    llm = ScriptedLLM(LLMResponse(content="a"), LLMResponse(content="b"))
+    agent = make_agent(llm, facts_provider=lambda text, prev: "Facts:\n- Open windows: Clock")
+    agent.handle("hello one")
+    agent.handle("hello two")
+    assert sum("Open windows: Clock" in m["content"] for m in llm.calls[1]) == 1  # only the fresh system block
+
+
+def test_a_number_the_user_never_said_is_dropped(logs):
+    from pydantic import BaseModel
+    from orbit.agent.loop import Agent
+    from orbit.agent.router import Router
+    from orbit.agent.safety import Safety
+    from orbit.tools.base import Registry, Tool, ToolResult
+
+    class Transfer(BaseModel):
+        device: str = "this"
+        volume: int | None = None
+
+    seen = []
+    reg = Registry()
+    reg.register(Tool("api_spotify_transfer", "d", Transfer, "api", "low", lambda p: seen.append((p.device, p.volume)) or ToolResult.success("moved")))
+    log = lambda k, m: logs.append((k, m))  # noqa: E731
+    llm = ScriptedLLM(call("api_spotify_transfer", device="Echo", volume=100), LLMResponse(content="Moved."),
+                      call("api_spotify_transfer", device="Echo", volume=30), LLMResponse(content="Moved."))
+    agent = Agent(llm, reg, Router(log), Safety(), log)
+    agent.handle("put the music on the echo please")
+    agent.handle("put the music on the echo at 30 percent")
+    assert seen == [("Echo", None), ("Echo", 30)] and "warn" in [k for k, _ in logs]
+
+
+def test_a_rule_that_finds_nothing_with_that_exact_name_lets_the_model_work_it_out(logs):
+    agent, done = _chain_agent(logs)
+    agent.llm = ScriptedLLM(call("os_close_window", title="Clock"), LLMResponse(content="Closed the clock."))
+    tool = agent.registry.get_exposed("os_close_window")
+    real_run = tool.run
+    tool.run = lambda p: ToolResult.failure("no open window matches 'Notes'", retryable=False, not_found=True) if p.title == "Notes" else real_run(p)
+    reply = agent.handle("close the notes")
+    assert done == [("close", "Clock")] and reply == "Closed the clock." and len(agent.llm.calls) == 2
+
+
+def test_a_rule_that_finds_nothing_is_reported_as_is_when_there_is_no_model(logs):
+    agent, done = _chain_agent(logs)
+    agent.llm = None
+    tool = agent.registry.get_exposed("os_close_window")
+    tool.run = lambda p: ToolResult.failure("no open window matches 'Notes'", retryable=False, not_found=True)
+    assert "no open window matches 'Notes'" in agent.handle("close the notes")
