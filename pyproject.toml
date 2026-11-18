@@ -9,6 +9,7 @@ description = "Orbit: a local desktop-automation assistant (text CLI)."
 requires-python = ">=3.12"
 dependencies = [
     "ollama",
+    "httpx",
     "pydantic>=2",
     "playwright",
     "pycaw",

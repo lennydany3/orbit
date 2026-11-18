@@ -3,7 +3,7 @@
 A local assistant that operates your Windows PC from plain-language text requests
 ("open Spotify", "volume 30", "open my GitHub"). Runs on a local model (Qwen2.5 7B via Ollama), no paid API.
 
-**Status: Step 3 of 5 (browser layer done).** Open apps, windows, media keys, volume, websites, YouTube. The Spotify API (Step 4) comes next.
+**Status: Step 4 of 5 (Spotify API done).** Open apps, windows, media keys, volume, websites, YouTube, and Spotify search/play/transfer. Vision fallback (Step 5) is optional and not built.
 
 ## Setup (Windows 11, Python 3.12)
 
@@ -14,6 +14,7 @@ A local assistant that operates your Windows PC from plain-language text request
 5. `pip install -e ".[dev]"`
 6. `python -m orbit` (add `--no-llm` for rules only; `python -m orbit "volume 30"` runs one request; `--fake-tools` adds the Step 1 test tools).
 7. `pytest` to run the tests.
+8. Optional, Spotify: create an app at developer.spotify.com (redirect URI `http://127.0.0.1:8888/callback`, Web API), add your account under User Management, then `setx SPOTIFY_CLIENT_ID "<client id>"`, open a new terminal and run `python -m orbit auth spotify` once.
 
 ## How it works
 
@@ -31,11 +32,20 @@ text -> fast rules (no model) --match--> tool call
 - Ctrl+C stops a running request. Step cap: 8 model round-trips. Stops after 3 failed tool calls in a row.
 - Name lives in `src/orbit/config.py` (`APP_NAME`). Limits and the model name are there too.
 
+## Spotify (API layer)
+
+The router prefers the API layer over OS and browser. Login uses PKCE, so there is no client secret anywhere; the refresh token lives in the Windows Credential Manager (entry `Orbit/spotify-refresh-token`), never in a file or the logs. Tools: play (song, artist, album, playlist, or "my favourite music" = your liked songs), transfer playback ("this" = the Spotify app on this PC, matched by computer name), list devices, now playing. Spotify tools only appear when `SPOTIFY_CLIENT_ID` is set.
+
 ## Browser layer
 
 Orbit opens its own visible Chrome window with a separate profile in `.browser-profile/` (gitignored; your real Chrome and tabs are never touched). It stays open between requests and closes when Orbit exits. Log in to sites once in that window and the login is kept. Only http(s) links are opened. Clicking a button whose text looks risky (buy, send, delete, pay...) asks you first. Web search uses DuckDuckGo.
 
 ## Known limits (honest list)
+
+- Spotify needs Premium for play/transfer. In development mode only accounts listed under User Management (max 5) can log in.
+- Spotify must be running on the PC for it to appear as a device; the multi-step request opens it first. Spotify's own volume is separate from Windows volume.
+- Playlist playback can only be confirmed as "something is playing", not that it came from that playlist. "Favourite music" means your liked songs (the 50 most recent).
+- Spotify's API sometimes does not report what context is playing, so artist/album playback is verified from the current track.
 
 - YouTube "playing" is verified from the video element, so a pre-roll ad counts as playing. Cookie-consent pages (EU) must be accepted once by hand.
 - `browser_click` finds things by visible text and can't be retried automatically (a second click could undo the first); if nothing visibly changes it reports failure.

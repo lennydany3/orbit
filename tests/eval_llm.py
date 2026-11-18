@@ -21,6 +21,7 @@ from orbit.llm.base import LLMError  # noqa: E402
 from orbit.llm.ollama_llm import OllamaLLM  # noqa: E402
 from orbit.tools.base import Registry  # noqa: E402
 from orbit.tools.fake import register_fake_tools  # noqa: E402
+from orbit.tools.api_layer.spotify import register_spotify_tools  # noqa: E402
 from orbit.tools.browser_layer import register_browser_tools  # noqa: E402
 from orbit.tools.os_layer import register_os_tools  # noqa: E402
 
@@ -38,7 +39,8 @@ def main() -> int:
     registry = Registry()
     register_fake_tools(registry)
     register_os_tools(registry)
-    register_browser_tools(registry)  # Step 4: register the api tools here too
+    register_browser_tools(registry)
+    register_spotify_tools(registry)
     llm = OllamaLLM(model=args.model)
 
     passed = total = 0

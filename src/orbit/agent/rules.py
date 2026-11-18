@@ -32,6 +32,13 @@ _VERB = r"(?:please )?(?:open|go to|visit|launch)"
 # (rule name, pattern, builder). Patterns are matched against the whole sentence, case-insensitively.
 # Anything with extra clauses ("open X and play Y") deliberately does not match and goes to the model.
 RULES: list[tuple[str, re.Pattern, Builder]] = [
+    # --- Spotify (API layer; only used if connected) ---
+    ("spotify-liked", re.compile(r"^play (?:my )?(?:favou?rite(?:s| music| songs)?|liked songs|saved songs)(?: on spotify)?$", re.I),
+     lambda m: ("api_spotify_play", {"query": "liked songs"})),
+    ("spotify-play", re.compile(r"^(?:play|put on)\s+(?P<q>.+?)\s+on spotify$", re.I),
+     lambda m: ("api_spotify_play", {"query": m["q"]})),
+    ("spotify-transfer", re.compile(r"^(?:move|transfer|switch|send)\s+(?:the )?(?:playback|music|spotify)\s+to\s+(?:this|my)\s+(?:device|pc|computer|laptop)$", re.I),
+     lambda m: ("api_spotify_transfer", {"device": "this"})),
     # --- browser layer (before open-app: "open github" is a website, not an installed app) ---
     ("open-site", re.compile(rf"^{_VERB}\s+(?:my |the )?(?P<site>{_SITE_NAMES})(?: (?:website|site|page|account))?$", re.I),
      lambda m: ("browser_open", {"url": SITES[m["site"].lower()]})),

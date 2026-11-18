@@ -55,7 +55,15 @@
    expect: [{tool: browser_youtube_play, args: {query: "cats"}}, {tool: browser_fullscreen, args: {}}]}
 
 # ---- Step 4: API layer (needs Spotify credentials) ----
+- {request: "play Daft Punk on spotify", via: rules, step: 4,
+   expect: [{tool: api_spotify_play, args: {query: "Daft Punk"}}]}
+- {request: "play my favourite music", via: rules, step: 4,
+   expect: [{tool: api_spotify_play, args: {query: "liked songs"}}]}
+- {request: "move playback to this device", via: rules, step: 4,
+   expect: [{tool: api_spotify_transfer, args: {device: "this"}}]}
+- {request: "what's playing on spotify?", via: llm, step: 4,
+   expect: [{tool: api_spotify_now_playing, args: {}}]}
 - {request: "play something by Daft Punk on spotify", via: llm, step: 4,
    expect: [{tool: api_spotify_play, args: {query: "Daft Punk"}}]}
 - {request: "open spotify, play my favourite music, and move playback to this device", via: llm, step: 4,
-   expect: [{tool: api_spotify_play, args: {query: "favourite music"}}, {tool: api_spotify_transfer, args: {device: "this"}}]}
+   expect: [{tool: os_open_app, args: {name: "Spotify"}}, {tool: api_spotify_play, args: {query: "favourite music"}}, {tool: api_spotify_transfer, args: {device: "this"}}]}

@@ -8,17 +8,36 @@ from .agent.router import Router
 from .agent.safety import Safety
 from .llm.ollama_llm import OllamaLLM
 from .logging_setup import ActionLog, setup_logging
-from .tools.api_layer import register_api_tools
+from .tools.api_layer import register_api_tools, spotify_auth
 from .tools.base import Registry
 from .tools.browser_layer import register_browser_tools
 from .tools.browser_layer.session import session as browser_session
 from .tools.fake import register_fake_tools
 from .tools.os_layer import register_os_tools
 
-HELP = """Commands: help | tools | quit
+HELP = """Commands: help | tools | auth spotify | quit
 Anything else is a request. Fast rules (no model): open spotify | open github | play lofi on youtube | fullscreen | volume 30 | volume up | mute | pause | play | next | previous
 Anything else goes to the model:  switch to chrome | what's playing? | what windows are open?
 (start with --fake-tools to also get the echo/danger test tools)"""
+
+
+def run_auth(service: str) -> int:
+    """`python -m orbit auth spotify`: one-time login. The browser opens; approve there."""
+    if service != "spotify":
+        print(f"Unknown service '{service}'. Available: spotify")
+        return 2
+    client_id = spotify_auth.client_id_from_env()
+    if not client_id:
+        print(f"Set {spotify_auth.CLIENT_ID_ENV} first (your Spotify app's Client ID), then open a new terminal.")
+        return 2
+    print("Opening Spotify in your browser. Approve the request there (waiting up to 3 minutes)...")
+    try:
+        spotify_auth.authorize(client_id)
+    except spotify_auth.AuthError as e:
+        print(f"Login failed: {e}")
+        return 1
+    print("Connected. The login is stored in the Windows Credential Manager.")
+    return 0
 
 
 def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: bool = False) -> Agent:
@@ -51,6 +70,9 @@ def _main(argv: list[str] | None) -> int:
     parser.add_argument("--model", default=config.MODEL, help=f"Ollama model (default {config.MODEL})")
     args = parser.parse_args(argv)
 
+    if len(args.request) == 2 and args.request[0].lower() == "auth":
+        return run_auth(args.request[1].lower())
+
     agent = build_agent(use_llm=not args.no_llm, model=args.model, fake_tools=args.fake_tools)
 
     if args.request:
@@ -69,6 +91,9 @@ def _main(argv: list[str] | None) -> int:
             continue
         if text.lower() in ("quit", "exit"):
             return 0
+        if text.lower().startswith("auth "):
+            run_auth(text.split(None, 1)[1].strip().lower())
+            continue
         if text.lower() == "help":
             print(HELP)
             continue
