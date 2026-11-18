@@ -15,7 +15,7 @@ from .tools.browser_layer.session import session as browser_session
 from .tools.fake import register_fake_tools
 from .tools.os_layer import register_os_tools
 
-HELP = """Commands: help | tools | auth spotify | quit
+HELP = """Commands: help | tools | clear (forget the conversation) | auth spotify | quit
 Anything else is a request. Fast rules (no model): open spotify | open github | play lofi on youtube | fullscreen | volume 30 | volume up | mute | pause | play | next | previous
 Anything else goes to the model:  switch to chrome | what's playing? | what windows are open?
 (start with --fake-tools to also get the echo/danger test tools)"""
@@ -93,6 +93,10 @@ def _main(argv: list[str] | None) -> int:
             return 0
         if text.lower().startswith("auth "):
             run_auth(text.split(None, 1)[1].strip().lower())
+            continue
+        if text.lower() in ("clear", "forget"):
+            agent.forget()
+            print("  Conversation memory cleared.")
             continue
         if text.lower() == "help":
             print(HELP)

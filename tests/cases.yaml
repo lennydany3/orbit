@@ -29,6 +29,8 @@
    expect: [{tool: os_change_volume, args: {delta: 10}}]}
 - {request: "mute", via: rules, step: 2,
    expect: [{tool: os_set_mute, args: {muted: true}}]}
+- {request: "close the clock app", via: rules, step: 2,
+   expect: [{tool: os_close_window, args: {title: "Clock"}}]}
 - {request: "switch to chrome", via: llm, step: 2,
    expect: [{tool: os_focus_window, args: {title: "Chrome"}}]}
 - {request: "what windows do I have open?", via: llm, step: 2,

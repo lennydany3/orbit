@@ -61,6 +61,8 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
      lambda m: ("os_set_volume", {"level": int(m["n"])})),
     ("volume-step", re.compile(rf"^(?:turn )?{_THE}volume (?P<dir>up|down)$|^turn it (?P<dir2>up|down)$", re.I),
      lambda m: ("os_change_volume", {"delta": 10 if (m["dir"] or m["dir2"]).lower() == "up" else -10})),
+    ("close-window", re.compile(r"^(?:please )?close\s+(?:the )?(?!(?:it|that|this|them|window|app|tab)$)(?P<t>[\w .+&'-]+?)(?: (?:app|window))?$", re.I),
+     lambda m: ("os_close_window", {"title": m["t"].strip().title()})),
     ("mute", re.compile(r"^(?P<un>un)?mute(?: the (?:sound|volume|audio))?$", re.I),
      lambda m: ("os_set_mute", {"muted": not m["un"]})),
     ("pause", re.compile(rf"^(?:pause|stop){_MUSIC}$", re.I),

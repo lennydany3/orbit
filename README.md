@@ -57,5 +57,6 @@ Orbit opens its own visible Chrome window with a separate profile in `.browser-p
 - The 7B model sometimes misreads amounts ("quieter, around 20 percent" became 67%). Plain commands use rules, not the model.
 - "Works on every app" is not achievable. Games, custom-drawn UIs and admin (elevated) windows may not be controllable.
 - A 7B local model makes mistakes on vague or multi-step requests; expect 10-20 s for those. Simple commands skip the model.
-- Each request is independent: no memory between requests yet.
+- Memory is short-term: the model sees your last 6 requests (capped at about 5,000 characters) so "close it" works. It is forgotten when you quit; type `clear` to forget sooner. Rule commands like "pause" are remembered but never need memory.
+- "Close" asks the window to close like its X button (nothing is force-killed). If the app shows a "save changes?" box the window stays open and Orbit reports that. A window whose title looks unsaved (starts with `*`) asks you first. Orbit never closes its own terminal.
 - Ctrl+C during a model call takes effect when that call returns (at most the 120 s timeout).

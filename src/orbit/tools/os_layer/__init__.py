@@ -104,6 +104,39 @@ def verify_focus_window(p: FocusParams, r: ToolResult) -> VerifyResult:
     return VerifyResult(False, "the window is not in the foreground")
 
 
+class CloseParams(BaseModel):
+    title: str = Field(description="part of the window title or app name to close, e.g. Clock")
+
+
+def _closable(query: str) -> list[windows.Window]:
+    own = windows.console_hwnd()
+    return [w for w in windows.match_windows(windows.list_windows(), [query]) if w.hwnd != own]
+
+
+def close_window(p: CloseParams) -> ToolResult:
+    matches = _closable(p.title)
+    if not matches:
+        return ToolResult.failure(f"no open window matches '{p.title}'", retryable=False)
+    target = matches[0]
+    windows.close(target.hwnd)
+    result = ToolResult.success(f"asked '{target.title}' to close")
+    result.context["hwnd"] = target.hwnd
+    return result
+
+
+def verify_close_window(p: CloseParams, r: ToolResult) -> VerifyResult:
+    gone = _wait_for(lambda: all(w.hwnd != r.context["hwnd"] for w in windows.list_windows()), SETTLE_TIMEOUT_S)
+    if gone:
+        return VerifyResult(True, "the window is gone")
+    return VerifyResult(False, "the window is still open (the app may be asking to save or confirm something)")
+
+
+def _close_needs_confirm(p: CloseParams) -> bool:
+    """Titles that suggest unsaved work (Notepad and many editors mark it with '*')."""
+    matches = _closable(p.title)
+    return bool(matches) and (matches[0].title.startswith("*") or "unsaved" in matches[0].title.lower())
+
+
 def list_windows(p: NoParams) -> ToolResult:
     wins = windows.list_windows()
     lines = [w.label() for w in wins[:30]]
@@ -214,6 +247,10 @@ def register_os_tools(registry: Registry) -> None:
 
     add("os_open_app", "Open an installed app by name (or bring it to the front if already open).", OpenAppParams, open_app, verify_open_app)
     add("os_focus_window", "Bring an already open window to the front by part of its title or app name.", FocusParams, focus_window, verify_focus_window)
+    registry.register(Tool(
+        name="os_close_window", description="Close an open window or app by part of its title or name.",
+        params=CloseParams, layer="os", risk="low", run=close_window, verify=verify_close_window,
+        idempotent=False, needs_confirm=_close_needs_confirm))
     add("os_list_windows", "List the open windows.", NoParams, list_windows, read_only_verify)
     add("os_media_key", "Play, pause, skip to next or go to previous track of the current media.", MediaKeyParams, media_key, verify_media_key)
     add("os_media_status", "Say what media is playing now and whether it is paused.", NoParams, media_status, read_only_verify)

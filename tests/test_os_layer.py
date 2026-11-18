@@ -219,3 +219,62 @@ def test_open_app_window_never_reaches_foreground_is_a_failure(env, monkeypatch)
     monkeypatch.setattr(windows, "focus", lambda hwnd: False)  # Windows refuses to bring it forward
     r = env("os_open_app", OpenAppParams(name="spotify"))
     assert not r.ok and "not in the foreground" in r.error
+
+
+# ---------- close window ----------
+from orbit.agent.safety import Safety  # noqa: E402
+from orbit.tools.os_layer import CloseParams  # noqa: E402
+
+
+def test_close_window_closes_and_verifies(env, monkeypatch):
+    clock = Window(5, "Clock", "applicationframehost")
+    open_wins = [clock]
+    monkeypatch.setattr(windows, "list_windows", lambda: list(open_wins))
+    monkeypatch.setattr(windows, "console_hwnd", lambda: 0)
+    monkeypatch.setattr(windows, "close", lambda hwnd: open_wins.clear())
+    r = env("os_close_window", CloseParams(title="clock"))
+    assert r.ok and r.verified
+
+
+def test_close_window_that_stays_open_reports_the_save_dialog_case(env, monkeypatch):
+    monkeypatch.setattr("orbit.tools.os_layer.SETTLE_TIMEOUT_S", 0.2)
+    note = Window(5, "Untitled - Notepad", "notepad")
+    monkeypatch.setattr(windows, "list_windows", lambda: [note])
+    monkeypatch.setattr(windows, "console_hwnd", lambda: 0)
+    monkeypatch.setattr(windows, "close", lambda hwnd: None)  # app ignores it: it is showing "save changes?"
+    r = env("os_close_window", CloseParams(title="notepad"))
+    assert not r.ok and "asking to save" in r.error
+
+
+def test_close_window_is_never_retried(env, monkeypatch, logs):
+    monkeypatch.setattr("orbit.tools.os_layer.SETTLE_TIMEOUT_S", 0.2)
+    closed = []
+    w = Window(5, "Docs", "app")
+    monkeypatch.setattr(windows, "list_windows", lambda: [w])
+    monkeypatch.setattr(windows, "console_hwnd", lambda: 0)
+    monkeypatch.setattr(windows, "close", lambda hwnd: closed.append(hwnd))
+    env("os_close_window", CloseParams(title="docs"))
+    assert closed == [5]  # a retry could close a second matching window
+
+
+def test_close_window_never_closes_orbits_own_console(env, monkeypatch):
+    own = Window(9, "Windows PowerShell - orbit", "powershell")
+    monkeypatch.setattr(windows, "list_windows", lambda: [own])
+    monkeypatch.setattr(windows, "console_hwnd", lambda: 9)
+    monkeypatch.setattr(windows, "close", lambda hwnd: pytest.fail("closed Orbit's own window"))
+    r = env("os_close_window", CloseParams(title="orbit"))
+    assert not r.ok and "no open window" in r.error
+
+
+def test_close_asks_first_when_the_title_suggests_unsaved_work(monkeypatch):
+    reg = Registry()
+    register_os_tools(reg)
+    tool = reg.get_exposed("os_close_window")
+    monkeypatch.setattr(windows, "console_hwnd", lambda: 0)
+    asked = []
+    safety = Safety(confirm=lambda q: asked.append(q) or False)
+    monkeypatch.setattr(windows, "list_windows", lambda: [Window(5, "*notes - Notepad", "notepad")])
+    assert safety.approve([tool], CloseParams(title="notepad"))[0] is False and asked
+    asked.clear()
+    monkeypatch.setattr(windows, "list_windows", lambda: [Window(6, "Clock", "x")])
+    assert safety.approve([tool], CloseParams(title="clock"))[0] is True and not asked

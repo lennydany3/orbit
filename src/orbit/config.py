@@ -14,6 +14,8 @@ LLM_TIMEOUT_S = 120
 MAX_STEPS = 8                 # LLM round-trips per request
 MAX_CONSECUTIVE_FAILURES = 3  # stop after this many failed tool calls in a row
 MAX_TOOLS_PER_REQUEST = 10    # only this many tool schemas are sent to the model
+MAX_HISTORY_TURNS = 6         # earlier requests the model can see (so 'close it' works)
+MAX_HISTORY_CHARS = 5000      # hard cap on remembered text, to protect the small context window
 VERIFY_RETRIES = 1            # re-run an action once if it fails or fails to verify
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

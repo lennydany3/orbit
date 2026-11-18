@@ -20,8 +20,10 @@ user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.GetForegroundWindow.restype = wintypes.HWND
 user32.SetForegroundWindow.argtypes = [wintypes.HWND]
 user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_void_p]
 dwmapi.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+kernel32.GetConsoleWindow.restype = wintypes.HWND
 kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
@@ -31,6 +33,7 @@ _GWL_EXSTYLE = -20
 _WS_EX_TOOLWINDOW = 0x80
 _DWMWA_CLOAKED = 14
 _SW_RESTORE = 9
+_WM_CLOSE = 0x0010
 _VK_MENU = 0x12
 _KEYEVENTF_KEYUP = 2
 _QUERY_LIMITED = 0x1000
@@ -144,3 +147,13 @@ def _is_foreground(hwnd: int, wait_s: float = 0.4) -> bool:
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.05)
+
+
+def console_hwnd() -> int:
+    """The window Orbit itself runs in (never closed by a close request)."""
+    return int(kernel32.GetConsoleWindow() or 0)
+
+
+def close(hwnd: int) -> None:
+    """Ask a window to close, like clicking its X. The app may still ask to save; nothing is force-killed."""
+    user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0)
