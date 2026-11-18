@@ -5,7 +5,7 @@ from typing import Callable, Literal
 from pydantic import BaseModel, Field
 
 from ..base import Registry, Tool, ToolResult, VerifyResult, read_only_verify
-from . import apps, media, monitors, volume, windows
+from . import apps, media, monitors, uiclick, volume, windows
 
 APP_START_TIMEOUT_S = 12.0
 SETTLE_TIMEOUT_S = 3.0
@@ -265,6 +265,27 @@ def verify_arrange_window(p: ArrangeParams, r: ToolResult) -> VerifyResult:
     return VerifyResult(False, f"the window did not end up {action} (the app may enforce its own size)")
 
 
+class ClickParams(BaseModel):
+    text: str = Field(description="the name or words of the button/control to click, e.g. GO or Start")
+    window: str = Field(default="", description="the app window it is in, e.g. Speedtest (empty = the window in front)")
+
+
+class ReadWindowParams(BaseModel):
+    window: str = Field(default="", description="the app window to read, e.g. Speedtest (empty = the window in front)")
+
+
+def ui_click(p: ClickParams) -> ToolResult:
+    return uiclick.click(p.text.strip(), p.window.strip())
+
+
+def verify_ui_click(p: ClickParams, r: ToolResult) -> VerifyResult:
+    return uiclick.verify_click(r)
+
+
+def read_window(p: ReadWindowParams) -> ToolResult:
+    return uiclick.read_window(p.window.strip())
+
+
 def list_windows(p: NoParams) -> ToolResult:
     wins = windows.list_windows()
     lines = [w.label() for w in wins[:30]]
@@ -386,6 +407,11 @@ def register_os_tools(registry: Registry) -> None:
         name="os_arrange_window", description="Maximize, minimize, restore, or snap a window to the left/right/top/bottom half of its monitor.",
         params=ArrangeParams, layer="os", risk="low", run=arrange_window, verify=verify_arrange_window, idempotent=False))
     add("os_list_monitors", "List the monitors (primary, secondary, sizes).", NoParams, list_monitors, read_only_verify)
+    registry.register(Tool(
+        name="os_click", description="Click a button or text in a desktop app's window by its name (not web pages), e.g. GO in Speedtest.",
+        params=ClickParams, layer="os", risk="low", run=ui_click, verify=verify_ui_click, idempotent=False,
+        needs_confirm=lambda p: bool(uiclick._RISKY.search(p.text))))
+    add("os_read_window", "Read the buttons and text of a desktop app's window.", ReadWindowParams, read_window, read_only_verify)
     add("os_list_windows", "List the open windows.", NoParams, list_windows, read_only_verify)
     add("os_media_key", "Play, pause, skip to next or go to previous track of the current media.", MediaKeyParams, media_key, verify_media_key)
     add("os_media_status", "Say what media is playing now and whether it is paused.", NoParams, media_status, read_only_verify)

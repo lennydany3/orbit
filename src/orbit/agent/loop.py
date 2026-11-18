@@ -54,7 +54,8 @@ def _is_action_request(text: str) -> bool:
 _ASKS_STATE = re.compile(
     r"^(?:what|whats|what's|which|tell|show|list|is|are)\b.*\b(?:windows?|playing|volume|devices?|apps?|tabs?|page|song|track|music|open)\b", re.I)
 # Tools whose success tells us what "it" means next time, and which argument names the thing.
-_SUBJECT_PARAM = {"os_open_app": "name", "os_focus_window": "title", "os_move_window": "title", "os_arrange_window": "title"}
+_SUBJECT_PARAM = {"os_open_app": "name", "os_focus_window": "title", "os_move_window": "title", "os_arrange_window": "title",
+                  "os_click": "window"}
 
 
 class Agent:
@@ -85,6 +86,7 @@ class Agent:
         self.spotify_active = False           # the last thing done was a Spotify action: "switch to echo" = a Spotify device
         self._part_failed = False             # did the last tool call of the current request fail? (stops a chain)
         self._ungrounded = False              # did the model only talk (invent an answer) instead of acting?
+        self.last_target_kind = ""            # "browser" or "window": what the last action worked with, so "click X" goes there
         self.recent_subjects: list[str] = []  # everything opened or focused lately that is still open: "close both"
 
     # ---- public ----
@@ -182,7 +184,14 @@ class Agent:
             # Right after a Spotify request, "pause"/"next" mean Spotify itself: the media keys only reach this PC.
             action = {"prev": "previous"}.get(m.args["key"], m.args["key"])
             m = rules.RuleMatch(rule=m.rule + "-spotify", tool="api_spotify_control", args={"action": action})
+        if m and m.tool == "browser_click" and self._clicks_belong_to_an_app() and self.registry.get_exposed("os_click"):
+            # "click go" right after working with the Speedtest window is about that window, not about a web page.
+            m = rules.RuleMatch(rule=m.rule + "-app", tool="os_click", args={"text": m.args["text"], "window": self.last_subject})
         return m if m and self.registry.get_exposed(m.tool) else None
+
+    def _clicks_belong_to_an_app(self) -> bool:
+        subject = (self.last_subject or "").lower()
+        return self.last_target_kind == "window" and bool(subject) and not any(w in subject for w in rules._BROWSER_WORDS)
 
     def _run_rule(self, m: rules.RuleMatch) -> tuple[bool, str, bool]:
         """Run a rule's tool call(s). Stops at the first failure.
@@ -320,6 +329,10 @@ class Agent:
         result = self.router.run(candidates, params)
         self._part_failed = not result.ok
         if result.ok:
+            if name.startswith("browser_"):
+                self.last_target_kind = "browser"
+            elif name in ("os_open_app", "os_focus_window", "os_move_window", "os_arrange_window", "os_click"):
+                self.last_target_kind = "window"
             if name.startswith("api_spotify"):
                 self.spotify_active = True
             elif name.startswith(("os_open_app", "os_focus_window", "os_close_window", "browser_")):

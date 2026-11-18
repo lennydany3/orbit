@@ -504,3 +504,42 @@ def test_an_invented_reply_is_replaced_not_shown(make_agent):
     llm = ScriptedLLM(LLMResponse(content="Clicked 'Paal Dabba' in your Brave."), LLMResponse(content="Clicked 'Paal Dabba' in your Brave."))
     reply = make_agent(llm).handle("click the paal dabba video")
     assert "Paal Dabba" not in reply and "Nothing was done" in reply and "did not run any tool" in reply
+
+
+def test_click_goes_to_the_app_just_worked_with_and_to_the_browser_otherwise(logs):
+    from pydantic import BaseModel
+    from orbit.agent.loop import Agent
+    from orbit.agent.router import Router
+    from orbit.agent.safety import Safety
+    from orbit.tools.base import Registry, Tool
+
+    class Name(BaseModel):
+        name: str
+
+    class Text(BaseModel):
+        text: str
+
+    class AppClick(BaseModel):
+        text: str
+        window: str = ""
+
+    class Url(BaseModel):
+        url: str
+
+    seen = []
+    reg = Registry()
+    reg.register(Tool("os_open_app", "d", Name, "os", "low", lambda p: ToolResult.success("opened")))
+    reg.register(Tool("os_click", "d", AppClick, "os", "low", lambda p: seen.append(("app", p.text, p.window)) or ToolResult.success("clicked")))
+    reg.register(Tool("browser_click", "d", Text, "browser", "low", lambda p: seen.append(("page", p.text)) or ToolResult.success("clicked")))
+    reg.register(Tool("browser_open", "d", Url, "browser", "low", lambda p: ToolResult.success("opened")))
+    log = lambda k, m: logs.append((k, m))  # noqa: E731
+    agent = Agent(ScriptedLLM(), reg, Router(log), Safety(), log)
+    agent.handle("open speedtest")
+    agent.handle("now click the go")          # just worked with the Speedtest window: that window
+    agent.handle("open youtube")
+    agent.handle("click the first thing")     # just worked with a web page: the page
+    agent.handle("open notepad")
+    agent.handle("open brave")                # a browser is a window, but its clicks are web-page clicks
+    agent.handle("click sign in")
+    assert seen[0] == ("app", "go", "Speedtest")
+    assert [x[:2] for x in seen] == [("app", "go"), ("page", "first thing"), ("page", "sign in")]

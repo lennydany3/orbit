@@ -267,3 +267,16 @@ def test_close_all_tabs_is_not_guessed_at():
 def test_switch_and_list_tabs(text, tool, args):
     m = rules.match(text)
     assert m and (m.tool, m.args) == (tool, args)
+
+
+@pytest.mark.parametrize("text, tool, args", [
+    ("click go in speedtest", "os_click", {"text": "go", "window": "Speedtest"}),
+    ("in speedtest click the go button", "os_click", {"text": "go", "window": "Speedtest"}),
+    ("press start on the stopwatch app", "os_click", {"text": "start", "window": "Stopwatch"}),
+    ("click five in calculator", "os_click", {"text": "five", "window": "Calculator"}),
+    ("click subscribe on youtube", "browser_click", {"text": "subscribe"}),      # a browser/site is a web page
+    ("in brave click sign in", "browser_click", {"text": "sign in"}),
+])
+def test_click_in_a_named_app_or_page(text, tool, args):
+    m = rules.match(text)
+    assert m and (m.tool, m.args) == (tool, args)

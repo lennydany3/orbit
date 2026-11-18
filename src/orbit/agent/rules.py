@@ -76,6 +76,21 @@ _SNAP = re.compile(
     r"^(?:snap|put|move|send|dock)\s+(?:the\s+|my\s+)?(?!(?:it|that|this|them)\b)(?P<t>[\w .+&'-]+?)(?:\s+(?:app|window))?\s+(?:to|on|onto|at)\s+(?:the\s+)?"
     r"(?P<side>left|right|top|bottom)(?: half| side| of the screen)?$", re.I)
 
+# "click go in speedtest" / "in speedtest click go": the app is named, so it is a window, not a web page (unless it is a browser)
+_BROWSER_WORDS = ("brave", "chrome", "browser", "youtube", "github", "firefox", "edge", "page", "site", "tab")
+_CLICK_IN_APP = re.compile(
+    r"^(?:click|press|tap|hit|push)\s+(?:on\s+)?(?:the\s+)?(?P<t>.+?)(?: button)?\s+(?:in|on|inside|from)\s+(?:the\s+)?(?P<app>[\w .'-]+?)(?: app| window)?$", re.I)
+_IN_APP_CLICK = re.compile(
+    r"^(?:in|on|inside)\s+(?:the\s+)?(?P<app>[\w .'-]+?)(?: app| window)?,?\s+(?:click|press|tap|hit|push)\s+(?:on\s+)?(?:the\s+)?(?P<t>.+?)(?: button)?$", re.I)
+
+
+def _click_in(text: str, app: str) -> tuple:
+    app, text = app.strip(), text.strip()
+    if any(w in app.lower() for w in _BROWSER_WORDS):
+        return ("browser_click", {"text": text})
+    return ("os_click", {"text": text, "window": app.title()})
+
+
 # (rule name, pattern, builder). Patterns are matched against the whole sentence, case-insensitively.
 # Anything with extra clauses ("open X and play Y") deliberately does not match and goes to the model.
 RULES: list[tuple[str, re.Pattern, Builder]] = [
@@ -92,6 +107,8 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
      lambda m: ("browser_open", {"url": _site_url(m["site"].lower(), bool(m["my"]))})),
     ("open-url", re.compile(rf"^{_VERB}\s+(?P<url>(?:https?://)?[\w-]+(?:\.[\w-]+)+(?:/\S*)?)$", re.I),
      lambda m: ("browser_open", {"url": m["url"] if "://" in m["url"] else "https://" + m["url"]})),
+    ("click-in-app", _CLICK_IN_APP, lambda m: _click_in(m["t"], m["app"])),
+    ("in-app-click", _IN_APP_CLICK, lambda m: _click_in(m["t"], m["app"])),
     ("click-first-video", re.compile(r"^(?:click|press|tap|select|hit|open|play)\s+(?:on\s+)?(?:the\s+)?(?:first|top|1st)\s+(?:video|result|one)$", re.I),
      lambda m: ("browser_youtube_play", {"query": ""})),
     ("click", re.compile(r"^(?:click|press|tap|select|hit)\s+(?:on\s+)?(?:the\s+)?(?!(?:it|that|this)$)(?P<text>.+?)(?: (?:button|link|video))?$", re.I),

@@ -18,6 +18,12 @@ from comtypes.gen import UIAutomationClient as UIA  # noqa: E402
 _CLSID_UIAUTOMATION = "{ff48dba4-60ef-4201-aa87-54103eef594e}"
 _automation = None
 
+_APP_KINDS = {  # what to look for in a normal desktop app window (more than in a web page)
+    UIA.UIA_ButtonControlTypeId: "button", UIA.UIA_HyperlinkControlTypeId: "link", UIA.UIA_MenuItemControlTypeId: "menu item",
+    UIA.UIA_TabItemControlTypeId: "tab", UIA.UIA_CheckBoxControlTypeId: "checkbox", UIA.UIA_RadioButtonControlTypeId: "radio button",
+    UIA.UIA_ListItemControlTypeId: "list item", UIA.UIA_TreeItemControlTypeId: "tree item", UIA.UIA_ComboBoxControlTypeId: "combo box",
+    UIA.UIA_SplitButtonControlTypeId: "button", UIA.UIA_EditControlTypeId: "text field",
+}
 _KINDS = {
     UIA.UIA_HyperlinkControlTypeId: "link", UIA.UIA_ButtonControlTypeId: "button", UIA.UIA_TabItemControlTypeId: "tab",
     UIA.UIA_MenuItemControlTypeId: "menu item", UIA.UIA_CheckBoxControlTypeId: "checkbox",
@@ -274,3 +280,20 @@ def _tabs(hwnd: int) -> list[Control]:
 
 def select_tab(control: Control) -> None:
     _retrying(lambda: control.element.GetCurrentPattern(UIA.UIA_SelectionItemPatternId).QueryInterface(UIA.IUIAutomationSelectionItemPattern).Select())
+
+
+def window_controls(hwnd: int, limit: int = 400) -> list[Control]:
+    """Named controls anywhere in a desktop app's window (menus, buttons, tabs, fields...). Empty for custom-drawn apps."""
+    return _retrying(lambda: _window_controls(hwnd, limit))
+
+
+def _window_controls(hwnd: int, limit: int) -> list[Control]:
+    root = _uia().ElementFromHandle(hwnd)
+    found = root.FindAll(UIA.TreeScope_Descendants, _type_condition(list(_APP_KINDS)))
+    out: list[Control] = []
+    for i in range(min(found.Length, limit)):
+        el = found.GetElement(i)
+        name = (el.CurrentName or "").strip()
+        if name and not el.CurrentIsOffscreen:
+            out.append(Control(name, _APP_KINDS.get(el.CurrentControlType, "control"), False, el, enabled=bool(el.CurrentIsEnabled)))
+    return out

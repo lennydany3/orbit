@@ -136,6 +136,22 @@ def match_windows(windows: list[Window], hints: list[str]) -> list[Window]:
                 score = max(score, 2)
         if score:
             scored.append((-score, order, w))
+    if not scored and hints:
+        return _typo_matches(windows, hints)
+    return [w for _, _, w in sorted(scored, key=lambda t: (t[0], t[1]))]
+
+
+def _typo_matches(windows: list[Window], hints: list[str]) -> list[Window]:
+    """No exact fit: forgive a typo ("speedtedt" -> "Speedtest"), but only for names that are really close."""
+    from . import uia  # imported late: it loads the UI Automation machinery
+
+    scored = []
+    for order, w in enumerate(windows):
+        best = max((uia.match_score(h, w.title) for h in hints), default=0.0)
+        if w.exe and best == 0:
+            best = max((uia.match_score(h, w.exe) for h in hints), default=0.0)
+        if best > 0:
+            scored.append((-best, order, w))
     return [w for _, _, w in sorted(scored, key=lambda t: (t[0], t[1]))]
 
 
