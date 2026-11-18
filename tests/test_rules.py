@@ -113,3 +113,33 @@ def test_close_several_things_that_were_just_opened(text):
     m = rules.match(text, subjects=["Calculator", "Clock"])
     assert m and m.tool == "os_close_window" and m.args == {"title": "Calculator"}
     assert m.then == [("os_close_window", {"title": "Clock"})]
+
+
+@pytest.mark.parametrize("text", ["open github in brave", "open the github website", "go to github using chrome"])
+def test_plain_github_is_the_site(text):
+    m = rules.match(text)
+    assert m and (m.tool, m.args) == ("browser_open", {"url": "https://github.com"})
+
+
+@pytest.mark.parametrize("text", ["open my github", "in brave open my github", "can you open my github in the browser",
+                                  "open my github profile", "open my github account in brave"])
+def test_my_github_is_your_profile(text):
+    m = rules.match(text)
+    assert m and (m.tool, m.args) == ("browser_open", {"url": "https://github.com/lennydany3"})
+
+
+def test_the_profile_name_can_be_changed(monkeypatch):
+    monkeypatch.setattr("orbit.config.GITHUB_USER", "someone-else")
+    assert rules.match("open my github").args == {"url": "https://github.com/someone-else"}
+    monkeypatch.setattr("orbit.config.GITHUB_USER", "")
+    assert rules.match("open my github").args == {"url": "https://github.com"}  # no name set: the site
+
+
+def test_my_in_front_of_an_app_is_not_part_of_its_name():
+    m = rules.match("open my brave")
+    assert m and (m.tool, m.args) == ("os_open_app", {"name": "Brave"})
+
+
+def test_open_brave_itself_is_still_an_app():
+    m = rules.match("open brave")
+    assert m and (m.tool, m.args) == ("os_open_app", {"name": "Brave"})

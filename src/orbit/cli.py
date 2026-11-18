@@ -76,12 +76,15 @@ def _main(argv: list[str] | None) -> int:
     parser.add_argument("request", nargs="*", help="run one request and exit (otherwise start the REPL)")
     parser.add_argument("--no-llm", action="store_true", help="rules only, never call the model")
     parser.add_argument("--fake-tools", action="store_true", help="also register the Step 1 test tools")
+    parser.add_argument("--browser", choices=["brave", "chrome"], default=config.BROWSER,
+                        help=f"browser Orbit opens for websites (default {config.BROWSER})")
     parser.add_argument("--model", default=config.MODEL, help=f"Ollama model (default {config.MODEL})")
     args = parser.parse_args(argv)
 
     if len(args.request) == 2 and args.request[0].lower() == "auth":
         return run_auth(args.request[1].lower())
 
+    browser_session.use(args.browser)
     agent = build_agent(use_llm=not args.no_llm, model=args.model, fake_tools=args.fake_tools)
 
     if args.request:

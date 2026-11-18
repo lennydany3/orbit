@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from typing import Callable
 from urllib.parse import quote_plus
 
+from .. import config
+
 
 @dataclass
 class RuleMatch:
@@ -29,6 +31,13 @@ SITES = {
     "twitter": "https://x.com", "linkedin": "https://www.linkedin.com",
 }
 _SITE_NAMES = "|".join(SITES)
+
+
+def _site_url(site: str, mine: bool) -> str:
+    """"open github" = the site; "open my github" = your own profile page."""
+    if site == "github" and mine and config.GITHUB_USER:
+        return f"https://github.com/{config.GITHUB_USER}"
+    return SITES[site]
 _VERB = r"(?:please )?(?:open|go to|visit|launch)"
 
 
@@ -67,8 +76,8 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
      lambda m: ("api_spotify_transfer", {"device": "this"})),
     ("spotify-transfer-device", _TRANSFER_EXPLICIT, _transfer),
     # --- browser layer (before open-app: "open github" is a website, not an installed app) ---
-    ("open-site", re.compile(rf"^{_VERB}\s+(?:my |the )?(?P<site>{_SITE_NAMES})(?: (?:website|site|page|account))?$", re.I),
-     lambda m: ("browser_open", {"url": SITES[m["site"].lower()]})),
+    ("open-site", re.compile(rf"^{_VERB}\s+(?:(?P<my>my )|the )?(?P<site>{_SITE_NAMES})(?: (?:website|site|page|account|profile))?$", re.I),
+     lambda m: ("browser_open", {"url": _site_url(m["site"].lower(), bool(m["my"]))})),
     ("open-url", re.compile(rf"^{_VERB}\s+(?P<url>(?:https?://)?[\w-]+(?:\.[\w-]+)+(?:/\S*)?)$", re.I),
      lambda m: ("browser_open", {"url": m["url"] if "://" in m["url"] else "https://" + m["url"]})),
     ("youtube-play", re.compile(r"^(?:play|watch)\s+(?P<q>.+?)\s+on youtube$", re.I),
@@ -82,7 +91,7 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
     ("web-search", re.compile(r"^(?:search|google)\s+(?:for\s+)?(?!.*\b(?:and|then)\b)(?P<q>.+)$", re.I),
      lambda m: ("browser_search", {"query": m["q"]})),
     # --- OS layer ---
-    ("open-app", re.compile(r"^(?:please )?(?:open|launch|start)\s+(?:the )?(?!.*\b(?:and|then)\b)(?!(?:it|that|this|them|again)$)(?P<name>[\w .+&'-]+?)(?: app)?$", re.I),
+    ("open-app", re.compile(r"^(?:please )?(?:open|launch|start)\s+(?:the |my )?(?!.*\b(?:and|then)\b)(?!(?:it|that|this|them|again)$)(?P<name>[\w .+&'-]+?)(?: app)?$", re.I),
      lambda m: ("os_open_app", {"name": m["name"].strip().title()})),
     ("volume-set", re.compile(rf"^(?:turn |set |put )?{_THE}volume (?:to |at )?(?P<n>\d{{1,3}})\s*%?$", re.I),
      lambda m: ("os_set_volume", {"level": int(m["n"])})),
@@ -114,6 +123,9 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
 
 # Polite filler a person puts around a command: "ok can you close the speed test please?"
 _FILLER_HEAD = re.compile(r"^(?:(?:ok(?:ay)?|yo+|yeah|hey|hi|bro|so|now|then|just|please|pls|can you|could you|would you|will you|can u)\b,?\s+)+", re.I)
+_IN_BROWSER = r"(?:in|on|with|using)\s+(?:the\s+)?(?:brave|chrome|google chrome|my browser|the browser|browser)"
+_BROWSER_HEAD = re.compile(rf"^{_IN_BROWSER},?\s+", re.I)        # "in brave open my github"
+_BROWSER_TAIL = re.compile(rf"\s+{_IN_BROWSER}$", re.I)         # "open my github in brave"
 _FILLER_TAIL = re.compile(r"(?:,?\s*(?:please|pls|for me|thanks|thank you))?[\s?.!]*$", re.I)
 _PRONOUN_CLOSE = re.compile(r"^close (?:it|that|this)$", re.I)
 _PLURAL_CLOSE = re.compile(r"^close (?:both|them|them all|all|all of them|both of them|everything)(?: i opened)?$", re.I)
@@ -121,8 +133,11 @@ _PRONOUN_OPEN = re.compile(r"^(?:(?:re)?open|launch|start) (?:it|that|this|them)
 
 
 def normalize(text: str) -> str:
+    """Drop polite filler and "in brave": Orbit has one browser (set with --browser), so the words add nothing."""
     text = _FILLER_HEAD.sub("", text.strip())
-    return _FILLER_TAIL.sub("", text).strip()
+    text = _BROWSER_HEAD.sub("", _FILLER_HEAD.sub("", text))
+    text = _FILLER_TAIL.sub("", text).strip()
+    return _BROWSER_TAIL.sub("", text).strip()
 
 
 _SPLIT = re.compile(r"\s*,\s*(?:and\s+|then\s+)?|\s+(?:and\s+then|then|and|&)\s+", re.I)

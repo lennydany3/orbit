@@ -177,3 +177,42 @@ def test_risky_click_needs_confirmation(env):
 
 def test_fullscreen_params_default_enters():
     assert FullscreenParams().on is True
+
+
+# ---------- which browser ----------
+def test_brave_and_chrome_never_share_a_profile(tmp_path):
+    from orbit.tools.browser_layer.session import BrowserSession
+    s = BrowserSession(browser="brave", profile_root=tmp_path)
+    assert s.profile_dir == tmp_path / "brave"
+    s.use("chrome")
+    assert s.profile_dir == tmp_path  # Chrome keeps the folder it always used
+
+
+def test_unknown_browser_is_rejected(tmp_path):
+    from orbit.tools.browser_layer.session import BrowserSession
+    with pytest.raises(ValueError):
+        BrowserSession(browser="firefox", profile_root=tmp_path)
+
+
+def test_find_brave_picks_the_first_that_exists(tmp_path):
+    from orbit.tools.browser_layer.session import find_brave
+    real = tmp_path / "brave.exe"
+    real.write_text("x")
+    assert find_brave([tmp_path / "missing.exe", real]) == real
+    assert find_brave([tmp_path / "missing.exe"]) is None
+
+
+def test_missing_brave_gives_a_clear_message(tmp_path, monkeypatch):
+    import importlib
+    session_module = importlib.import_module("orbit.tools.browser_layer.session")  # (the package re-exports an object named session)
+    monkeypatch.setattr(session_module, "find_brave", lambda candidates=None: None)
+    s = session_module.BrowserSession(browser="brave", profile_root=tmp_path)
+    with pytest.raises(BrowserUnavailable, match="Brave was not found"):
+        s.page()
+
+
+def test_profile_in_use_is_recognised_and_explained():
+    import importlib
+    m = importlib.import_module("orbit.tools.browser_layer.session")
+    assert m.looks_like_profile_in_use("BrowserType.launch_persistent_context: Opening in existing browser session. This usually means that the profile is already in use")
+    assert not m.looks_like_profile_in_use("executable doesn't exist at C:/x/brave.exe")

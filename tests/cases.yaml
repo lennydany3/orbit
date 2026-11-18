@@ -42,7 +42,7 @@
 - {request: "open youtube", via: rules, step: 3,
    expect: [{tool: browser_open, args: {url: "https://www.youtube.com"}}]}
 - {request: "open my github", via: rules, step: 3,
-   expect: [{tool: browser_open, args: {url: "https://github.com"}}]}
+   expect: [{tool: browser_open, args: {url: "https://github.com/lennydany3"}}]}
 - {request: "play lofi beats on youtube", via: rules, step: 3,
    expect: [{tool: browser_youtube_play, args: {query: "lofi beats"}}]}
 - {request: "search cats on youtube", via: rules, step: 3,

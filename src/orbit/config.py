@@ -1,4 +1,5 @@
 """All tunable settings in one place."""
+import os
 from pathlib import Path
 
 APP_NAME = "Orbit"  # the only place the product name lives: rename here.
@@ -21,9 +22,17 @@ VERIFY_RETRIES = 1            # re-run an action once if it fails or fails to ve
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # --- Browser layer ---
-BROWSER_CHANNEL = "chrome"       # drive the installed Google Chrome (no separate download)
+BROWSER = os.environ.get("ORBIT_BROWSER", "brave").lower()  # "brave" or "chrome": which installed browser Orbit drives
 BROWSER_HEADLESS = False        # visible window: you can watch it work, and fullscreen is real
-BROWSER_PROFILE_DIR = PROJECT_ROOT / ".browser-profile"  # Orbit-only profile: never your real Chrome data
+BROWSER_PROFILE_DIR = PROJECT_ROOT / ".browser-profile"  # Orbit-only profile: never your real browser data
+BRAVE_PATHS = [
+    Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "BraveSoftware/Brave-Browser/Application/brave.exe",
+    Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")) / "BraveSoftware/Brave-Browser/Application/brave.exe",
+    Path(os.environ.get("LOCALAPPDATA", "")) / "BraveSoftware/Brave-Browser/Application/brave.exe",
+]
+
+# "open my github" opens this profile (github.com/<name>). Change it with the ORBIT_GITHUB_USER environment variable.
+GITHUB_USER = os.environ.get("ORBIT_GITHUB_USER", "lennydany3")
 
 # --- Safety ---
 LOG_DIR = PROJECT_ROOT / "logs"
