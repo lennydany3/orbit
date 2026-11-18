@@ -543,3 +543,58 @@ def test_click_goes_to_the_app_just_worked_with_and_to_the_browser_otherwise(log
     agent.handle("click sign in")
     assert seen[0] == ("app", "go", "Speedtest")
     assert [x[:2] for x in seen] == [("app", "go"), ("page", "first thing"), ("page", "sign in")]
+
+
+def _media_agent(logs, now_playing_app="SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify", key_works=True):
+    from pydantic import BaseModel
+    from orbit.agent.loop import Agent
+    from orbit.agent.router import Router
+    from orbit.agent.safety import Safety
+    from orbit.tools.base import Registry, Tool, ToolResult
+
+    class Key(BaseModel):
+        key: str
+
+    class Action(BaseModel):
+        action: str
+
+    class Nothing(BaseModel):
+        pass
+
+    seen = []
+    reg = Registry()
+    reg.register(Tool("os_media_status", "d", Nothing, "os", "low", lambda p: ToolResult.success(f"playing: 'Shine' by X ({now_playing_app})")))
+    reg.register(Tool("os_media_key", "d", Key, "os", "low", lambda p: seen.append(("key", p.key)) or (
+        ToolResult.success("pressed") if key_works else ToolResult.failure("media state did not change", retryable=False))))
+    reg.register(Tool("api_spotify_control", "d", Action, "api", "low", lambda p: seen.append(("spotify", p.action)) or ToolResult.success("ok")))
+    log = lambda k, m: logs.append((k, m))  # noqa: E731
+    return Agent(ScriptedLLM(), reg, Router(log), Safety(), log), seen
+
+
+def test_pause_goes_to_spotify_itself_when_spotify_is_what_is_playing(logs):
+    agent, seen = _media_agent(logs)
+    agent.handle("pause")          # no Spotify request before it: the current media app is enough
+    agent.handle("next song")
+    assert seen == [("spotify", "pause"), ("spotify", "next")]  # the PC media key is not used at all
+
+
+def test_pause_uses_the_pc_media_key_when_something_else_is_playing(logs):
+    agent, seen = _media_agent(logs, now_playing_app="Brave")
+    agent.handle("pause")
+    assert seen == [("key", "pause")]
+
+
+def test_a_media_key_that_does_nothing_falls_back_to_spotify(logs):
+    agent, seen = _media_agent(logs, now_playing_app="Brave", key_works=False)
+    status = agent.registry.get_exposed("os_media_status")
+    calls = {"n": 0}
+
+    def status_run(p):  # the first look says Brave (so the media key is tried); after the key failed it says Spotify
+        calls["n"] += 1
+        app = "Brave" if calls["n"] == 1 else "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify"
+        return ToolResult.success(f"playing: 'Shine' by X ({app})")
+
+    status.run = status_run
+    reply = agent.handle("play")
+    assert seen == [("key", "play"), ("spotify", "play")] and "ok" in reply
+    assert "fallback" in [k for k, _ in logs]

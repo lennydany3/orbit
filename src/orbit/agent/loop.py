@@ -54,6 +54,7 @@ def _is_action_request(text: str) -> bool:
 _ASKS_STATE = re.compile(
     r"^(?:what|whats|what's|which|tell|show|list|is|are)\b.*\b(?:windows?|playing|volume|devices?|apps?|tabs?|page|song|track|music|open)\b", re.I)
 # Tools whose success tells us what "it" means next time, and which argument names the thing.
+_KEY_TO_ACTION = {"play": "play", "pause": "pause", "next": "next", "prev": "previous"}
 _SUBJECT_PARAM = {"os_open_app": "name", "os_focus_window": "title", "os_move_window": "title", "os_arrange_window": "title",
                   "os_click": "window"}
 
@@ -180,14 +181,28 @@ class Agent:
     def _rule_for(self, text: str) -> rules.RuleMatch | None:
         """The rule for a command, if its tool is available."""
         m = rules.match(text, self.last_subject, self.last_closed, self.spotify_active, self.recent_subjects)
-        if m and m.tool == "os_media_key" and self.spotify_active and self.registry.get_exposed("api_spotify_control"):
-            # Right after a Spotify request, "pause"/"next" mean Spotify itself: the media keys only reach this PC.
-            action = {"prev": "previous"}.get(m.args["key"], m.args["key"])
-            m = rules.RuleMatch(rule=m.rule + "-spotify", tool="api_spotify_control", args={"action": action})
+        if m and m.tool == "os_media_key" and m.args["key"] in _KEY_TO_ACTION and self._spotify_is_playing_media():
+            # Spotify can be playing on a speaker or phone, which the PC's media keys cannot reach: use Spotify's own control.
+            m = rules.RuleMatch(rule=m.rule + "-spotify", tool="api_spotify_control", args={"action": _KEY_TO_ACTION[m.args["key"]]})
         if m and m.tool == "browser_click" and self._clicks_belong_to_an_app() and self.registry.get_exposed("os_click"):
             # "click go" right after working with the Speedtest window is about that window, not about a web page.
             m = rules.RuleMatch(rule=m.rule + "-app", tool="os_click", args={"text": m.args["text"], "window": self.last_subject})
         return m if m and self.registry.get_exposed(m.tool) else None
+
+    def _spotify_is_playing_media(self) -> bool:
+        """Is Spotify what "pause"/"next" should act on? (Spotify tools exist, and it was just used or is the current player.)"""
+        if not self.registry.get_exposed("api_spotify_control"):
+            return False
+        if self.spotify_active:
+            return True
+        status = self.registry.get_exposed("os_media_status")
+        if status is None:
+            return False
+        try:
+            result = status.run(status.params())
+        except Exception:
+            return False
+        return result.ok and "spotify" in (result.summary or "").lower()
 
     def _clicks_belong_to_an_app(self) -> bool:
         subject = (self.last_subject or "").lower()
@@ -327,6 +342,11 @@ class Agent:
             self.log("safety", f"blocked: {why}")
             return ToolResult.failure(why)
         result = self.router.run(candidates, params)
+        if not result.ok and name == "os_media_key" and params.key in _KEY_TO_ACTION and self._spotify_is_playing_media():
+            self.log("fallback", "the PC media key did not change anything and this is Spotify: asking Spotify itself")
+            control = self.registry.get_exposed("api_spotify_control")
+            via_api = self.execute("api_spotify_control", {"action": _KEY_TO_ACTION[params.key]})
+            result = via_api if via_api.ok else result
         self._part_failed = not result.ok
         if result.ok:
             if name.startswith("browser_"):
