@@ -80,6 +80,10 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
      lambda m: ("browser_open", {"url": _site_url(m["site"].lower(), bool(m["my"]))})),
     ("open-url", re.compile(rf"^{_VERB}\s+(?P<url>(?:https?://)?[\w-]+(?:\.[\w-]+)+(?:/\S*)?)$", re.I),
      lambda m: ("browser_open", {"url": m["url"] if "://" in m["url"] else "https://" + m["url"]})),
+    ("click", re.compile(r"^(?:click|press|tap|select|hit)\s+(?:on\s+)?(?:the\s+)?(?!(?:it|that|this)$)(?P<text>.+?)(?: (?:button|link|video))?$", re.I),
+     lambda m: ("browser_click", {"text": m["text"].strip()})),
+    ("youtube-first-video", re.compile(r"^(?:play|watch|start)\s+(?:the |a |any |some |one )?(?:first |top )?(?:videos?|something)(?: on youtube)?$", re.I),
+     lambda m: ("browser_youtube_play", {"query": ""})),
     ("youtube-play", re.compile(r"^(?:play|watch)\s+(?P<q>.+?)\s+on youtube$", re.I),
      lambda m: ("browser_youtube_play", {"query": m["q"]})),
     ("youtube-search", re.compile(r"^search\s+(?:for\s+)?(?P<q>.+?)\s+on youtube$", re.I),
@@ -124,7 +128,8 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
 # Polite filler a person puts around a command: "ok can you close the speed test please?"
 _FILLER_HEAD = re.compile(r"^(?:(?:ok(?:ay)?|yo+|yeah|hey|hi|bro|so|now|then|just|please|pls|can you|could you|would you|will you|can u)\b,?\s+)+", re.I)
 _IN_BROWSER = r"(?:in|on|with|using)\s+(?:the\s+)?(?:brave|chrome|google chrome|my browser|the browser|browser)"
-_BROWSER_HEAD = re.compile(rf"^{_IN_BROWSER},?\s+", re.I)        # "in brave open my github"
+_ON_PAGE = r"(?:in|on)\s+(?:the\s+)?(?:youtube|github|google|this page|the page|page|this site|the site)"
+_BROWSER_HEAD = re.compile(rf"^(?:{_IN_BROWSER}|{_ON_PAGE}),?\s+(?=(?:click|press|tap|select)\b)|^{_IN_BROWSER},?\s+", re.I)  # "in brave open my github", "in youtube click X"
 _BROWSER_TAIL = re.compile(rf"\s+{_IN_BROWSER}$", re.I)         # "open my github in brave"
 _FILLER_TAIL = re.compile(r"(?:,?\s*(?:please|pls|for me|thanks|thank you))?[\s?.!]*$", re.I)
 _PRONOUN_CLOSE = re.compile(r"^close (?:it|that|this)$", re.I)

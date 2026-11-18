@@ -283,13 +283,6 @@ def test_open_in_your_brave_that_never_comes_forward_is_a_failure(env, mine, mon
     assert not r.ok and "did not come to the front" in r.error
 
 
-def test_reading_a_page_opened_in_your_own_brave_is_refused_clearly(env, mine):
-    from orbit.tools.browser_layer import NoParams
-    _, run, _ = env
-    r = run("browser_page_info", NoParams())
-    assert not r.ok and "cannot read or click" in r.error
-
-
 def test_orbit_mode_still_uses_the_automated_window(env, mine, monkeypatch):
     page, run, _ = env
     launched, _ = mine

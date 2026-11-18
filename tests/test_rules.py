@@ -143,3 +143,19 @@ def test_my_in_front_of_an_app_is_not_part_of_its_name():
 def test_open_brave_itself_is_still_an_app():
     m = rules.match("open brave")
     assert m and (m.tool, m.args) == ("os_open_app", {"name": "Brave"})
+
+
+@pytest.mark.parametrize("text, target", [
+    ("click theater mode", "theater mode"),
+    ("in youtube click the ishowspeed live", "ishowspeed live"),
+    ("can you press the subscribe button", "subscribe"),
+    ("tap on the first video", "first"),
+    ("click on sign in", "sign in"),
+])
+def test_click_goes_to_the_click_tool_not_the_model(text, target):
+    m = rules.match(text)
+    assert m and (m.tool, m.args) == ("browser_click", {"text": target})
+
+
+def test_click_it_is_left_to_the_model():
+    assert rules.match("click it") is None

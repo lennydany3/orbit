@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from ... import config
 from ..base import Registry, Tool, ToolResult, VerifyResult, read_only_verify
-from . import real
+from . import mine, real
 from .session import BrowserUnavailable, find_brave, session
 
 SETTLE_TIMEOUT_S = 4.0
@@ -40,11 +40,6 @@ def _first_line(e: Exception) -> str:
 
 
 def _page_or_error():
-    if _use_my_browser() and not session.running:
-        return None, ToolResult.failure(
-            "Orbit opens websites in your own Brave, which it cannot read or click in. "
-            "To read, click or fullscreen a page, ask for it in Orbit's own window (for example: play something on youtube).",
-            retryable=False)
     try:
         return session.page(), None
     except BrowserUnavailable as e:
@@ -135,7 +130,8 @@ def verify_open(p: OpenParams, r: ToolResult) -> VerifyResult:
         # Orbit cannot see inside your own browser, only that Brave answered and is in front.
         fg = real.brave_in_front()
         if fg:
-            return VerifyResult(True, f"Brave is in front, showing '{fg.title}' (I cannot read the page itself)")
+            title = mine.wait_until_loaded(fg.hwnd)
+            return VerifyResult(True, f"Brave is in front, showing '{title}'")
         return VerifyResult(False, "Brave did not come to the front")
     page, err = _page_or_error()
     if err:
@@ -156,6 +152,8 @@ def search_web(p: SearchParams) -> ToolResult:
 
 # ---------------------------------------------------------------- read the page
 def page_info(p: NoParams) -> ToolResult:
+    if _use_my_browser():
+        return mine.page_info()
     page, err = _page_or_error()
     if err:
         return err
@@ -177,6 +175,8 @@ def _snapshot(page) -> tuple:
 
 
 def click_text(p: ClickParams) -> ToolResult:
+    if _use_my_browser():
+        return mine.click(p.text)
     page, err = _page_or_error()
     if err:
         return err
@@ -202,6 +202,8 @@ def click_text(p: ClickParams) -> ToolResult:
 
 
 def verify_click(p: ClickParams, r: ToolResult) -> VerifyResult:
+    if r.context.get("mine"):
+        return mine.verify_click(r)
     page, err = _page_or_error()
     if err:
         return VerifyResult(False, err.error)
@@ -221,7 +223,7 @@ def verify_click(p: ClickParams, r: ToolResult) -> VerifyResult:
 
 # ---------------------------------------------------------------- youtube
 class YoutubeParams(BaseModel):
-    query: str = Field(description="what to search on YouTube and play, e.g. lofi beats")
+    query: str = Field(default="", description="what to search on YouTube and play, e.g. lofi beats; empty = the first video on the YouTube page already open")
 
 
 _VIDEO_STATE_JS = """() => {
@@ -231,6 +233,9 @@ _VIDEO_STATE_JS = """() => {
 
 
 def youtube_play(p: YoutubeParams) -> ToolResult:
+    if _use_my_browser():
+        url = "https://www.youtube.com/results?search_query=" + quote_plus(p.query) if p.query.strip() else ""
+        return mine.play_first_video(p.query.strip(), _open_in_my_browser, url)
     page, err = _page_or_error()
     if err:
         return err
@@ -254,6 +259,8 @@ def youtube_play(p: YoutubeParams) -> ToolResult:
 
 
 def verify_youtube_play(p: YoutubeParams, r: ToolResult) -> VerifyResult:
+    if r.context.get("mine"):
+        return mine.verify_play(r)
     page, err = _page_or_error()
     if err:
         return VerifyResult(False, err.error)
@@ -280,6 +287,8 @@ def _is_fullscreen(page) -> bool:
 
 
 def set_fullscreen(p: FullscreenParams) -> ToolResult:
+    if _use_my_browser():
+        return mine.fullscreen(p.on)
     page, err = _page_or_error()
     if err:
         return err
@@ -303,6 +312,8 @@ def set_fullscreen(p: FullscreenParams) -> ToolResult:
 
 
 def verify_fullscreen(p: FullscreenParams, r: ToolResult) -> VerifyResult:
+    if r.context.get("mine"):
+        return mine.verify_fullscreen(r)
     page, err = _page_or_error()
     if err:
         return VerifyResult(False, err.error)
@@ -321,5 +332,6 @@ def register_browser_tools(registry: Registry) -> None:
     add("browser_page_info", "Read the title, address and text of the page now open in the browser.", NoParams, page_info, read_only_verify)
     add("browser_click", "Click a button or link on the open page by its visible text.", ClickParams, click_text, verify_click,
         idempotent=False, needs_confirm=lambda p: bool(_RISKY_CLICK.search(p.text)))
-    add("browser_youtube_play", "Search YouTube for something and play the first video.", YoutubeParams, youtube_play, verify_youtube_play)
+    add("browser_youtube_play", "Search YouTube for something and play the first video.", YoutubeParams, youtube_play, verify_youtube_play,
+        idempotent=False)  # a retry would click another video
     add("browser_fullscreen", "Make the video on the open page fullscreen, or leave fullscreen.", FullscreenParams, set_fullscreen, verify_fullscreen)
