@@ -27,7 +27,8 @@ class Safety:
 
     def approve(self, candidates: list[Tool], params: BaseModel) -> tuple[bool, str]:
         """True if the action may run. If any layer of the capability is risky, ask first."""
-        if not any(t.risk == "confirm" for t in candidates):
+        risky = any(t.risk == "confirm" or (t.needs_confirm and t.needs_confirm(params)) for t in candidates)
+        if not risky:
             return True, ""
         name = candidates[0].name
         if self.confirm(f"{name}({params.model_dump()}) is a risky action. Allow?"):

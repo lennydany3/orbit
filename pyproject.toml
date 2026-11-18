@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     "ollama",
     "pydantic>=2",
+    "playwright",
     "pycaw",
     "winrt-runtime",
     "winrt-Windows.Media.Control",

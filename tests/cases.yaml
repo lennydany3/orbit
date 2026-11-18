@@ -39,7 +39,15 @@
    expect: [{tool: browser_open, args: {url: "https://github.com"}}]}
 - {request: "open youtube", via: rules, step: 3,
    expect: [{tool: browser_open, args: {url: "https://www.youtube.com"}}]}
-- {request: "go to wikipedia.org", via: llm, step: 3,
+- {request: "open my github", via: rules, step: 3,
+   expect: [{tool: browser_open, args: {url: "https://github.com"}}]}
+- {request: "play lofi beats on youtube", via: rules, step: 3,
+   expect: [{tool: browser_youtube_play, args: {query: "lofi beats"}}]}
+- {request: "search cats on youtube", via: rules, step: 3,
+   expect: [{tool: browser_open, args: {url: "https://www.youtube.com/results?search_query=cats"}}]}
+- {request: "fullscreen", via: rules, step: 3,
+   expect: [{tool: browser_fullscreen, args: {"on": true}}]}
+- {request: "go to wikipedia.org", via: rules, step: 3,
    expect: [{tool: browser_open, args: {url: "https://wikipedia.org"}}]}
 - {request: "what page am I on?", via: llm, step: 3,
    expect: [{tool: browser_page_info, args: {}}]}

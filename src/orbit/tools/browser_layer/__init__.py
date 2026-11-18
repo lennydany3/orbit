@@ -1,0 +1,292 @@
+"""Browser layer tools: open pages, search, click, read the page, play YouTube, fullscreen.
+
+Everything read from a page is untrusted data. Each action is verified from page state
+(URL, title, HTTP status, the <video> element, document.fullscreenElement).
+"""
+import re
+import time
+from typing import Callable
+from urllib.parse import quote_plus, urlparse
+
+from playwright.sync_api import Error as PlaywrightError
+from pydantic import BaseModel, Field
+
+from ..base import Registry, Tool, ToolResult, VerifyResult, read_only_verify
+from .session import BrowserUnavailable, session
+
+SETTLE_TIMEOUT_S = 4.0
+_ALLOWED_SCHEMES = {"http", "https"}
+_COMMON_SECOND_LEVEL = {"co", "com", "org", "net", "gov", "ac", "edu"}
+# Clicking something with one of these words may spend money, send something or destroy data: ask first.
+_RISKY_CLICK = re.compile(
+    r"\b(buy|purchase|pay|checkout|order|place order|send|post|publish|delete|remove|submit|confirm|"
+    r"unsubscribe|subscribe|sign out|log ?out|transfer|donate|install|uninstall)\b", re.I)
+
+
+def _wait_for(check: Callable[[], object], timeout: float = SETTLE_TIMEOUT_S, interval: float = 0.25):
+    deadline = time.monotonic() + timeout
+    while True:
+        value = check()
+        if value or time.monotonic() >= deadline:
+            return value
+        time.sleep(interval)
+
+
+def _first_line(e: Exception) -> str:
+    text = str(e).strip()
+    return text.splitlines()[0] if text else type(e).__name__
+
+
+def _page_or_error():
+    try:
+        return session.page(), None
+    except BrowserUnavailable as e:
+        return None, ToolResult.failure(str(e), retryable=False)
+
+
+# ---------------------------------------------------------------- url helpers (pure, unit-tested)
+def normalize_url(raw: str) -> str:
+    """'github.com' -> 'https://github.com'. Only http(s) is allowed (no file:, javascript:, chrome:)."""
+    raw = raw.strip()
+    if not raw:
+        raise ValueError("empty url")
+    if "://" not in raw and not re.match(r"^[a-z][a-z0-9+.-]*:", raw, re.I):
+        raw = "https://" + raw
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() not in _ALLOWED_SCHEMES or not parsed.hostname:
+        raise ValueError(f"only http and https links are allowed, got '{raw[:60]}'")
+    return raw
+
+
+def _brand(host: str) -> str:
+    """'www.google.co.in' -> 'google': lets google.com -> google.co.in count as the same site."""
+    labels = host.lower().removeprefix("www.").split(".")
+    if len(labels) >= 3 and labels[-2] in _COMMON_SECOND_LEVEL:
+        return labels[-3]
+    return labels[-2] if len(labels) >= 2 else labels[0]
+
+
+def same_site(a: str, b: str) -> bool:
+    ha, hb = urlparse(a).hostname or "", urlparse(b).hostname or ""
+    return bool(ha and hb) and (ha == hb or _brand(ha) == _brand(hb))
+
+
+# ---------------------------------------------------------------- open
+class OpenParams(BaseModel):
+    url: str = Field(description="web address, e.g. https://github.com")
+
+
+class SearchParams(BaseModel):
+    query: str = Field(description="what to search the web for")
+
+
+class NoParams(BaseModel):
+    pass
+
+
+def open_url(p: OpenParams) -> ToolResult:
+    try:
+        url = normalize_url(p.url)
+    except ValueError as e:
+        return ToolResult.failure(str(e), retryable=False)
+    page, err = _page_or_error()
+    if err:
+        return err
+    try:
+        response = page.goto(url, wait_until="domcontentloaded")
+        page.bring_to_front()
+        title = page.title()
+    except PlaywrightError as e:
+        return ToolResult.failure(f"could not load {url}: {_first_line(e)}")
+    result = ToolResult.success(f"opened {page.url} ('{title}')")
+    result.context.update(requested=url, status=response.status if response else None)
+    return result
+
+
+def verify_open(p: OpenParams, r: ToolResult) -> VerifyResult:
+    page, err = _page_or_error()
+    if err:
+        return VerifyResult(False, err.error)
+    status = r.context.get("status")
+    if status and status >= 400:
+        return VerifyResult(False, f"the site answered HTTP {status}")
+    if page.url.startswith(("chrome-error:", "about:blank")):
+        return VerifyResult(False, f"the browser is on an error page ({page.url})")
+    if not same_site(page.url, r.context["requested"]):
+        return VerifyResult(False, f"expected {r.context['requested']} but the browser is on {page.url}")
+    return VerifyResult(True, f"on {page.url}, title '{page.title()}'")
+
+
+def search_web(p: SearchParams) -> ToolResult:
+    return open_url(OpenParams(url="https://duckduckgo.com/?q=" + quote_plus(p.query)))
+
+
+# ---------------------------------------------------------------- read the page
+def page_info(p: NoParams) -> ToolResult:
+    page, err = _page_or_error()
+    if err:
+        return err
+    try:
+        text = page.evaluate("() => (document.body ? document.body.innerText : '').slice(0, 800)")
+        return ToolResult.success(f"on {page.url} ('{page.title()}')", data=text)
+    except PlaywrightError as e:
+        return ToolResult.failure(f"could not read the page: {_first_line(e)}")
+
+
+# ---------------------------------------------------------------- click
+class ClickParams(BaseModel):
+    text: str = Field(description="visible text of the button or link to click")
+
+
+def _snapshot(page) -> tuple:
+    body = page.evaluate("() => (document.body ? document.body.innerText : '').length")
+    return page.url, page.title(), body
+
+
+def click_text(p: ClickParams) -> ToolResult:
+    page, err = _page_or_error()
+    if err:
+        return err
+    try:
+        before = _snapshot(page)
+        target = None
+        for locator in (
+            page.get_by_role("button", name=p.text),
+            page.get_by_role("link", name=p.text),
+            page.get_by_text(p.text),
+        ):
+            if locator.count() > 0:
+                target = locator.first
+                break
+        if target is None:
+            return ToolResult.failure(f"nothing on the page with the text '{p.text}'", retryable=False)
+        target.click()
+    except PlaywrightError as e:
+        return ToolResult.failure(f"could not click '{p.text}': {_first_line(e)}")
+    result = ToolResult.success(f"clicked '{p.text}'")
+    result.context["before"] = before
+    return result
+
+
+def verify_click(p: ClickParams, r: ToolResult) -> VerifyResult:
+    page, err = _page_or_error()
+    if err:
+        return VerifyResult(False, err.error)
+
+    def changed():
+        try:
+            now = _snapshot(page)
+        except PlaywrightError:
+            return True  # the page was navigating away, which is a change
+        return now if now != r.context["before"] else None
+
+    now = _wait_for(changed)
+    if now:
+        return VerifyResult(True, "the page changed after the click")
+    return VerifyResult(False, "the page looks the same after the click (it may have had no visible effect)")
+
+
+# ---------------------------------------------------------------- youtube
+class YoutubeParams(BaseModel):
+    query: str = Field(description="what to search on YouTube and play, e.g. lofi beats")
+
+
+_VIDEO_STATE_JS = """() => {
+  const v = document.querySelector('video');
+  return v ? {paused: v.paused, time: v.currentTime, ready: v.readyState} : null;
+}"""
+
+
+def youtube_play(p: YoutubeParams) -> ToolResult:
+    page, err = _page_or_error()
+    if err:
+        return err
+    try:
+        page.goto("https://www.youtube.com/results?search_query=" + quote_plus(p.query), wait_until="domcontentloaded")
+        page.bring_to_front()
+        if "consent." in page.url:
+            return ToolResult.failure("YouTube is asking for cookie consent; accept it once in the Orbit browser window", retryable=False)
+        first = page.locator("ytd-video-renderer a#video-title").first
+        first.wait_for(state="visible")
+        first.click()
+        page.wait_for_url("**/watch*")
+        page.locator("video").first.wait_for(state="attached")
+        page.evaluate("() => { const v = document.querySelector('video'); if (v && v.paused) v.play(); }")
+        # The tab title is just "YouTube" until the video's own title loads.
+        _wait_for(lambda: page.title() not in ("", "YouTube"), timeout=5.0)
+        title = page.title().removesuffix(" - YouTube")
+    except PlaywrightError as e:
+        return ToolResult.failure(f"could not play '{p.query}' on YouTube: {_first_line(e)}")
+    return ToolResult.success(f"playing '{title}' on YouTube")
+
+
+def verify_youtube_play(p: YoutubeParams, r: ToolResult) -> VerifyResult:
+    page, err = _page_or_error()
+    if err:
+        return VerifyResult(False, err.error)
+    if "/watch" not in page.url:
+        return VerifyResult(False, f"not on a video page ({page.url})")
+
+    def playing():
+        state = page.evaluate(_VIDEO_STATE_JS)
+        return state if state and not state["paused"] and state["ready"] >= 2 else None
+
+    state = _wait_for(playing, timeout=8.0)
+    if state:
+        return VerifyResult(True, f"video is playing at {state['time']:.0f}s")
+    return VerifyResult(False, "the video element is not playing")
+
+
+# ---------------------------------------------------------------- fullscreen
+class FullscreenParams(BaseModel):
+    on: bool = Field(default=True, description="true to enter fullscreen, false to leave it")
+
+
+def _is_fullscreen(page) -> bool:
+    return bool(page.evaluate("() => !!document.fullscreenElement"))
+
+
+def set_fullscreen(p: FullscreenParams) -> ToolResult:
+    page, err = _page_or_error()
+    if err:
+        return err
+    try:
+        if _is_fullscreen(page) == p.on:
+            return ToolResult.success("already " + ("fullscreen" if p.on else "not fullscreen"))
+        if not p.on:
+            page.evaluate("() => document.exitFullscreen()")
+        else:
+            if page.locator("video").count() == 0:
+                return ToolResult.failure("there is no video on this page to make fullscreen", retryable=False)
+            button = page.locator("button.ytp-fullscreen-button")
+            if button.count() > 0:  # YouTube: use its own button (a real click is needed to enter fullscreen)
+                page.locator("#movie_player").hover()
+                button.first.click()
+            else:
+                page.locator("video").first.dblclick()
+    except PlaywrightError as e:
+        return ToolResult.failure(f"could not change fullscreen: {_first_line(e)}")
+    return ToolResult.success("entered fullscreen" if p.on else "left fullscreen")
+
+
+def verify_fullscreen(p: FullscreenParams, r: ToolResult) -> VerifyResult:
+    page, err = _page_or_error()
+    if err:
+        return VerifyResult(False, err.error)
+    ok = _wait_for(lambda: _is_fullscreen(page) == p.on)
+    return VerifyResult(bool(ok), f"document.fullscreenElement is {'set' if _is_fullscreen(page) else 'empty'}")
+
+
+# ---------------------------------------------------------------- registration
+def register_browser_tools(registry: Registry) -> None:
+    def add(name, description, params, run, verify, **kw):
+        registry.register(Tool(name=name, description=description, params=params, layer="browser",
+                               risk="low", run=run, verify=verify, **kw))
+
+    add("browser_open", "Open a website address in the browser.", OpenParams, open_url, verify_open)
+    add("browser_search", "Search the web for a phrase in the browser.", SearchParams, search_web, verify_open)
+    add("browser_page_info", "Read the title, address and text of the page now open in the browser.", NoParams, page_info, read_only_verify)
+    add("browser_click", "Click a button or link on the open page by its visible text.", ClickParams, click_text, verify_click,
+        idempotent=False, needs_confirm=lambda p: bool(_RISKY_CLICK.search(p.text)))
+    add("browser_youtube_play", "Search YouTube for something and play the first video.", YoutubeParams, youtube_play, verify_youtube_play)
+    add("browser_fullscreen", "Make the video on the open page fullscreen, or leave fullscreen.", FullscreenParams, set_fullscreen, verify_fullscreen)

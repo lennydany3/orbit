@@ -3,11 +3,11 @@
 A local assistant that operates your Windows PC from plain-language text requests
 ("open Spotify", "volume 30", "open my GitHub"). Runs on a local model (Qwen2.5 7B via Ollama), no paid API.
 
-**Status: Step 2 of 5 (OS layer done).** Open apps, windows, media keys, volume. Browser (Step 3) and Spotify API (Step 4) come next.
+**Status: Step 3 of 5 (browser layer done).** Open apps, windows, media keys, volume, websites, YouTube. The Spotify API (Step 4) comes next.
 
 ## Setup (Windows 11, Python 3.12)
 
-1. Install [Ollama](https://ollama.com) and start it.
+1. Install [Ollama](https://ollama.com) and start it. Install Google Chrome (the browser layer drives it).
 2. `ollama pull qwen2.5:7b` (about 4.7 GB).
 3. In this folder: `python -m venv .venv`
 4. `.venv\Scripts\activate`
@@ -31,8 +31,15 @@ text -> fast rules (no model) --match--> tool call
 - Ctrl+C stops a running request. Step cap: 8 model round-trips. Stops after 3 failed tool calls in a row.
 - Name lives in `src/orbit/config.py` (`APP_NAME`). Limits and the model name are there too.
 
+## Browser layer
+
+Orbit opens its own visible Chrome window with a separate profile in `.browser-profile/` (gitignored; your real Chrome and tabs are never touched). It stays open between requests and closes when Orbit exits. Log in to sites once in that window and the login is kept. Only http(s) links are opened. Clicking a button whose text looks risky (buy, send, delete, pay...) asks you first. Web search uses DuckDuckGo.
+
 ## Known limits (honest list)
 
+- YouTube "playing" is verified from the video element, so a pre-roll ad counts as playing. Cookie-consent pages (EU) must be accepted once by hand.
+- `browser_click` finds things by visible text and can't be retried automatically (a second click could undo the first); if nothing visibly changes it reports failure.
+- Pages that block automation (captchas, logins with 2FA) cannot be driven.
 - Media keys go to whatever Windows treats as the current media session (often the last app that played). `pause`/`play` are safe to repeat; `next`/`prev` are verified by track change, which can't be confirmed for live streams or one-track playlists.
 - Opening an app finds it by Start-menu name; if two apps match ("visual studio") it asks instead of guessing. Store apps can show their window under a generic host, so window matching may miss some.
 - Windows may refuse to bring a window to the front; the tool then reports failure rather than pretending.

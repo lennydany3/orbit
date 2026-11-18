@@ -69,6 +69,8 @@ class Tool:
     run: Callable[[Any], ToolResult]      # receives the validated params model
     verify: Callable[[Any, ToolResult], VerifyResult] | None = None
     capability: str = ""                  # same capability on several layers = fallbacks of each other
+    idempotent: bool = True               # False = running it twice could do harm (a click), so never auto-retry
+    needs_confirm: Callable[[Any], bool] | None = None  # per-call risk check on top of `risk`
 
     def __post_init__(self) -> None:
         if self.layer not in LAYER_ORDER:

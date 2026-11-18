@@ -16,8 +16,14 @@ MAX_CONSECUTIVE_FAILURES = 3  # stop after this many failed tool calls in a row
 MAX_TOOLS_PER_REQUEST = 10    # only this many tool schemas are sent to the model
 VERIFY_RETRIES = 1            # re-run an action once if it fails or fails to verify
 
-# --- Safety ---
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# --- Browser layer ---
+BROWSER_CHANNEL = "chrome"       # drive the installed Google Chrome (no separate download)
+BROWSER_HEADLESS = False        # visible window: you can watch it work, and fullscreen is real
+BROWSER_PROFILE_DIR = PROJECT_ROOT / ".browser-profile"  # Orbit-only profile: never your real Chrome data
+
+# --- Safety ---
 LOG_DIR = PROJECT_ROOT / "logs"
 # Tools may only touch files under these folders.
 ALLOWED_DIRS = [

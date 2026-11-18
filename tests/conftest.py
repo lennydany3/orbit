@@ -10,7 +10,7 @@ from orbit.llm.base import LLMResponse, ToolCall
 from orbit.tools.base import Registry
 from orbit.tools.fake import register_fake_tools
 
-CURRENT_STEP = 2  # raise this as build steps are finished; later-step cases are skipped until then
+CURRENT_STEP = 3  # raise this as build steps are finished; later-step cases are skipped until then
 
 
 def load_cases() -> list[dict]:

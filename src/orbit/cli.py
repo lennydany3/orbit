@@ -10,11 +10,13 @@ from .llm.ollama_llm import OllamaLLM
 from .logging_setup import ActionLog, setup_logging
 from .tools.api_layer import register_api_tools
 from .tools.base import Registry
+from .tools.browser_layer import register_browser_tools
+from .tools.browser_layer.session import session as browser_session
 from .tools.fake import register_fake_tools
 from .tools.os_layer import register_os_tools
 
 HELP = """Commands: help | tools | quit
-Anything else is a request. Fast rules (no model): open spotify | volume 30 | volume up | mute | pause | play | next | previous
+Anything else is a request. Fast rules (no model): open spotify | open github | play lofi on youtube | fullscreen | volume 30 | volume up | mute | pause | play | next | previous
 Anything else goes to the model:  switch to chrome | what's playing? | what windows are open?
 (start with --fake-tools to also get the echo/danger test tools)"""
 
@@ -25,6 +27,7 @@ def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: boo
     registry = Registry()
     register_api_tools(registry)   # empty until Step 4
     register_os_tools(registry)
+    register_browser_tools(registry)
     if fake_tools:
         register_fake_tools(registry)  # test tools from Step 1; off by default so the model isn't tempted to use them
     llm = OllamaLLM(model=model) if use_llm else None
@@ -32,6 +35,13 @@ def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: boo
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    finally:
+        browser_session.close()  # close the Orbit browser window when Orbit exits
+
+
+def _main(argv: list[str] | None) -> int:
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(prog="orbit", description=f"{config.APP_NAME}: local desktop assistant")

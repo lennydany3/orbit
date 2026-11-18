@@ -5,6 +5,7 @@ so it works for Spotify, browsers, etc. Pressing uses real media keys, so it goe
 """
 import asyncio
 import ctypes
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessionManager as SessionManager
@@ -43,7 +44,9 @@ async def _read() -> MediaState:
 
 
 def state() -> MediaState:
-    return asyncio.run(_read())
+    # Own thread = own event loop: asyncio.run() fails if this thread already hosts one (Playwright's sync API does).
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(_read())).result()
 
 
 def press(key: str) -> None:

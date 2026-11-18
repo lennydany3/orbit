@@ -4,7 +4,7 @@ Rules enforced here (in code, not in the prompt):
 - candidates are tried in layer order: api -> os -> browser -> vision
 - an action only counts as success if its verifier confirms it (or it has none, and the result says so)
 - permanent failures (not found, bad target) are not retried, only passed to the next layer
-- a risky (confirm) tool is never retried automatically, so it can't be done twice by accident
+- a risky (confirm) or non-idempotent tool (a click) is never retried automatically, so it can't be done twice by accident
 - every retry and every fallback is logged visibly
 """
 import time
@@ -37,7 +37,7 @@ class Router:
         return ToolResult.failure(f"could not complete and verify the action on any layer ({names}). Last error: {last_error}")
 
     def _try_tool(self, tool: Tool, params: BaseModel) -> tuple[ToolResult | None, str]:
-        attempts = 1 if tool.risk == "confirm" else 1 + self.verify_retries
+        attempts = 1 if (tool.risk == "confirm" or not tool.idempotent) else 1 + self.verify_retries
         error = ""
         for attempt in range(1, attempts + 1):
             if attempt > 1:

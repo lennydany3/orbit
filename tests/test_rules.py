@@ -21,6 +21,6 @@ def test_case_insensitive_and_trimmed():
     assert m and m.args == {"text": "Hello"}
 
 
-@pytest.mark.parametrize("text", ["", "hello there", "echo", "please echo hi", "open spotify and play music", "open github, then search cats"])
+@pytest.mark.parametrize("text", ["", "hello there", "echo", "please echo hi", "open spotify and play music", "open github, then search cats", "search cats on youtube and fullscreen the first video", "search pizza and pasta"])
 def test_no_match_goes_to_llm(text):
     assert rules.match(text) is None
