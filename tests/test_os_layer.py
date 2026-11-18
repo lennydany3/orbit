@@ -19,6 +19,7 @@ APPS = [
     App("Android Studio", r"{6D809377}\Android\Android Studio\bin\studio64.exe"),
     App("Visual Studio Code", r"{X}\Microsoft VS Code\Code.exe"),
     App("Visual Studio Installer", r"{X}\Installer\setup.exe"),
+    App("Speedtest", "Ookla.Speedtest_abc!App"),
 ]
 
 
@@ -31,6 +32,18 @@ APPS = [
 def test_resolve_finds_app(query, expected):
     app, _ = resolve_app(query, APPS)
     assert app and app.name == expected
+
+
+@pytest.mark.parametrize("query", ["Speedtest by Ookla", "the speedtest app", "speedtest by ookla desktop"])
+def test_resolve_when_the_model_adds_extra_words(query):
+    app, _ = resolve_app(query, APPS)
+    assert app and app.name == "Speedtest"
+
+
+def test_resolve_extra_words_picks_the_longest_matching_name():
+    apps_ = [App("Visual Studio", "a"), App("Visual Studio Code", "b")]
+    app, _ = resolve_app("open visual studio code please", apps_)
+    assert app and app.name == "Visual Studio Code"
 
 
 def test_resolve_refuses_to_guess_when_ambiguous():

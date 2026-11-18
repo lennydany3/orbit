@@ -43,7 +43,8 @@ def installed_apps() -> tuple[App, ...]:
 def resolve_app(query: str, apps) -> tuple[App | None, list[str]]:
     """Best app for a spoken name. Returns (app, []) or (None, suggestions).
 
-    Tiers: exact name > name starts with query > query is a whole word in name > substring > fuzzy.
+    Tiers: exact name > name starts with query > query is a whole word in name > substring >
+    the app's whole name appears inside the query ("Speedtest by Ookla" -> "Speedtest") > fuzzy.
     If a tier has several different apps we refuse to guess and return them as suggestions.
     """
     q = query.strip().lower()
@@ -54,6 +55,7 @@ def resolve_app(query: str, apps) -> tuple[App | None, list[str]]:
         [a for a in apps if a.name.lower().startswith(q)],
         [a for a in apps if q in a.name.lower().split()],
         [a for a in apps if q in a.name.lower()],
+        _named_inside(q, apps),
     ]
     for tier in tiers:
         names = sorted({a.name for a in tier})
@@ -66,6 +68,16 @@ def resolve_app(query: str, apps) -> tuple[App | None, list[str]]:
     if close and difflib.SequenceMatcher(None, q, close[0]).ratio() >= 0.8:
         return lowered[close[0]], []
     return None, [lowered[c].name for c in close]
+
+
+def _named_inside(q: str, apps) -> list[App]:
+    """Apps whose full name is a whole-word part of the query. If several, only the longest name counts."""
+    padded = f" {q} "
+    hits = [a for a in apps if len(a.name) >= 4 and f" {a.name.lower()} " in padded]
+    if not hits:
+        return []
+    longest = max(len(a.name) for a in hits)
+    return [a for a in hits if len(a.name) == longest]
 
 
 def launch(app: App) -> None:
