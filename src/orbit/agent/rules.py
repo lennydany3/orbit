@@ -3,6 +3,7 @@
 Each rule maps a sentence to (tool name, args). The agent only uses a match if that tool is registered,
 otherwise the request goes to the LLM. Later steps add rules like "open <app>", "volume <n>", "pause".
 """
+import difflib
 import re
 from dataclasses import dataclass, field
 from typing import Callable
@@ -91,8 +92,21 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
      lambda m: ("browser_open", {"url": _site_url(m["site"].lower(), bool(m["my"]))})),
     ("open-url", re.compile(rf"^{_VERB}\s+(?P<url>(?:https?://)?[\w-]+(?:\.[\w-]+)+(?:/\S*)?)$", re.I),
      lambda m: ("browser_open", {"url": m["url"] if "://" in m["url"] else "https://" + m["url"]})),
+    ("click-first-video", re.compile(r"^(?:click|press|tap|select|hit|open|play)\s+(?:on\s+)?(?:the\s+)?(?:first|top|1st)\s+(?:video|result|one)$", re.I),
+     lambda m: ("browser_youtube_play", {"query": ""})),
     ("click", re.compile(r"^(?:click|press|tap|select|hit)\s+(?:on\s+)?(?:the\s+)?(?!(?:it|that|this)$)(?P<text>.+?)(?: (?:button|link|video))?$", re.I),
      lambda m: ("browser_click", {"text": m["text"].strip()})),
+    # --- browser history and home pages: "go back" is the browser's Back button, not the previous song ---
+    ("browser-back", re.compile(r"^(?:go |navigate |take me |step )?back(?: (?:a page|one page|to the previous page|to the last page|to the page before))?$", re.I),
+     lambda m: ("browser_navigate", {"action": "back"})),
+    ("browser-forward", re.compile(r"^(?:go |navigate )?forward(?: (?:a page|one page))?$", re.I),
+     lambda m: ("browser_navigate", {"action": "forward"})),
+    ("browser-reload", re.compile(r"^(?:reload|refresh)(?: (?:the |this )?(?:page|tab|site))?$", re.I),
+     lambda m: ("browser_navigate", {"action": "reload"})),
+    ("site-home", re.compile(rf"^(?:go |navigate |take me )?(?:back )?(?:to )?(?:the )?(?:(?P<a>{_SITE_NAMES}) (?:home ?page|home|main page)|home ?page (?:of|on) (?:the )?(?P<b>{_SITE_NAMES})|(?P<c>{_SITE_NAMES}) home)$", re.I),
+     lambda m: ("browser_go_to", {"url": SITES[(m["a"] or m["b"] or m["c"]).lower()]})),
+    ("home-page", re.compile(r"^(?:go |navigate |take me )?(?:back )?(?:to )?(?:the )?(?:home ?page|home|main page)(?: of (?:this|the) (?:site|page|website))?$", re.I),
+     lambda m: ("browser_navigate", {"action": "home"})),
     ("youtube-first-video", re.compile(r"^(?:play|watch|start)\s+(?:the |a |any |some |one )?(?:first |top )?(?:videos?|something)(?: on youtube)?$", re.I),
      lambda m: ("browser_youtube_play", {"query": ""})),
     ("youtube-play", re.compile(r"^(?:play|watch)\s+(?P<q>.+?)\s+on youtube$", re.I),
@@ -112,6 +126,17 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
      lambda m: ("os_set_volume", {"level": int(m["n"])})),
     ("volume-step", re.compile(rf"^(?:turn )?{_THE}volume (?P<dir>up|down)$|^turn it (?P<dir2>up|down)$", re.I),
      lambda m: ("os_change_volume", {"delta": 10 if (m["dir"] or m["dir2"]).lower() == "up" else -10})),
+    # --- browser tabs (before close-window: "close all other youtube tabs" is not a window called that) ---
+    ("close-other-tabs", re.compile(r"^close\s+(?:all\s+)?(?:the\s+)?(?:other|extra)\s+(?:(?P<m>[\w .'-]+?)\s+)?tabs?(?: except (?:this|the current) one)?$|^close\s+(?:all\s+)?tabs\s+except\s+(?:this|the current)(?: one| tab)?$", re.I),
+     lambda m: ("browser_close_tabs", {"scope": "others", "match": (m["m"] or "").strip()})),
+    ("close-matching-tabs", re.compile(r"^close\s+(?:all\s+)?(?:the\s+)?(?P<m>(?!(?:this|the|current|other|extra|my|all)\b)[\w .'-]+?)\s+tabs$", re.I),
+     lambda m: ("browser_close_tabs", {"scope": "matching", "match": m["m"].strip()})),
+    ("close-this-tab", re.compile(r"^close\s+(?:this|the current|current|the)\s+tab$|^close\s+tab$", re.I),
+     lambda m: ("browser_close_tabs", {"scope": "this"})),
+    ("switch-tab", re.compile(r"^(?:switch|go|jump|change)\s+to\s+(?:the\s+)?(?P<t>[\w .'-]+?)\s+tab$", re.I),
+     lambda m: ("browser_switch_tab", {"text": m["t"].strip()})),
+    ("list-tabs", re.compile(r"^(?:list|show|what are)\s+(?:me\s+)?(?:all\s+)?(?:my\s+|the\s+)?(?:open\s+)?tabs$", re.I),
+     lambda m: ("browser_tabs", {})),
     ("move-window", _MOVE_TO_MONITOR, lambda m: ("os_move_window", {"title": m["t"].strip().title(), "monitor": m["mon"].strip().lower()})),
     ("arrange-state", re.compile(r"^(?P<act>maximi[sz]e|minimi[sz]e|restore)\s+(?:the\s+|my\s+)?(?!(?:it|that|this|them|window|app)$)(?P<t>[\w .+&'-]+?)(?: (?:app|window))?$", re.I),
      lambda m: ("os_arrange_window", {"title": m["t"].strip().title(), "action": _ACTIONS[m["act"][:3].lower()]})),
@@ -126,7 +151,7 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
      lambda m: ("os_media_key", {"key": "play"})),
     ("next", re.compile(r"^(?:play )?(?:next|skip)(?: (?:the )?(?:song|track))?$", re.I),
      lambda m: ("os_media_key", {"key": "next"})),
-    ("previous", re.compile(r"^(?:play )?(?:previous|prev|go back)(?: (?:the )?(?:song|track))?$", re.I),
+    ("previous", re.compile(r"^(?:play )?(?:previous|prev)(?: (?:the )?(?:song|track))?$", re.I),
      lambda m: ("os_media_key", {"key": "prev"})),
     # --- test tools (Step 1) ---
     ("echo", re.compile(r"^echo\s+(?P<text>.+)$", re.I),
@@ -156,6 +181,18 @@ _PRONOUN_OPEN = re.compile(r"^(?:(?:re)?open|launch|start) (?:it|that|this|them)
 
 # "now brave is in primary monitor move it to secondary monitor": the leading statement is background, the command follows
 _STATEMENT_HEAD = re.compile(r"^(?:now|ok|okay|so|and|well)?\s*[\w .'-]+?\s+(?:is|are)\s+(?:now\s+)?(?:in|on|at)\s+[\w .'-]+?,?\s+(?=(?:move|put|send|shift|maximi[sz]e|minimi[sz]e|snap|close|open)\b)", re.I)
+
+
+_VERBS_FOR_TYPOS = ("click", "open", "close", "play", "pause", "move", "maximize", "minimize", "switch", "search", "press", "restore", "reload", "refresh", "launch")
+
+
+def _fix_first_word(text: str) -> str:
+    """"clcik the ..." -> "click the ...": a mistyped first word is corrected when exactly one known verb is close."""
+    words = text.split(None, 1)
+    if not words or words[0].lower() in COMMAND_WORDS:
+        return text
+    close = difflib.get_close_matches(words[0].lower(), _VERBS_FOR_TYPOS, n=2, cutoff=0.8)
+    return (close[0] + (" " + words[1] if len(words) > 1 else "")) if len(close) == 1 else text
 
 
 def normalize(text: str) -> str:
@@ -205,6 +242,15 @@ def match(text: str, subject: str | None = None, closed: str | None = None, spot
     `spotify_active` = the conversation is about Spotify, so "switch to echo" means a Spotify device;
     `subjects` = everything Orbit opened lately ("close both")."""
     text = normalize(text)
+    found = _match(text, subject, closed, spotify_active, subjects)
+    if found is None:  # a second chance for a mistyped first word ("clcik the ..."), only when nothing else fits
+        fixed = _fix_first_word(text)
+        if fixed != text:
+            found = _match(fixed, subject, closed, spotify_active, subjects)
+    return found
+
+
+def _match(text: str, subject, closed, spotify_active, subjects) -> RuleMatch | None:
     if subject and _PRONOUN_CLOSE.match(text):
         return RuleMatch(rule="close-it", tool="os_close_window", args={"title": subject})
     if subjects and _PLURAL_CLOSE.match(text):

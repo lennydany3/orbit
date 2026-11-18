@@ -1,3 +1,5 @@
+import pytest
+
 from conftest import ScriptedLLM, call
 from orbit.tools.base import ToolResult
 from orbit.llm.base import LLMError, LLMResponse
@@ -257,7 +259,7 @@ def test_chain_stops_at_the_first_failure_and_says_so(logs):
 def test_a_sentence_with_an_unknown_part_goes_to_the_model(logs):
     agent, done = _chain_agent(logs)
     agent.handle("open spotify and do a little dance")
-    assert done == [] and len(agent.llm.calls) == 1  # nothing ran half-way: the model got the whole sentence
+    assert done == [] and len(agent.llm.calls) >= 1  # nothing ran half-way: the model got the whole sentence
 
 
 def test_transfer_with_volume_is_one_tool_call(logs):
@@ -277,7 +279,7 @@ def test_switch_to_x_is_a_spotify_device_only_after_a_spotify_request(logs):
 def test_switch_to_x_without_spotify_context_is_not_taken_for_a_device(logs):
     agent, done = _chain_agent(logs)
     agent.handle("switch to echo")
-    assert done == [] and len(agent.llm.calls) == 1
+    assert done == [] and len(agent.llm.calls) >= 1
 
 
 def test_context_guess_that_fails_for_another_reason_is_reported_not_hidden(logs):
@@ -294,7 +296,7 @@ def test_context_guess_that_matches_no_device_falls_back_to_the_model(logs):
     agent, done = _chain_agent(logs)
     agent.handle("play my fav music")
     agent.handle("switch to chrome")  # looks like a device switch, but no such device: model gets it instead
-    assert done[-1] == ("transfer", "chrome", None) and len(agent.llm.calls) == 1
+    assert done[-1] == ("transfer", "chrome", None) and len(agent.llm.calls) >= 1
 
 
 def test_pause_and_next_go_through_spotify_after_a_spotify_request(logs):
@@ -338,7 +340,7 @@ def test_a_part_without_a_rule_is_handed_to_the_model_on_its_own(logs):
     agent, done = _chain_agent(logs)
     agent.llm = ScriptedLLM(LLMResponse(content="I can look that up once you ask for a specific song."))
     reply = agent.handle("open spotify and tell me a joke")
-    assert done == [("open", "Spotify")] and len(agent.llm.calls) == 1
+    assert done == [("open", "Spotify")] and len(agent.llm.calls) >= 1
     assert agent.llm.calls[0][-1]["content"] == "tell me a joke"  # the model sees only this part (plus memory)
     assert reply == "opened Spotify\nI can look that up once you ask for a specific song."
 
@@ -369,7 +371,7 @@ def test_one_sentence_that_is_really_one_request_is_not_split(logs):
     agent, done = _chain_agent(logs)
     agent.llm = ScriptedLLM(LLMResponse(content="ok"))
     agent.handle("play rock and roll classics")
-    assert len(agent.llm.calls) == 1 and agent.llm.calls[0][-1]["content"] == "play rock and roll classics"
+    assert len(agent.llm.calls) >= 1 and agent.llm.calls[0][-1]["content"] == "play rock and roll classics"
 
 
 def test_open_two_then_close_both(logs):
@@ -469,3 +471,36 @@ def test_a_rule_that_finds_nothing_is_reported_as_is_when_there_is_no_model(logs
     tool = agent.registry.get_exposed("os_close_window")
     tool.run = lambda p: ToolResult.failure("no open window matches 'Notes'", retryable=False, not_found=True)
     assert "no open window matches 'Notes'" in agent.handle("close the notes")
+
+
+@pytest.mark.parametrize("reply", ["clicked 'Paal Dabba - Official Music Video' in your Brave", "I pressed the back button.", "Navigated to the home page."])
+def test_invented_clicks_and_navigation_are_caught(make_agent, reply):
+    llm = ScriptedLLM(LLMResponse(content=reply), LLMResponse(content=reply))
+    assert "did not run any tool" in make_agent(llm).handle("what ever you want now")  # not an action request: caught by the claim words
+
+
+@pytest.mark.parametrize("request_text", ["clcik the paal dabba video", "open the thing", "move it somewhere", "go back"])
+def test_any_action_request_answered_without_a_tool_is_never_accepted(make_agent, request_text):
+    llm = ScriptedLLM(LLMResponse(content="Sure thing."), LLMResponse(content="Sure thing."))
+    reply = make_agent(llm).handle(request_text)
+    assert "did not run any tool" in reply  # even with no claim word in the reply: an action was asked for
+
+
+def test_questions_and_chat_are_still_just_answered(make_agent):
+    llm = ScriptedLLM(LLMResponse(content="Paris."))
+    assert make_agent(llm).handle("what is the capital of france") == "Paris."
+
+
+def test_when_a_rule_found_nothing_and_the_model_only_invents_the_real_failure_is_shown(logs):
+    agent, done = _chain_agent(logs)
+    tool = agent.registry.get_exposed("os_close_window")
+    tool.run = lambda p: ToolResult.failure("no open window matches 'Notes'. Open windows include: 'Clock'", retryable=False, not_found=True)
+    agent.llm = ScriptedLLM(LLMResponse(content="Closed the notes for you."), LLMResponse(content="Done, closed the notes."))
+    reply = agent.handle("close the notes")
+    assert "no open window matches 'Notes'" in reply and "Closed the notes" not in reply
+
+
+def test_an_invented_reply_is_replaced_not_shown(make_agent):
+    llm = ScriptedLLM(LLMResponse(content="Clicked 'Paal Dabba' in your Brave."), LLMResponse(content="Clicked 'Paal Dabba' in your Brave."))
+    reply = make_agent(llm).handle("click the paal dabba video")
+    assert "Paal Dabba" not in reply and "Nothing was done" in reply and "did not run any tool" in reply

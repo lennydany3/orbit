@@ -149,7 +149,6 @@ def test_open_brave_itself_is_still_an_app():
     ("click theater mode", "theater mode"),
     ("in youtube click the ishowspeed live", "ishowspeed live"),
     ("can you press the subscribe button", "subscribe"),
-    ("tap on the first video", "first"),
     ("click on sign in", "sign in"),
 ])
 def test_click_goes_to_the_click_tool_not_the_model(text, target):
@@ -210,3 +209,61 @@ def test_a_leading_statement_is_background_and_the_command_still_runs(text):
 def test_statement_stripping_does_not_swallow_real_commands():
     assert rules.match("open spotify").tool == "os_open_app"
     assert rules.match("close the clock").tool == "os_close_window"
+
+
+@pytest.mark.parametrize("text", ["click the first video", "tap on the top video", "play the first result", "open the 1st one"])
+def test_the_first_video_is_not_a_control_called_first(text):
+    m = rules.match(text)
+    assert m and (m.tool, m.args) == ("browser_youtube_play", {"query": ""})
+
+
+@pytest.mark.parametrize("text, tool, args", [
+    ("go back", "browser_navigate", {"action": "back"}),
+    ("can you go back to the previous page", "browser_navigate", {"action": "back"}),
+    ("go forward", "browser_navigate", {"action": "forward"}),
+    ("refresh the page", "browser_navigate", {"action": "reload"}),
+    ("go back to home page of youtube", "browser_go_to", {"url": "https://www.youtube.com"}),
+    ("youtube home page", "browser_go_to", {"url": "https://www.youtube.com"}),
+    ("go to github home", "browser_go_to", {"url": "https://github.com"}),
+    ("go to the home page", "browser_navigate", {"action": "home"}),
+    ("previous song", "os_media_key", {"key": "prev"}),  # "go back" is the BROWSER now; songs keep "previous"
+])
+def test_browser_history_and_home_pages(text, tool, args):
+    m = rules.match(text)
+    assert m and (m.tool, m.args) == (tool, args)
+
+
+def test_a_mistyped_verb_is_repaired_but_app_names_are_left_alone():
+    assert rules.match("clcik the first video").tool == "browser_youtube_play"
+    assert rules.match("clcik sign in").args == {"text": "sign in"}
+    # "clock" is within typo distance of "click", but it is an app name and a rule already fits: never "corrected"
+    assert rules.match("open clock").args == {"name": "Clock"}
+    assert rules.split_commands("open calculator and clock app") == ["open calculator", "open clock app"]
+
+
+@pytest.mark.parametrize("text, scope, match", [
+    ("close all other youtube tabs", "others", "youtube"),
+    ("close other tabs", "others", ""),
+    ("close all tabs except this one", "others", ""),
+    ("close all youtube tabs", "matching", "youtube"),
+    ("close this tab", "this", None),
+    ("close the current tab", "this", None),
+])
+def test_closing_tabs(text, scope, match):
+    m = rules.match(text)
+    assert m and m.tool == "browser_close_tabs" and m.args["scope"] == scope and m.args.get("match", None) == match or (m and m.args == {"scope": "this"})
+
+
+def test_close_all_tabs_is_not_guessed_at():
+    m = rules.match("close all tabs")
+    assert m is None or m.tool != "browser_close_tabs"  # that would close the window: the user has to say what they mean
+
+
+@pytest.mark.parametrize("text, tool, args", [
+    ("switch to the github tab", "browser_switch_tab", {"text": "github"}),
+    ("list my tabs", "browser_tabs", {}),
+    ("show all open tabs", "browser_tabs", {}),
+])
+def test_switch_and_list_tabs(text, tool, args):
+    m = rules.match(text)
+    assert m and (m.tool, m.args) == (tool, args)

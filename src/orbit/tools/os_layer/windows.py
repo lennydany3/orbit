@@ -215,3 +215,18 @@ def set_rect(hwnd: int, left: int, top: int, width: int, height: int) -> None:
     d_left, d_top = vis[0] - out[0], vis[1] - out[1]
     d_width, d_height = (out[2] - out[0]) - (vis[2] - vis[0]), (out[3] - out[1]) - (vis[3] - vis[1])
     user32.SetWindowPos(hwnd, None, left - d_left, top - d_top, width + d_width, height + d_height, _SWP_NOZORDER_NOACTIVATE)
+
+
+def press_enter() -> None:
+    """Press and release Enter in whatever window has the keyboard focus (focus it first)."""
+    user32.keybd_event(0x0D, 0, 0, None)
+    user32.keybd_event(0x0D, 0, _KEYEVENTF_KEYUP, None)
+
+
+def press_ctrl(key: str) -> None:
+    """Press Ctrl+<letter> in whatever window has the keyboard focus (focus the right one first!)."""
+    vk = ord(key.upper())
+    user32.keybd_event(0x11, 0, 0, None)  # Ctrl down
+    user32.keybd_event(vk, 0, 0, None)
+    user32.keybd_event(vk, 0, _KEYEVENTF_KEYUP, None)
+    user32.keybd_event(0x11, 0, _KEYEVENTF_KEYUP, None)

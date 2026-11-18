@@ -37,12 +37,19 @@ class FakeBrave:
                          Control("Delete account", "button", False, "el-delete")]
         self.clicked = []
         self.on_click = {}  # element -> callable that changes the fake page
+        self.hrefs = {}     # element -> the address the link points to
+        self.typed = []     # addresses typed into the address bar
 
-    def click(self, control):
+    def click(self, control, mouse=False):
         self.clicked.append(control.element)
-        if control.element in self.on_click:
+        if control.element in self.on_click and not getattr(self, "ignores_invoke", False):
             self.on_click[control.element]()
         return "invoke"
+
+    def set_address(self, hwnd, url):
+        self.typed.append(url)
+        self.url = url.removeprefix("https://")
+        return True
 
 
 @pytest.fixture
@@ -54,7 +61,10 @@ def brave(monkeypatch, logs):
     monkeypatch.setattr(mine.windows, "foreground_window", lambda: fb.win)
     monkeypatch.setattr(mine.uia, "controls", lambda hwnd, limit=600: list(fb.controls))
     monkeypatch.setattr(mine.uia, "address_bar", lambda hwnd: fb.url)
-    monkeypatch.setattr(mine.uia, "click", fb.click)
+    monkeypatch.setattr(mine.uia, "click", lambda control, mouse=False: fb.click(control, mouse))
+    monkeypatch.setattr(mine, "LINK_GRACE_S", 0.2)
+    monkeypatch.setattr(mine.uia, "link_target", lambda control: fb.hrefs.get(control.element, ""))
+    monkeypatch.setattr(mine.uia, "set_address", fb.set_address)
     monkeypatch.setattr(mine, "SETTLE_S", 0.3)
     monkeypatch.setattr(mine, "RESULTS_WAIT_S", 0.5)
     monkeypatch.setattr(mine, "PAGE_WAIT_S", 0.3)
@@ -178,3 +188,151 @@ def test_youtube_play_that_never_starts_is_reported(brave, monkeypatch):
 def test_empty_query_needs_a_youtube_page_already_open(brave):
     r = brave.run("browser_youtube_play", YoutubeParams(query=""))  # window title is "Some page - Brave"
     assert not r.ok and "not on YouTube" in r.error
+
+
+def test_a_link_that_ignores_the_accessible_press_is_opened_by_its_address(brave):
+    brave.ignores_invoke = True
+    brave.controls = [Control("Some video 3 minutes", "link", False, "v")]
+    brave.hrefs["v"] = "https://www.youtube.com/watch?v=1"
+    r = brave.run("browser_click", ClickParams(text="some video"))
+    assert r.ok and r.verified and brave.clicked == ["v"] and brave.typed == ["https://www.youtube.com/watch?v=1"]
+
+
+def test_a_link_with_no_readable_address_is_not_guessed_at(brave):
+    brave.ignores_invoke = True
+    brave.controls = [Control("Menu thing", "link", False, "v")]
+    r = brave.run("browser_click", ClickParams(text="menu thing"))
+    assert not r.ok and brave.typed == []
+
+
+def test_a_flickering_title_is_not_a_link_navigation(brave):
+    brave.controls = [Control("Some video 3 minutes", "link", False, "v")]
+    brave.on_click["v"] = lambda: setattr(brave, "win", Window(77, "Loading... - Brave", "brave"))  # title changes, address does not
+    r = brave.run("browser_click", ClickParams(text="some video"))
+    assert not r.ok and "looks the same" in r.error
+
+
+# ---------- typo-tolerant matching ----------
+@pytest.mark.parametrize("query, name, positive", [
+    ("theh traver walles viedo", "Trevor Wallace Making Sara Saffari Laugh like a Hyena For 4:24 5 Minute Clips 871k views", True),
+    ("clik the gta live", "Live! UNTIL FINISHING GTA 6", True),
+    ("paal dabba video", "Bindaas Song Performance - Jailer 2 | Rajinikanth | Anirudh", False),   # not on the page: never a lookalike
+    ("the video", "Some random thing", False),                                                     # only filler words: no match
+])
+def test_typos_and_filler_words_are_forgiven_but_not_made_up(query, name, positive):
+    assert (match_score(query, name) > 0) is positive
+
+
+def test_the_clearly_best_of_several_candidates_wins():
+    items = [Control("GTA 6 - Let's Begin #1", "link", False, "a"), Control("Trevor Wallace Making Sara Saffari Laugh", "link", False, "b"),
+             Control("Bindaas Song Performance", "link", False, "c")]
+    assert find(items, "theh traver walles viedo")[0].element == "b"
+
+
+# ---------- tabs ----------
+class FakeTabs:
+    def __init__(self, names, current=0):
+        self.tabs = [{"name": n, "rid": (1, i)} for i, n in enumerate(names)]
+        self.current = self.tabs[current]["rid"]
+        self.keys = []
+        self.foreground_ok = True
+
+    def controls(self, hwnd):
+        return [Control(t["name"], "tab", False, t["rid"], selected=t["rid"] == self.current, rid=t["rid"]) for t in self.tabs]
+
+    def select(self, control):
+        self.current = control.rid
+
+    def press_ctrl(self, key):
+        self.keys.append(key)
+        if key == "w":
+            idx = next(i for i, t in enumerate(self.tabs) if t["rid"] == self.current)
+            del self.tabs[idx]
+            if self.tabs:
+                self.current = self.tabs[min(idx, len(self.tabs) - 1)]["rid"]
+
+
+@pytest.fixture
+def tabs(brave, monkeypatch):
+    ft = FakeTabs(["Home - YouTube", "Video one - YouTube", "GitHub", "Video two - YouTube", "Docs", "Video three - YouTube"], current=1)
+    monkeypatch.setattr(mine.uia, "tabs", ft.controls)
+    monkeypatch.setattr(mine.uia, "select_tab", ft.select)
+    monkeypatch.setattr(mine.windows, "press_ctrl", ft.press_ctrl)
+    monkeypatch.setattr(mine.windows, "focus", lambda hwnd: True)
+    ft.brave = brave
+    return ft
+
+
+def test_list_tabs_marks_the_current_one(brave, tabs):
+    r = brave.run("browser_tabs", NoParams())
+    assert r.ok and "6 tab(s)" in r.summary and "2. Video one - YouTube  [current]" in r.data
+
+
+def test_close_all_other_youtube_tabs_keeps_the_current_one_and_the_non_youtube_ones(brave, tabs):
+    from orbit.tools.browser_layer import CloseTabsParams
+    r = brave.run("browser_close_tabs", CloseTabsParams(scope="others", match="youtube"))
+    names = [t["name"] for t in tabs.tabs]
+    assert r.ok and r.verified and names == ["Video one - YouTube", "GitHub", "Docs"]
+    assert tabs.current == tabs.tabs[0]["rid"]  # back on the tab the user was on
+
+
+def test_close_this_tab(brave, tabs):
+    from orbit.tools.browser_layer import CloseTabsParams
+    r = brave.run("browser_close_tabs", CloseTabsParams(scope="this"))
+    assert r.ok and r.verified and "Video one - YouTube" not in [t["name"] for t in tabs.tabs]
+
+
+def test_closing_would_empty_the_window_is_refused(brave, tabs):
+    from orbit.tools.browser_layer import CloseTabsParams
+    r = brave.run("browser_close_tabs", CloseTabsParams(scope="matching", match=""))
+    assert not r.ok and "closes the whole window" in r.error and tabs.keys == []
+
+
+def test_no_matching_tabs_lists_the_open_ones(brave, tabs):
+    from orbit.tools.browser_layer import CloseTabsParams
+    r = brave.run("browser_close_tabs", CloseTabsParams(scope="others", match="netflix"))
+    assert not r.ok and r.not_found and "GitHub" in r.error and tabs.keys == []
+
+
+def test_ctrl_w_is_never_sent_if_brave_does_not_have_the_keyboard(brave, tabs, monkeypatch):
+    from orbit.tools.browser_layer import CloseTabsParams
+    monkeypatch.setattr(mine.windows, "foreground_window", lambda: Window(5, "Visual Studio Code", "code"))  # focus was stolen
+    r = brave.run("browser_close_tabs", CloseTabsParams(scope="others", match="youtube"))
+    assert not r.ok and "lost the keyboard focus" in r.error and tabs.keys == []  # VS Code would have closed an editor tab
+
+
+def test_closing_many_tabs_asks_first_but_a_couple_does_not(brave, tabs):
+    from orbit.agent.safety import Safety
+    from orbit.tools.browser_layer import CloseTabsParams
+    tool = brave.reg.get_exposed("browser_close_tabs")
+    asked = []
+    safety = Safety(confirm=lambda q: asked.append(q) or False)
+    assert safety.approve([tool], CloseTabsParams(scope="others", match=""))[0] is False and asked  # 5 tabs
+    asked.clear()
+    assert safety.approve([tool], CloseTabsParams(scope="others", match="youtube"))[0] is True and not asked  # 2 tabs
+
+
+def test_switch_tab_by_title(brave, tabs):
+    from orbit.tools.browser_layer import SwitchTabParams
+    r = brave.run("browser_switch_tab", SwitchTabParams(text="github"))
+    assert r.ok and r.verified and tabs.current == tabs.tabs[2]["rid"]
+
+
+def test_switch_to_a_tab_that_is_not_open(brave, tabs):
+    from orbit.tools.browser_layer import SwitchTabParams
+    r = brave.run("browser_switch_tab", SwitchTabParams(text="netflix"))
+    assert not r.ok and r.not_found
+
+
+@pytest.mark.parametrize("shown, wanted, same", [
+    ("youtube.com", "https://www.youtube.com", True),
+    ("youtube.com/", "https://www.youtube.com", True),
+    ("www.youtube.com", "https://youtube.com/", True),
+    ("youtube.com/shorts/J0T2", "https://www.youtube.com", False),        # same site, NOT the home page
+    ("youtube.com/watch?v=abc", "https://www.youtube.com", False),
+    ("youtube.com/watch?v=abc&pp=1", "https://www.youtube.com/watch?v=abc", True),
+    ("github.com/lennydany3", "https://github.com/lennydany3", True),
+    ("github.com", "https://github.com/lennydany3", False),
+])
+def test_the_address_bar_must_show_the_address_asked_for(shown, wanted, same):
+    assert mine.same_address(shown, wanted) is same

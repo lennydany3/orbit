@@ -5,7 +5,7 @@ Everything read from a page is untrusted data. Each action is verified from page
 """
 import re
 import time
-from typing import Callable
+from typing import Callable, Literal
 from urllib.parse import quote_plus, urlparse
 
 from playwright.sync_api import Error as PlaywrightError
@@ -102,6 +102,91 @@ def _open_in_my_browser(url: str) -> ToolResult:
     result = ToolResult.success(f"opened {url} in your Brave ({config.BRAVE_PROFILE} profile)")
     result.context.update(requested=url, mine=True)
     return result
+
+
+class NavigateParams(BaseModel):
+    action: Literal["back", "forward", "reload", "home"] = Field(description="back / forward in history, reload, or the home page of the site you are on")
+
+
+class GoToParams(BaseModel):
+    url: str = Field(description="web address to load in the current tab, e.g. https://www.youtube.com")
+
+
+class CloseTabsParams(BaseModel):
+    scope: Literal["this", "others", "matching"] = Field(
+        description="this = the current tab; others = every tab except the current one; matching = every tab whose title matches")
+    match: str = Field(default="", description="only tabs whose title fits this, e.g. youtube (empty = any)")
+
+
+class SwitchTabParams(BaseModel):
+    text: str = Field(description="part of the tab's title, e.g. github")
+
+
+_ONLY_YOUR_BRAVE = "Tabs can only be managed in your own Brave window, not in Orbit's separate browser."
+
+
+def list_tabs(p: NoParams) -> ToolResult:
+    return mine.tab_list() if _use_my_browser() else ToolResult.failure(_ONLY_YOUR_BRAVE, retryable=False)
+
+
+def close_tabs(p: CloseTabsParams) -> ToolResult:
+    return mine.close_tabs(p.scope, p.match.strip()) if _use_my_browser() else ToolResult.failure(_ONLY_YOUR_BRAVE, retryable=False)
+
+
+def verify_close_tabs(p: CloseTabsParams, r: ToolResult) -> VerifyResult:
+    return mine.verify_close_tabs(r)
+
+
+def switch_tab(p: SwitchTabParams) -> ToolResult:
+    return mine.switch_tab(p.text) if _use_my_browser() else ToolResult.failure(_ONLY_YOUR_BRAVE, retryable=False)
+
+
+def verify_switch_tab(p: SwitchTabParams, r: ToolResult) -> VerifyResult:
+    return mine.verify_switch_tab(r)
+
+
+def navigate(p: NavigateParams) -> ToolResult:
+    if _use_my_browser():
+        return mine.navigate(p.action)
+    page, err = _page_or_error()
+    if err:
+        return err
+    try:
+        if p.action == "home":
+            parts = urlparse(page.url)
+            page.goto(f"{parts.scheme}://{parts.netloc}/", wait_until="domcontentloaded")
+        else:
+            {"back": page.go_back, "forward": page.go_forward, "reload": page.reload}[p.action](wait_until="domcontentloaded")
+    except PlaywrightError as e:
+        return ToolResult.failure(f"could not go {p.action}: {_first_line(e)}")
+    result = ToolResult.success(f"{p.action}: now on {page.url}")
+    result.context.update(requested=page.url, status=None)
+    return result
+
+
+def verify_navigate(p: NavigateParams, r: ToolResult) -> VerifyResult:
+    if r.context.get("mine"):
+        return mine.verify_navigation(r)
+    page, err = _page_or_error()
+    if err:
+        return VerifyResult(False, err.error)
+    return VerifyResult(not page.url.startswith(("chrome-error:", "about:blank")), f"on {page.url}")
+
+
+def go_to(p: GoToParams) -> ToolResult:
+    try:
+        url = normalize_url(p.url)
+    except ValueError as e:
+        return ToolResult.failure(str(e), retryable=False)
+    if _use_my_browser():
+        return mine.go_to(url)
+    return open_url(OpenParams(url=url))
+
+
+def verify_go_to(p: GoToParams, r: ToolResult) -> VerifyResult:
+    if r.context.get("mine"):
+        return mine.verify_navigation(r)
+    return verify_open(OpenParams(url=p.url), r)
 
 
 def open_url(p: OpenParams) -> ToolResult:
@@ -328,6 +413,14 @@ def register_browser_tools(registry: Registry) -> None:
                                risk="low", run=run, verify=verify, **kw))
 
     add("browser_open", "Open a website address in the browser.", OpenParams, open_url, verify_open)
+    add("browser_navigate", "Go back, forward, reload, or to the site's home page, in the browser tab that is open.", NavigateParams, navigate, verify_navigate,
+        idempotent=False)
+    add("browser_go_to", "Load a web address in the CURRENT browser tab (open does it in a new tab).", GoToParams, go_to, verify_go_to)
+    add("browser_tabs", "List the tabs open in the browser.", NoParams, list_tabs, read_only_verify)
+    add("browser_close_tabs", "Close the current tab, all the other tabs, or tabs whose title matches (e.g. all other youtube tabs).",
+        CloseTabsParams, close_tabs, verify_close_tabs, idempotent=False,
+        needs_confirm=lambda p: p.scope != "this" and _use_my_browser() and mine.count_targets(p.scope, p.match.strip()) >= 4)
+    add("browser_switch_tab", "Switch to an open browser tab by part of its title.", SwitchTabParams, switch_tab, verify_switch_tab)
     add("browser_search", "Search the web for a phrase in the browser.", SearchParams, search_web, verify_open)
     add("browser_page_info", "Read the title, address and text of the page now open in the browser.", NoParams, page_info, read_only_verify)
     add("browser_click", "Click a button or link on the open page by its visible text.", ClickParams, click_text, verify_click,

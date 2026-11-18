@@ -16,6 +16,7 @@ SOURCES: list[tuple[str, str, re.Pattern]] = [
      re.compile(r"\b(spotify|echo|alexa|speaker|phone|device|devices|transfer|playback|output|cast|music|song|songs)\b", re.I)),
     ("Open windows", "os_list_windows",
      re.compile(r"\b(window|windows|close|focus|switch|front|minimi[sz]e|show|bring|app|apps|open|notepad|chrome|clock|calculator)\b", re.I)),
+    ("Browser tabs", "browser_tabs", re.compile(r"\b(tab|tabs)\b", re.I)),
     ("Monitors", "os_list_monitors",
      re.compile(r"\b(monitor|monitors|screen|screens|display|displays|secondary|primary|second)\b", re.I)),
     ("Now playing", "os_media_status",

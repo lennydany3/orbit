@@ -1,4 +1,5 @@
 """The agent: rules first, then the LLM; every tool call goes validate -> safety -> router(verify)."""
+import difflib
 import re
 import time
 
@@ -38,7 +39,17 @@ _REMEMBERED_RESULT_CHARS = 300
 _CLAIMS_ACTION = re.compile(
     r"\b(playing|played|opened|opening|closed|closing|paused|muted|unmuted|turned|launched|launching|started|"
     r"switched|switching|searching|searched|checking|increased|decreased|done|completed|all set|"
-    r"transferring|transferred|moving|moved|changing|changed|setting|sending|casting|adjusting|raising|lowering|asked|has been|have been|is now|are now|i've|i have|i did|successfully)\b", re.I)
+    r"transferring|transferred|moving|moved|changing|changed|setting|sending|casting|adjusting|raising|lowering|asked|has been|have been|is now|are now|i've|i have|i did|successfully|"
+    r"clicked|clicking|pressed|selected|navigated|went|loaded|reloaded|refreshed|typed|snapped|maximized|minimized|restored)\b", re.I)
+# A request that starts like one of these asks for an ACTION: a reply with no tool call is never an answer to it.
+_ACTION_VERBS = (
+    "open close click press tap select play pause resume stop next skip mute unmute set turn switch move transfer send cast "
+    "change search go maximize minimize restore snap reload refresh scroll type launch start quit exit put drag").split()
+
+
+def _is_action_request(text: str) -> bool:
+    first = rules.normalize(text).split(None, 1)[0].lower() if rules.normalize(text).split() else ""
+    return first in _ACTION_VERBS or bool(difflib.get_close_matches(first, _ACTION_VERBS, n=1, cutoff=0.8))
 # "what windows are open?" answered with no tool call is invented data, even though it contains no "action" word.
 _ASKS_STATE = re.compile(
     r"^(?:what|whats|what's|which|tell|show|list|is|are)\b.*\b(?:windows?|playing|volume|devices?|apps?|tabs?|page|song|track|music|open)\b", re.I)
@@ -73,6 +84,7 @@ class Agent:
         self.last_closed: str | None = None   # the one it closed last: what "open it" means
         self.spotify_active = False           # the last thing done was a Spotify action: "switch to echo" = a Spotify device
         self._part_failed = False             # did the last tool call of the current request fail? (stops a chain)
+        self._ungrounded = False              # did the model only talk (invent an answer) instead of acting?
         self.recent_subjects: list[str] = []  # everything opened or focused lately that is still open: "close both"
 
     # ---- public ----
@@ -149,10 +161,19 @@ class Agent:
             # The words did not match any real app, window or device ("close the notes", "switch to chrome" after a Spotify
             # request). Rules only match literally; the model has the real names and can work out what was meant.
             self.log("rule", f"'{m.rule}' found nothing called that; asking the model, which can see the real names")
+            failure = reply
+        else:
+            failure = ""
         if self.llm is None:
             self._part_failed = True
             return "No rule matches that, and the model is switched off (--no-llm)."
-        return self._llm_loop(text, previous)
+        self._ungrounded = False
+        reply = self._llm_loop(text, previous)
+        if failure and self._ungrounded:
+            # The rule said what was wrong (nothing on the page is called that); the model only made something up.
+            self.turns[-1][-1]["content"] = failure
+            return failure
+        return reply
 
     def _rule_for(self, text: str) -> rules.RuleMatch | None:
         """The rule for a command, if its tool is available."""
@@ -171,7 +192,8 @@ class Agent:
             result = self.execute(tool, args)
             if not result.ok:
                 return False, "; ".join(said + [f"Failed: {result.error}"]), result.not_found
-            said.append(result.summary)
+            shown = "\n".join(str(result.data).splitlines()[:25]) if result.data else ""
+            said.append(result.summary + ("\n" + shown if shown else ""))
         return True, "; ".join(said), False
 
     def prepare(self, text: str, previous: str = "") -> tuple[list[dict], list[dict], list[dict]]:
@@ -212,7 +234,7 @@ class Agent:
                 continue
             if not resp.tool_calls:
                 reply = resp.content.strip() or "(the model gave no reply)"
-                if len(turn) == 1 and (_CLAIMS_ACTION.search(reply) or _ASKS_STATE.search(text)):
+                if len(turn) == 1 and (_CLAIMS_ACTION.search(reply) or _ASKS_STATE.search(text) or _is_action_request(text)):
                     # The small model sometimes says "Transferring your music" without calling anything.
                     if not nudged:
                         nudged = True
@@ -225,7 +247,10 @@ class Agent:
                         continue
                     self.log("warn", "the model still described an action without running a tool")
                     self._part_failed = True
-                    reply += "\n  (Note: I did not run any tool, so nothing was actually done.)"
+                    self._ungrounded = True
+                    # What it wrote is invented ("clicked X" when nothing was clicked): do not show it as if it were a result.
+                    reply = ("Nothing was done: I did not run any tool for that, so I could not tell what to do. "
+                             "Try different words, or name exactly what to click or open.")
                 return self._finish(turn, reply)
             assistant = {
                 "role": "assistant",
