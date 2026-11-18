@@ -280,3 +280,31 @@ def test_switch_and_list_tabs(text, tool, args):
 def test_click_in_a_named_app_or_page(text, tool, args):
     m = rules.match(text)
     assert m and (m.tool, m.args) == (tool, args)
+
+
+@pytest.mark.parametrize("text, tool, args", [
+    ("reduce the volume", "os_change_volume", {"delta": -10}),
+    ("lower the volume by 20", "os_change_volume", {"delta": -20}),
+    ("make it louder", "os_change_volume", {"delta": 10}),
+    ("turn it up a bit", "os_change_volume", {"delta": 10}),
+    ("reduce the volume in echo pop", "api_spotify_volume", {"change": -10, "device": "echo pop"}),
+    ("raise the volume on my speaker by 15", "api_spotify_volume", {"change": 15, "device": "speaker"}),
+    ("in echo pop volume 50%", "api_spotify_volume", {"level": 50, "device": "echo pop"}),
+    ("set the volume of the speaker to 30", "api_spotify_volume", {"level": 30, "device": "speaker"}),
+    ("echo pop volume 40", "api_spotify_volume", {"level": 40, "device": "echo pop"}),
+    ("volume 30", "os_set_volume", {"level": 30}),
+])
+def test_volume_phrasings_pc_and_device(text, tool, args):
+    m = rules.match(text)
+    assert m and (m.tool, m.args) == (tool, args)
+
+
+@pytest.mark.parametrize("text, device, volume", [
+    ("switch to speaker", "speaker", None), ("switch the playback to speaker", "speaker", None),
+    ("play it on my phone", "phone", None), ("move the music to the tv", "tv", None),
+    ("switch to speaker at 30%", "speaker", 30),
+])
+def test_a_kind_of_device_needs_no_spotify_context(text, device, volume):
+    m = rules.match(text)
+    expected = {"device": device, **({"volume": volume} if volume else {})}
+    assert m and (m.tool, m.args) == ("api_spotify_transfer", expected)

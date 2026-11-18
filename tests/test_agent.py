@@ -598,3 +598,78 @@ def test_a_media_key_that_does_nothing_falls_back_to_spotify(logs):
     reply = agent.handle("play")
     assert seen == [("key", "play"), ("spotify", "play")] and "ok" in reply
     assert "fallback" in [k for k, _ in logs]
+
+
+def _volume_agent(logs, active_line, now_playing="SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify"):
+    from pydantic import BaseModel
+    from orbit.agent.loop import Agent
+    from orbit.agent.router import Router
+    from orbit.agent.safety import Safety
+    from orbit.tools.base import Registry, Tool, ToolResult
+
+    class Nothing(BaseModel):
+        pass
+
+    class Delta(BaseModel):
+        delta: int
+
+    class Level(BaseModel):
+        level: int
+
+    class Action(BaseModel):
+        action: str
+
+    class DevVol(BaseModel):
+        level: int | None = None
+        change: int | None = None
+        device: str = ""
+
+    seen = []
+    reg = Registry()
+    reg.register(Tool("os_media_status", "d", Nothing, "os", "low", lambda p: ToolResult.success(f"playing: 'x' ({now_playing})")))
+    reg.register(Tool("api_spotify_devices", "d", Nothing, "api", "low", lambda p: ToolResult.success("2 devices", data=active_line)))
+    reg.register(Tool("api_spotify_control", "d", Action, "api", "low", lambda p: ToolResult.success("ok")))
+    reg.register(Tool("api_spotify_volume", "d", DevVol, "api", "low", lambda p: seen.append(("device", p.level, p.change)) or ToolResult.success("set")))
+    reg.register(Tool("os_change_volume", "d", Delta, "os", "low", lambda p: seen.append(("pc", p.delta)) or ToolResult.success("pc")))
+    reg.register(Tool("os_set_volume", "d", Level, "os", "low", lambda p: seen.append(("pc-level", p.level)) or ToolResult.success("pc")))
+    log = lambda k, m: logs.append((k, m))  # noqa: E731
+    return Agent(ScriptedLLM(), reg, Router(log), Safety(), log), seen
+
+
+def test_volume_follows_the_speaker_when_spotify_plays_on_it(logs):
+    agent, seen = _volume_agent(logs, "ATLAS (Computer)\nLenny's Echo Pop (Speaker) [active] volume 32%")
+    agent.handle("reduce the volume")
+    agent.handle("volume 40")
+    assert seen == [("device", None, -10), ("device", 40, None)]  # the PC's volume is not touched
+
+
+def test_volume_stays_on_the_pc_when_spotify_plays_on_the_pc(logs):
+    agent, seen = _volume_agent(logs, "ATLAS (Computer) [active]\nLenny's Echo Pop (Speaker) volume 32%")
+    agent.handle("reduce the volume")
+    assert seen == [("pc", -10)]
+
+
+def test_volume_stays_on_the_pc_when_something_else_is_playing(logs):
+    agent, seen = _volume_agent(logs, "Echo (Speaker) [active]", now_playing="Brave")
+    agent.handle("make it louder")
+    assert seen == [("pc", 10)]
+
+
+def test_a_dropped_number_is_reported_so_it_cannot_be_claimed_as_done(logs):
+    from pydantic import BaseModel
+    from orbit.agent.loop import Agent
+    from orbit.agent.router import Router
+    from orbit.agent.safety import Safety
+    from orbit.tools.base import Registry, Tool, ToolResult
+
+    class Transfer(BaseModel):
+        device: str = "this"
+        volume: int | None = None
+
+    reg = Registry()
+    reg.register(Tool("api_spotify_transfer", "d", Transfer, "api", "low", lambda p: ToolResult.success("moved playback")))
+    log = lambda k, m: logs.append((k, m))  # noqa: E731
+    llm = ScriptedLLM(call("api_spotify_transfer", device="Echo", volume=30), LLMResponse(content="Moved."))
+    Agent(llm, reg, Router(log), Safety(), log).handle("put the music on the echo please")
+    tool_message = llm.calls[1][-1]["content"]
+    assert "NOT applied: volume=30" in tool_message  # the model is told, so it cannot say "volume set to 30%"

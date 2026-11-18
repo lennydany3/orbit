@@ -144,6 +144,12 @@ def choose_target(query: str, results: dict) -> Target | None:
     return None
 
 
+# "switch to the speaker" / "play it on my phone": a kind of device, not a name
+DEVICE_TYPE_WORDS = {
+    "speaker": ("Speaker", "CastAudio", "AVR", "AudioDongle"), "speakers": ("Speaker", "CastAudio", "AVR", "AudioDongle"),
+    "phone": ("Smartphone",), "mobile": ("Smartphone",), "smartphone": ("Smartphone",),
+    "tv": ("TV", "CastVideo"), "television": ("TV", "CastVideo"), "tablet": ("Tablet",), "car": ("Automobile",),
+}
 THIS_DEVICE_WORDS = {"this", "this device", "here", "this pc", "this computer", "this laptop", "my pc", "my computer", "computer", "pc", "laptop"}
 
 
@@ -175,6 +181,13 @@ def pick_device(devices: list[dict], wanted: str = "this", hostname: str | None 
         if named:
             return named[0]
         return computers[0] if len(computers) == 1 else None
+    kinds = DEVICE_TYPE_WORDS.get(re.sub(r"\b(?:my|the|a)\b", " ", wanted).strip())
+    if kinds:
+        of_kind = [d for d in devices if d.get("type") in kinds]
+        if len(of_kind) == 1:
+            return of_kind[0]
+        active = [d for d in of_kind if d.get("is_active")]
+        return active[0] if len(active) == 1 else None  # two speakers and no way to tell which: do not guess
     squashed = re.sub(r"[^a-z0-9]", "", wanted)  # "lennys echo pop" must match "Lenny's Echo Pop"
     for d in devices:
         if squashed and squashed in re.sub(r"[^a-z0-9]", "", d.get("name", "").lower()):
@@ -331,7 +344,8 @@ def devices(p: NoParams) -> ToolResult:
         found = (get_client().call("GET", "/me/player/devices") or {}).get("devices", [])
     except SpotifyError as e:
         return _fail(e)
-    lines = [f"{d['name']} ({d['type']}){' [active]' if d.get('is_active') else ''}" for d in found]
+    lines = [f"{d['name']} ({d['type']}){' [active]' if d.get('is_active') else ''}"
+             + (f" volume {d['volume_percent']}%" if d.get("volume_percent") is not None else "") for d in found]
     return ToolResult.success(f"{len(found)} Spotify device(s)", data="\n".join(lines) or "none")
 
 
@@ -468,11 +482,14 @@ def verify_control(p: ControlParams, r: ToolResult) -> VerifyResult:
 
 
 class VolumeParams(BaseModel):
-    level: int = Field(ge=0, le=100, description="volume percent for the Spotify device")
+    level: int | None = Field(default=None, ge=0, le=100, description="volume percent to set, e.g. 50")
+    change: int | None = Field(default=None, ge=-100, le=100, description="or percent to add (up) or take away (down), e.g. -10; use this for 'reduce' / 'raise'")
     device: str = Field(default="", description="device name, e.g. Echo; empty = the device playing now")
 
 
 def set_device_volume(p: VolumeParams) -> ToolResult:
+    if p.level is None and p.change is None:
+        return ToolResult.failure("say what volume to set (level, e.g. 50) or how much to change it (change, e.g. -10)", retryable=False)
     try:
         client = get_client()
         if p.device:
@@ -482,11 +499,20 @@ def set_device_volume(p: VolumeParams) -> ToolResult:
             device = state["device"] if state else None
         if device is None:
             return ToolResult.failure(f"no Spotify device matches '{p.device or 'the playing one'}'", retryable=False, not_found=True)
-        client.call("PUT", "/me/player/volume", params={"volume_percent": p.level, "device_id": device["id"]})
+        if p.level is not None:
+            before, target = None, p.level
+        else:
+            fresh = next((d for d in (client.call("GET", "/me/player/devices") or {}).get("devices", []) if d["id"] == device["id"]), device)
+            before = fresh.get("volume_percent")
+            if before is None:
+                return ToolResult.failure(f"I can't read {device['name']}'s current volume, so I can't raise or lower it; give me a number instead", retryable=False)
+            target = max(0, min(100, before + p.change))
+        client.call("PUT", "/me/player/volume", params={"volume_percent": target, "device_id": device["id"]})
     except SpotifyError as e:
         return _fail(e)
-    result = ToolResult.success(f"set Spotify volume on {device['name']} to {p.level}%")
-    result.context.update(device_id=device["id"], level=p.level)
+    was = f" (was {before}%)" if before is not None else ""
+    result = ToolResult.success(f"Spotify volume on {device['name']}: {target}%{was}")
+    result.context.update(device_id=device["id"], level=target)
     return result
 
 

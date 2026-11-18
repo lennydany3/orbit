@@ -531,3 +531,54 @@ def test_transfer_500_with_nothing_to_replay_is_still_an_error(fake, run):
     _transfer_always_500(fs, client)
     r = run("api_spotify_transfer", TransferParams(device="this"))
     assert not r.ok and "server problem" in r.error
+
+
+# ---------- device volume: absolute and relative, device kinds ----------
+def test_volume_change_is_relative_to_the_devices_current_volume(fake, run):
+    from orbit.tools.api_layer.spotify import VolumeParams
+    fs, _ = fake
+    fs.volumes["e1"] = 50
+    r = run("api_spotify_volume", VolumeParams(change=-20, device="kitchen"))
+    assert r.ok and r.verified and fs.volumes["e1"] == 30 and "(was 50%)" in r.summary
+
+
+def test_volume_change_is_clamped(fake, run):
+    from orbit.tools.api_layer.spotify import VolumeParams
+    fs, _ = fake
+    fs.volumes["e1"] = 5
+    run("api_spotify_volume", VolumeParams(change=-20, device="kitchen"))
+    assert fs.volumes["e1"] == 0
+
+
+def test_volume_needs_a_level_or_a_change(fake, run):
+    from orbit.tools.api_layer.spotify import VolumeParams
+    r = run("api_spotify_volume", VolumeParams(device="kitchen"))
+    assert not r.ok and "level" in r.error and "change" in r.error
+
+
+def test_volume_on_the_playing_device_when_no_device_is_named(fake, run):
+    from orbit.tools.api_layer.spotify import VolumeParams
+    fs, _ = fake
+    fs.active, fs.playing, fs.item = "e1", True, "spotify:track:1"
+    fs.volumes["e1"] = 40
+    r = run("api_spotify_volume", VolumeParams(change=10))
+    assert r.ok and fs.volumes["e1"] == 50 and "Kitchen Speaker" in r.summary
+
+
+def test_devices_list_shows_each_volume(fake, run):
+    fs, _ = fake
+    fs.volumes["e1"] = 35
+    r = run("api_spotify_devices", spotify.NoParams())
+    assert "Kitchen Speaker (Speaker) volume 35%" in r.data
+
+
+@pytest.mark.parametrize("word, expected", [("speaker", "e1"), ("my speaker", "e1"), ("phone", "p1"), ("the phone", "p1")])
+def test_a_kind_of_device_finds_the_one_device_of_that_kind(word, expected):
+    assert pick_device(DEVICES, word)["id"] == expected
+
+
+def test_two_speakers_are_never_guessed_between():
+    two = DEVICES + [{"id": "e2", "name": "Bedroom", "type": "Speaker", "is_active": False}]
+    assert pick_device(two, "speaker") is None
+    two[3]["is_active"] = True
+    assert pick_device(two, "speaker")["id"] == "e2"  # unless exactly one is the active one

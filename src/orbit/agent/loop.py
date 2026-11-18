@@ -86,6 +86,7 @@ class Agent:
         self.last_closed: str | None = None   # the one it closed last: what "open it" means
         self.spotify_active = False           # the last thing done was a Spotify action: "switch to echo" = a Spotify device
         self._part_failed = False             # did the last tool call of the current request fail? (stops a chain)
+        self._dropped: list[str] = []         # parameters left out of the last call because the user never said them
         self._ungrounded = False              # did the model only talk (invent an answer) instead of acting?
         self.last_target_kind = ""            # "browser" or "window": what the last action worked with, so "click X" goes there
         self.recent_subjects: list[str] = []  # everything opened or focused lately that is still open: "close both"
@@ -184,6 +185,10 @@ class Agent:
         if m and m.tool == "os_media_key" and m.args["key"] in _KEY_TO_ACTION and self._spotify_is_playing_media():
             # Spotify can be playing on a speaker or phone, which the PC's media keys cannot reach: use Spotify's own control.
             m = rules.RuleMatch(rule=m.rule + "-spotify", tool="api_spotify_control", args={"action": _KEY_TO_ACTION[m.args["key"]]})
+        if m and m.tool in ("os_change_volume", "os_set_volume") and self._spotify_plays_on_another_device():
+            # The sound comes from the speaker/phone, so the PC's volume would change nothing you can hear.
+            args = {"change": m.args["delta"]} if m.tool == "os_change_volume" else {"level": m.args["level"]}
+            m = rules.RuleMatch(rule=m.rule + "-device", tool="api_spotify_volume", args=args)
         if m and m.tool == "browser_click" and self._clicks_belong_to_an_app() and self.registry.get_exposed("os_click"):
             # "click go" right after working with the Speedtest window is about that window, not about a web page.
             m = rules.RuleMatch(rule=m.rule + "-app", tool="os_click", args={"text": m.args["text"], "window": self.last_subject})
@@ -203,6 +208,20 @@ class Agent:
         except Exception:
             return False
         return result.ok and "spotify" in (result.summary or "").lower()
+
+    def _spotify_plays_on_another_device(self) -> bool:
+        """Is Spotify the current sound AND playing on something that is not this PC (a speaker, phone, TV)?"""
+        if not self._spotify_is_playing_media() or not self.registry.get_exposed("api_spotify_volume"):
+            return False
+        devices = self.registry.get_exposed("api_spotify_devices")
+        if devices is None:
+            return False
+        try:
+            result = devices.run(devices.params())
+        except Exception:
+            return False
+        active = [line for line in str(result.data or "").splitlines() if "[active]" in line]
+        return bool(active) and "(Computer)" not in active[0]
 
     def _clicks_belong_to_an_app(self) -> bool:
         subject = (self.last_subject or "").lower()
@@ -302,14 +321,16 @@ class Agent:
         living room). An optional number that is not in the user's request is dropped."""
         wanted = set(re.findall(r"\d+", self.last_request))
         kept = {}
+        self._dropped = []
         for key, value in args.items():
             field = tool.params.model_fields.get(key)
             invented = (
-                field is not None and not field.is_required() and isinstance(value, (int, float))
+                field is not None and not field.is_required() and isinstance(value, (int, float)) and key != "change"
                 and not isinstance(value, bool) and str(int(value)) not in wanted
             )
             if invented:
                 self.log("warn", f"dropped {key}={value}: you did not ask for that number")
+                self._dropped.append(f"{key}={value}")
             else:
                 kept[key] = value
         return kept
@@ -342,6 +363,9 @@ class Agent:
             self.log("safety", f"blocked: {why}")
             return ToolResult.failure(why)
         result = self.router.run(candidates, params)
+        if result.ok and self._dropped:
+            # Tell the model (and you) that part of the call was NOT done, so it cannot report it as done.
+            result.summary += f" (NOT applied: {', '.join(self._dropped)}, you did not give that number)"
         if not result.ok and name == "os_media_key" and params.key in _KEY_TO_ACTION and self._spotify_is_playing_media():
             self.log("fallback", "the PC media key did not change anything and this is Spotify: asking Spotify itself")
             control = self.registry.get_exposed("api_spotify_control")

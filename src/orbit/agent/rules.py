@@ -61,6 +61,10 @@ def _transfer(m: re.Match) -> tuple:
 _TRANSFER_EXPLICIT = re.compile(
     rf"^(?:transfer|move|switch|send|change|cast|play)\s+(?:the\s+)?(?:playback|music|spotify|sound|audio|songs?|output)"
     rf"(?:\s+(?:output|playback))?\s+(?:to|on)\s+(?:the\s+)?{_DEV}{_DEV_TAIL}$", re.I)
+# "switch to speaker" / "play it on my phone": a KIND of device is clearly not a window, so no Spotify context is needed
+_TRANSFER_KIND = re.compile(
+    rf"^(?:switch|move|change|go|send|cast|play|put)\s+(?:(?:it|the\s+(?:playback|music|sound))\s+)?(?:to|on)\s+(?:the\s+|my\s+)?"
+    rf"(?P<dev>speakers?|phone|mobile|smartphone|tv|television|tablet|car){_DEV_TAIL}$", re.I)
 # Only right after a Spotify request, because "switch to chrome" normally means a window.
 _TRANSFER_CONTEXT = re.compile(
     rf"^(?:switch to|move to|go to|change to|try|use|play on|play it on|send it to|put it on|cast to)\s+(?:the\s+)?{_DEV}{_DEV_TAIL}$", re.I)
@@ -91,6 +95,29 @@ def _click_in(text: str, app: str) -> tuple:
     return ("os_click", {"text": text, "window": app.title()})
 
 
+# "reduce the volume", "lower it by 20", "make it louder", "turn it up a bit"
+_DOWN = r"reduce|lower|decrease|drop|quieter|softer|down"
+_UP = r"raise|increase|boost|louder|higher|up"
+
+
+def _volume_change(verb: str, amount: str | None) -> int:
+    return (int(amount) if amount else 10) * (-1 if re.fullmatch(_DOWN, verb.lower()) else 1)
+
+
+_BY = r"(?:\s+(?:a (?:bit|little)|by\s+(?P<n>\d{1,3})\s*(?:%|percent)?))?"
+_WORDS_DOWN, _WORDS_UP = r"reduce|lower|decrease|drop|quieter|softer", r"raise|increase|boost|louder|higher"
+_VOLUME_WORDS = re.compile(
+    rf"^(?:(?:make it|turn it)\s+)?(?P<verb>{_WORDS_DOWN}|{_WORDS_UP})(?:\s+(?:the\s+)?(?:volume|sound)|\s+it)?{_BY}$", re.I)
+_DEV_NAME = r"(?:the\s+|my\s+)?(?P<dev>(?!(?:it|that|this|volume|sound|the)\b)[\w .'-]+?)"
+_PCT = r"(?P<n>\d{1,3})\s*(?:%|percent)?"
+_DEV_VOLUME_SET = [  # three ways people say it, each with its own groups
+    re.compile(rf"^(?:in|on)\s+{_DEV_NAME}\s+(?:set\s+)?(?:the\s+)?volume\s+(?:to\s+)?{_PCT}$", re.I),
+    re.compile(rf"^(?:set|change|put|turn)\s+(?:the\s+)?volume\s+(?:of|on|in|for)\s+{_DEV_NAME}\s+(?:to\s+)?{_PCT}$", re.I),
+    re.compile(rf"^{_DEV_NAME}\s+volume\s+(?:to\s+)?{_PCT}$", re.I),
+]
+_DEV_VOLUME_STEP = re.compile(
+    rf"^(?P<verb>{_DOWN}|{_UP})\s+(?:the\s+)?(?:volume|sound)\s+(?:of|on|in|for)\s+{_DEV_NAME}{_BY}$", re.I)
+
 # (rule name, pattern, builder). Patterns are matched against the whole sentence, case-insensitively.
 # Anything with extra clauses ("open X and play Y") deliberately does not match and goes to the model.
 RULES: list[tuple[str, re.Pattern, Builder]] = [
@@ -102,6 +129,7 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
     ("spotify-transfer", re.compile(r"^(?:move|transfer|switch|send)\s+(?:the )?(?:playback|music|spotify)\s+to\s+(?:this|my)\s+(?:device|pc|computer|laptop)$", re.I),
      lambda m: ("api_spotify_transfer", {"device": "this"})),
     ("spotify-transfer-device", _TRANSFER_EXPLICIT, _transfer),
+    ("spotify-transfer-kind", _TRANSFER_KIND, _transfer),
     # --- browser layer (before open-app: "open github" is a website, not an installed app) ---
     ("open-site", re.compile(rf"^{_VERB}\s+(?:(?P<my>my )|the )?(?P<site>{_SITE_NAMES})(?: (?:website|site|page|account|profile))?$", re.I),
      lambda m: ("browser_open", {"url": _site_url(m["site"].lower(), bool(m["my"]))})),
@@ -141,7 +169,13 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
      lambda m: ("os_open_app", {"name": m["name"].strip().title()})),
     ("volume-set", re.compile(rf"^(?:turn |set |put )?{_THE}volume (?:to |at )?(?P<n>\d{{1,3}})\s*%?$", re.I),
      lambda m: ("os_set_volume", {"level": int(m["n"])})),
-    ("volume-step", re.compile(rf"^(?:turn )?{_THE}volume (?P<dir>up|down)$|^turn it (?P<dir2>up|down)$", re.I),
+    # --- volume of a Spotify DEVICE ("echo pop volume 50", "reduce the volume in echo pop"): not the PC's volume ---
+    *[(f"device-volume-set-{i}", pattern, lambda m: ("api_spotify_volume", {"level": int(m["n"]), "device": m["dev"].strip()}))
+      for i, pattern in enumerate(_DEV_VOLUME_SET)],
+    ("device-volume-step", _DEV_VOLUME_STEP,
+     lambda m: ("api_spotify_volume", {"change": _volume_change(m["verb"], m["n"]), "device": m["dev"].strip()})),
+    ("volume-step-words", _VOLUME_WORDS, lambda m: ("os_change_volume", {"delta": _volume_change(m["verb"], m["n"])})),
+    ("volume-step", re.compile(rf"^(?:turn )?{_THE}volume (?P<dir>up|down)$|^turn it (?P<dir2>up|down)(?: a (?:bit|little|lot))?$", re.I),
      lambda m: ("os_change_volume", {"delta": 10 if (m["dir"] or m["dir2"]).lower() == "up" else -10})),
     # --- browser tabs (before close-window: "close all other youtube tabs" is not a window called that) ---
     ("close-other-tabs", re.compile(r"^close\s+(?:all\s+)?(?:the\s+)?(?:other|extra)\s+(?:(?P<m>[\w .'-]+?)\s+)?tabs?(?: except (?:this|the current) one)?$|^close\s+(?:all\s+)?tabs\s+except\s+(?:this|the current)(?: one| tab)?$", re.I),
