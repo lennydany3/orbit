@@ -27,6 +27,7 @@ class ToolResult:
     error: str = ""
     verified: bool = False
     retryable: bool = True  # False for permanent failures (app not found): retrying the same call is pointless
+    not_found: bool = False  # the thing asked for (app, window, device) does not exist, as opposed to "it failed"
     context: dict = field(default_factory=dict)  # private notes from run() to verify(); never shown to the model
 
     @classmethod
@@ -34,8 +35,8 @@ class ToolResult:
         return cls(ok=True, summary=summary, data=data)
 
     @classmethod
-    def failure(cls, error: str, retryable: bool = True) -> ToolResult:
-        return cls(ok=False, error=error, retryable=retryable)
+    def failure(cls, error: str, retryable: bool = True, not_found: bool = False) -> ToolResult:
+        return cls(ok=False, error=error, retryable=retryable, not_found=not_found)
 
     def for_model(self) -> str:
         """Text sent back to the LLM. Tool data may come from the screen or web, so it is fenced as untrusted."""

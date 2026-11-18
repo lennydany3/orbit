@@ -34,13 +34,19 @@ text -> fast rules (no model) --match--> tool call
 
 ## Spotify (API layer)
 
-The router prefers the API layer over OS and browser. Login uses PKCE, so there is no client secret anywhere; the refresh token lives in the Windows Credential Manager (entry `Orbit/spotify-refresh-token`), never in a file or the logs. Tools: play (song, artist, album, playlist, or "my favourite music" = your liked songs), transfer playback ("this" = the Spotify app on this PC, matched by computer name), list devices, now playing. Spotify tools only appear when `SPOTIFY_CLIENT_ID` is set.
+The router prefers the API layer over OS and browser. Login uses PKCE, so there is no client secret anywhere; the refresh token lives in the Windows Credential Manager (entry `Orbit/spotify-refresh-token`), never in a file or the logs. Tools: play (song, artist, album, playlist, or "my favourite music" = your liked songs), transfer playback (to a device by name, optionally with a volume; "this" = the Spotify app on this PC), set a device's volume, play/pause/next/previous on whichever device is playing, list devices, now playing. Right after a Spotify request, "pause", "next" and "switch to echo" mean Spotify (so they reach a speaker too); otherwise "pause" uses the PC media keys. Spotify tools only appear when `SPOTIFY_CLIENT_ID` is set.
 
 ## Browser layer
 
 Orbit opens its own visible Chrome window with a separate profile in `.browser-profile/` (gitignored; your real Chrome and tabs are never touched). It stays open between requests and closes when Orbit exits. Log in to sites once in that window and the login is kept. Only http(s) links are opened. Clicking a button whose text looks risky (buy, send, delete, pay...) asks you first. Web search uses DuckDuckGo.
 
+## Several commands in one sentence
+
+"open spotify and play my fav music", "open the clock app, then close it" and "move the music to echo with 30% volume" run in order with no model call, but only when every part is a known command; otherwise the whole sentence goes to the model. A chain stops at the first failure and says where.
+
 ## Known limits (honest list)
+
+- A phone or speaker only shows up as a Spotify device while its Spotify app is open or was used recently (Echo speakers can be slow to wake and sometimes need a second try). Spotify's own "transfer" call sometimes answers HTTP 500 for this PC; Orbit then restarts the current song on the target device instead, and says so.
 
 - Spotify needs Premium for play/transfer. In development mode only accounts listed under User Management (max 5) can log in.
 - Spotify must be running on the PC for it to appear as a device; the multi-step request opens it first. Spotify's own volume is separate from Windows volume.

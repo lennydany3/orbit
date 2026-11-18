@@ -60,3 +60,44 @@ def test_close_it_needs_to_know_what_it_is():
     assert rules.match("can you close it") is None  # no subject: the model decides
     m = rules.match("can you close it", subject="Speedtest")
     assert m and (m.tool, m.args) == ("os_close_window", {"title": "Speedtest"})
+
+
+
+@pytest.mark.parametrize("text, device, level", [
+    ("can you change music output to cmf by nothing instead of ATLAS", "cmf by nothing", None),
+    ("transfer the playback to lennys echo pop", "lennys echo pop", None),
+    ("move the music to echo with 30% volume on it", "echo", 30),
+    ("send the sound to echo at 20 percent", "echo", 20),
+    ("switch playback to echo and 40% volume", "echo", 40),
+])
+def test_spotify_device_transfer_phrasings(text, device, level):
+    m = rules.match(text)
+    expected = {"device": device, **({"volume": level} if level is not None else {})}
+    assert m and (m.tool, m.args) == ("api_spotify_transfer", expected)
+
+
+def test_move_playback_to_this_device_is_still_the_pc_rule():
+    m = rules.match("move playback to this device")
+    assert m and m.args == {"device": "this"} and m.rule == "spotify-transfer"
+
+
+@pytest.mark.parametrize("text", ["switch to echo with 30% volume on it", "try echo", "use the echo", "play on echo"])
+def test_context_only_device_phrasings(text):
+    assert rules.match(text) is None or rules.match(text).tool != "api_spotify_transfer"  # no context: not a device switch
+    m = rules.match(text, spotify_active=True)
+    assert m and m.tool == "api_spotify_transfer" and m.soft and m.args["device"] == "echo"
+
+
+def test_play_next_is_the_media_key():
+    m = rules.match("play next")
+    assert m and (m.tool, m.args) == ("os_media_key", {"key": "next"})
+
+
+@pytest.mark.parametrize("text, parts", [
+    ("open spotify and play my fav music", ["open spotify", "play my fav music"]),
+    ("open github, then search cats", ["open github", "search cats"]),
+    ("ok can you open the clock app, close it please", ["open the clock app", "close it"]),
+    ("play my fav music", ["play my fav music"]),
+])
+def test_split_commands(text, parts):
+    assert rules.split_commands(text) == parts

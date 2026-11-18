@@ -65,6 +65,10 @@
    expect: [{tool: api_spotify_transfer, args: {device: "this"}}]}
 - {request: "what's playing on spotify?", via: llm, step: 4,
    expect: [{tool: api_spotify_now_playing, args: {}}]}
+- {request: "move the music to echo with 30% volume on it", via: rules, step: 4,
+   expect: [{tool: api_spotify_transfer, args: {device: "echo", volume: 30}}]}
+- {request: "change music output to cmf by nothing instead of ATLAS", via: rules, step: 4,
+   expect: [{tool: api_spotify_transfer, args: {device: "cmf by nothing"}}]}
 - {request: "play something by Daft Punk on spotify", via: llm, step: 4,
    expect: [{tool: api_spotify_play, args: {query: "Daft Punk"}}]}
 - {request: "open spotify, play my favourite music, and move playback to this device", via: llm, step: 4,

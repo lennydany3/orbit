@@ -6,6 +6,7 @@ user allow-list (development mode). Errors are phrased so the model can act on t
 import re
 import socket
 import time
+from typing import Literal
 from dataclasses import dataclass
 
 import httpx
@@ -16,15 +17,19 @@ from . import credstore, spotify_auth
 
 API = "https://api.spotify.com/v1"
 SETTLE_TIMEOUT_S = 8.0
+FRESH_START_RETRIES = 3   # a just-started Spotify app can refuse commands for a moment even though it is listed
+RETRY_DELAY_S = 2.0
+TRANSFER_ATTEMPTS = 3
 DEVICE_WAIT_S = 25.0  # after starting the Spotify app, how long to wait for it to show up as a device
 NOT_LOGGED_IN = "Spotify is not connected yet. Ask the user to run: python -m orbit auth spotify"
 _LIKED = re.compile(r"\b(favou?rites?|liked|saved|my (?:music|songs|library))\b", re.I)
 
 
 class SpotifyError(Exception):
-    def __init__(self, message: str, retryable: bool = False):
+    def __init__(self, message: str, retryable: bool = False, status: int | None = None):
         super().__init__(message)
         self.retryable = retryable
+        self.status = status
 
 
 # ---------------------------------------------------------------- HTTP client with token handling
@@ -67,7 +72,10 @@ class SpotifyClient:
                 time.sleep(min(float(resp.headers.get("Retry-After", 1)), 5))
                 continue
             if resp.status_code in (200, 201, 202, 204):
-                return resp.json() if resp.content else None
+                try:
+                    return resp.json() if resp.content else None
+                except ValueError:  # some player commands answer 200 with a non-JSON body
+                    return None
             raise self._error(resp)
         raise SpotifyError("Spotify kept rejecting the request", retryable=True)
 
@@ -79,14 +87,14 @@ class SpotifyClient:
         except ValueError:
             message, reason = resp.text[:100], ""
         if reason == "NO_ACTIVE_DEVICE" or (resp.status_code == 404 and "device" in message.lower()):
-            return SpotifyError("no Spotify device is available. Open the Spotify app first (os_open_app) and try again")
+            return SpotifyError("no Spotify device is available. Open the Spotify app first (os_open_app) and try again", status=resp.status_code)
         if reason == "PREMIUM_REQUIRED" or (resp.status_code == 403 and "premium" in message.lower()):
-            return SpotifyError("Spotify Premium is required to control playback")
+            return SpotifyError("Spotify Premium is required to control playback", status=resp.status_code)
         if resp.status_code == 403:
-            return SpotifyError(f"Spotify refused (403): {message or 'the account may not be on the app allow-list'}")
+            return SpotifyError(f"Spotify refused (403): {message or 'the account may not be on the app allow-list'}", status=resp.status_code)
         if resp.status_code >= 500:
-            return SpotifyError(f"Spotify had a server problem (HTTP {resp.status_code})", retryable=True)
-        return SpotifyError(f"Spotify error HTTP {resp.status_code}: {message}")
+            return SpotifyError(f"Spotify had a server problem (HTTP {resp.status_code})", retryable=True, status=resp.status_code)
+        return SpotifyError(f"Spotify error HTTP {resp.status_code}: {message}", status=resp.status_code)
 
 
 _client: SpotifyClient | None = None
@@ -139,6 +147,24 @@ def choose_target(query: str, results: dict) -> Target | None:
 THIS_DEVICE_WORDS = {"this", "this device", "here", "this pc", "this computer", "this laptop", "my pc", "my computer", "computer", "pc", "laptop"}
 
 
+_TRACK_URI = re.compile(r"spotify:track:[A-Za-z0-9]+")
+
+
+def valid_track_uris(items: list[dict]) -> list[str]:
+    """Playable track URIs from a saved-tracks answer. Spotify can return removed tracks (null uri), local files
+    (spotify:local:...) or duplicates, and a single bad entry makes the whole play request fail with HTTP 400."""
+    seen: set[str] = set()
+    uris: list[str] = []
+    for item in items:
+        track = (item or {}).get("track") or {}
+        uri = track.get("uri")
+        if track.get("is_local") or not isinstance(uri, str) or not _TRACK_URI.fullmatch(uri) or uri in seen:
+            continue
+        seen.add(uri)
+        uris.append(uri)
+    return uris
+
+
 def pick_device(devices: list[dict], wanted: str = "this", hostname: str | None = None) -> dict | None:
     """'this'/'here'/'pc' = the Spotify app on this computer. Anything else = match by device name."""
     wanted = (wanted or "this").strip().lower()
@@ -149,8 +175,9 @@ def pick_device(devices: list[dict], wanted: str = "this", hostname: str | None 
         if named:
             return named[0]
         return computers[0] if len(computers) == 1 else None
+    squashed = re.sub(r"[^a-z0-9]", "", wanted)  # "lennys echo pop" must match "Lenny's Echo Pop"
     for d in devices:
-        if wanted in d.get("name", "").lower():
+        if squashed and squashed in re.sub(r"[^a-z0-9]", "", d.get("name", "").lower()):
             return d
     return None
 
@@ -161,7 +188,8 @@ class PlayParams(BaseModel):
 
 
 class TransferParams(BaseModel):
-    device: str = Field(default="this", description="device name, or 'this' for this computer")
+    device: str = Field(default="this", description="device name only (e.g. Echo), or 'this' for this computer")
+    volume: int | None = Field(default=None, ge=0, le=100, description="optional volume percent to set on that device")
 
 
 class NoParams(BaseModel):
@@ -203,6 +231,19 @@ def _ensure_device(client: SpotifyClient, wanted: str) -> tuple[dict | None, boo
     return _find_device(client, wanted, wait_s=DEVICE_WAIT_S), True
 
 
+def _start_playback(client: SpotifyClient, params: dict | None, body: dict | None, fresh: bool) -> None:
+    """PUT /me/player/play. Right after we started the Spotify app, wait and retry a few times before giving up."""
+    attempts = FRESH_START_RETRIES if fresh else 1
+    for attempt in range(1, attempts + 1):
+        try:
+            client.call("PUT", "/me/player/play", params=params, json=body)
+            return
+        except SpotifyError as e:
+            if attempt == attempts or e.status not in (400, 404, 502, 503):
+                raise
+            time.sleep(RETRY_DELAY_S)
+
+
 def play(p: PlayParams) -> ToolResult:
     try:
         client = get_client()
@@ -210,21 +251,32 @@ def play(p: PlayParams) -> ToolResult:
         params = {"device_id": device["id"]} if device else None
         query = p.query.strip()
         if not query:
-            client.call("PUT", "/me/player/play", params=params)
+            _start_playback(client, params, None, started)
             result = ToolResult.success("resumed Spotify playback")
             result.context.update(kind="resume")
             return result
         if _LIKED.search(query):
-            liked = [i["track"]["uri"] for i in (client.call("GET", "/me/tracks", params={"limit": 50}) or {}).get("items", []) if i.get("track")]
+            items = (client.call("GET", "/me/tracks", params={"limit": 50}) or {}).get("items", [])
+            liked = valid_track_uris(items)
             if not liked:
-                return ToolResult.failure("there are no liked songs in this Spotify account", retryable=False)
-            target = Target({"uris": liked}, f"your liked songs ({len(liked)} tracks)", liked[0], "liked")
+                return ToolResult.failure("there are no playable liked songs in this Spotify account", retryable=False)
+            skipped = len(items) - len(liked)
+            note = f", skipped {skipped} unplayable" if skipped else ""
+            target = Target({"uris": liked}, f"your liked songs ({len(liked)} tracks{note})", liked[0], "liked")
         else:
             found = client.call("GET", "/search", params={"q": query, "type": "track,artist,album,playlist", "limit": 5})
             target = choose_target(query, found or {})
             if target is None:
                 return ToolResult.failure(f"nothing found on Spotify for '{query}'", retryable=False)
-        client.call("PUT", "/me/player/play", params=params, json=target.body)
+        try:
+            _start_playback(client, params, target.body, started)
+        except SpotifyError as e:
+            if e.status != 400 or target.kind != "liked":
+                raise
+            # Spotify rejected the list (one bad entry spoils all of them): still play something, and say so.
+            first = target.body["uris"][0]
+            _start_playback(client, params, {"uris": [first]}, started)
+            target = Target({"uris": [first]}, "your most recent liked song (Spotify rejected the full list)", first, "track")
     except SpotifyError as e:
         return _fail(e)
     where = f" on {device['name']}" if device else ""
@@ -301,14 +353,158 @@ def transfer(p: TransferParams) -> ToolResult:
         device, started = _ensure_device(client, p.device)
         if device is None:
             have = ", ".join(d["name"] for d in (client.call("GET", "/me/player/devices") or {}).get("devices", [])) or "none"
-            return ToolResult.failure(f"no Spotify device matches '{p.device}'. Available: {have}. If Spotify is closed, open it first", retryable=False)
+            return ToolResult.failure(
+                f"no Spotify device matches '{p.device}'. Available right now: {have}. "
+                "A phone or speaker only appears while its Spotify app is open or recently used, so open Spotify on it and try again",
+                retryable=False, not_found=True)
         state = _player(client)
-        client.call("PUT", "/me/player", json={"device_ids": [device["id"]], "play": bool(state and state.get("is_playing"))})
+        was_playing = bool(state and state.get("is_playing"))
+        # With a volume: move the device paused, set the volume, then resume, so a speaker never blasts at its old level.
+        body = {"device_ids": [device["id"]], "play": was_playing and p.volume is None}
+        replayed = False
+        try:
+            _put_with_retries(client, "/me/player", {"json": body})
+        except SpotifyError as e:
+            # Spotify's transfer call sometimes answers 500 for a device that plays fine (seen when moving from a speaker
+            # back to this PC). Starting the current song on that device is the same thing from the user's side.
+            if e.status not in (404, 500, 502, 503) or not (state and state.get("item")):
+                raise
+            _replay_on(client, device["id"], state)
+            if not (was_playing and p.volume is None):
+                client.call("PUT", "/me/player/pause", params={"device_id": device["id"]})
+            replayed = True
+        if p.volume is not None:
+            _put_with_retries(client, "/me/player/volume", {"params": {"volume_percent": p.volume, "device_id": device["id"]}})
+            if was_playing:
+                _put_with_retries(client, "/me/player/play", {"params": {"device_id": device["id"]}})
     except SpotifyError as e:
         return _fail(e)
-    result = ToolResult.success(f"moved playback to {device['name']}" + (" (started Spotify first)" if started else ""))
-    result.context["device_id"] = device["id"]
+    extra = f" at {p.volume}% volume" if p.volume is not None else ""
+    note = " (Spotify's transfer call failed, so I restarted the current song there)" if replayed else ""
+    result = ToolResult.success(f"moved playback to {device['name']}{extra}{note}" + (" (started Spotify first)" if started else ""))
+    result.context.update(device_id=device["id"], volume=p.volume)
     return result
+
+
+def _replay_on(client: SpotifyClient, device_id: str, state: dict) -> None:
+    """Start what is playing now (same song, same position) on another device."""
+    item_uri = state["item"]["uri"]
+    context_uri = (state.get("context") or {}).get("uri")
+    body = {"position_ms": state.get("progress_ms") or 0}
+    body.update({"context_uri": context_uri, "offset": {"uri": item_uri}} if context_uri else {"uris": [item_uri]})
+    _put_with_retries(client, "/me/player/play", {"params": {"device_id": device_id}, "json": body})
+
+
+def _put_with_retries(client: SpotifyClient, path: str, kwargs: dict) -> None:
+    """PUT that retries the transient errors speakers and just-woken apps give (404 'Not found', 5xx)."""
+    for attempt in range(1, TRANSFER_ATTEMPTS + 1):
+        try:
+            client.call("PUT", path, **kwargs)
+            return
+        except SpotifyError as e:
+            if attempt == TRANSFER_ATTEMPTS or e.status not in (404, 500, 502, 503):
+                raise
+            time.sleep(RETRY_DELAY_S)
+
+
+class ControlParams(BaseModel):
+    action: Literal["play", "pause", "next", "previous"] = Field(description="what to do with Spotify playback")
+
+
+_CONTROL_CALLS = {
+    "pause": ("PUT", "/me/player/pause"), "play": ("PUT", "/me/player/play"),
+    "next": ("POST", "/me/player/next"), "previous": ("POST", "/me/player/previous"),
+}
+
+
+def control(p: ControlParams) -> ToolResult:
+    try:
+        client = get_client()
+        state = _player(client)
+        if not state or not state.get("device"):
+            return ToolResult.failure("nothing is active on Spotify; start playback first", retryable=False)
+        if p.action == "play" and state["is_playing"]:
+            return ToolResult.success(f"already playing on {state['device']['name']}")
+        if p.action == "pause" and not state["is_playing"]:
+            return ToolResult.success(f"already paused on {state['device']['name']}")
+        method, path = _CONTROL_CALLS[p.action]
+        client.call(method, path, params={"device_id": state["device"]["id"]})
+    except SpotifyError as e:
+        return _fail(e)
+    result = ToolResult.success(f"{p.action} on {state['device']['name']}")
+    result.context.update(item=(state.get("item") or {}).get("uri"), progress=state.get("progress_ms") or 0)
+    return result
+
+
+def verify_control(p: ControlParams, r: ToolResult) -> VerifyResult:
+    if "item" not in r.context:  # nothing was sent ("already playing")
+        return VerifyResult(True, r.summary)
+    client = get_client()
+
+    def done(state: dict | None) -> bool:
+        if not state:
+            return False
+        if p.action == "pause":
+            return not state["is_playing"]
+        if p.action == "play":
+            return state["is_playing"]
+        changed = (state.get("item") or {}).get("uri") != r.context["item"]
+        if p.action == "next":
+            return changed
+        return changed or (state.get("progress_ms") or 0) < r.context["progress"] - 500  # previous may restart the song
+
+    deadline = time.monotonic() + SETTLE_TIMEOUT_S
+    while True:
+        try:
+            state = _player(client)
+        except SpotifyError as e:
+            return VerifyResult(False, str(e))
+        if done(state):
+            item = (state.get("item") or {}).get("name", "?")
+            return VerifyResult(True, f"Spotify reports {'playing' if state['is_playing'] else 'paused'}: '{item}' on {state['device']['name']}")
+        if time.monotonic() >= deadline:
+            return VerifyResult(False, "Spotify's state did not change as expected")
+        time.sleep(0.7)
+
+
+class VolumeParams(BaseModel):
+    level: int = Field(ge=0, le=100, description="volume percent for the Spotify device")
+    device: str = Field(default="", description="device name, e.g. Echo; empty = the device playing now")
+
+
+def set_device_volume(p: VolumeParams) -> ToolResult:
+    try:
+        client = get_client()
+        if p.device:
+            device, _ = _ensure_device(client, p.device)
+        else:
+            state = _player(client)
+            device = state["device"] if state else None
+        if device is None:
+            return ToolResult.failure(f"no Spotify device matches '{p.device or 'the playing one'}'", retryable=False)
+        client.call("PUT", "/me/player/volume", params={"volume_percent": p.level, "device_id": device["id"]})
+    except SpotifyError as e:
+        return _fail(e)
+    result = ToolResult.success(f"set Spotify volume on {device['name']} to {p.level}%")
+    result.context.update(device_id=device["id"], level=p.level)
+    return result
+
+
+def verify_device_volume(p: VolumeParams, r: ToolResult) -> VerifyResult:
+    client = get_client()
+    deadline = time.monotonic() + SETTLE_TIMEOUT_S
+    while True:
+        try:
+            devices_now = (client.call("GET", "/me/player/devices") or {}).get("devices", [])
+        except SpotifyError as e:
+            return VerifyResult(False, str(e))
+        d = next((x for x in devices_now if x["id"] == r.context["device_id"]), None)
+        if d and d.get("volume_percent") is not None and abs(d["volume_percent"] - r.context["level"]) <= 2:
+            return VerifyResult(True, f"Spotify reports {d['name']} at {d['volume_percent']}%")
+        if time.monotonic() >= deadline:
+            now = d.get("volume_percent") if d else None
+            return VerifyResult(False, f"Spotify reports the device volume as {now}%, not {r.context['level']}%")
+        time.sleep(0.7)
 
 
 def verify_transfer(p: TransferParams, r: ToolResult) -> VerifyResult:
@@ -320,8 +516,14 @@ def verify_transfer(p: TransferParams, r: ToolResult) -> VerifyResult:
         except SpotifyError as e:
             return VerifyResult(False, str(e))
         if state and state["device"]["id"] == r.context["device_id"]:
-            return VerifyResult(True, f"Spotify reports the active device is {state['device']['name']}")
-        if time.monotonic() >= deadline:
+            wanted = r.context.get("volume")
+            actual = state["device"].get("volume_percent")
+            if wanted is None or (actual is not None and abs(actual - wanted) <= 2):
+                extra = f" at {actual}%" if wanted is not None else ""
+                return VerifyResult(True, f"Spotify reports the active device is {state['device']['name']}{extra}")
+            if time.monotonic() >= deadline:
+                return VerifyResult(False, f"the device is active but its volume reads {actual}%, not {wanted}%")
+        elif time.monotonic() >= deadline:
             return VerifyResult(False, "Spotify still reports a different active device")
         time.sleep(0.7)
 
@@ -333,5 +535,7 @@ def register_spotify_tools(registry: Registry) -> None:
 
     add("api_spotify_play", "Play a song, artist, album or playlist on Spotify; 'my favourite music' plays liked songs.", PlayParams, play, verify_play)
     add("api_spotify_transfer", "Move Spotify playback to a device, 'this' meaning this computer.", TransferParams, transfer, verify_transfer)
+    add("api_spotify_volume", "Set the volume of a Spotify device (a speaker, phone or this PC's Spotify app).", VolumeParams, set_device_volume, verify_device_volume)
+    add("api_spotify_control", "Play, pause, next or previous on Spotify, on whichever device is playing.", ControlParams, control, verify_control)
     add("api_spotify_devices", "List the devices Spotify can play on.", NoParams, devices, read_only_verify)
     add("api_spotify_now_playing", "Say what is playing on Spotify right now.", NoParams, now_playing, read_only_verify)

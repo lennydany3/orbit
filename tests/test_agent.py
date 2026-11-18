@@ -164,10 +164,19 @@ def test_close_it_closes_what_was_just_opened_without_the_model(logs):
     assert "switched off" in agent.handle("can you close it")  # after closing, "it" is no longer known
 
 
-def test_model_claiming_an_action_without_a_tool_is_flagged(make_agent, logs):
-    llm = ScriptedLLM(LLMResponse(content="Playing your favorite music in Spotify."))
+def test_model_claiming_an_action_twice_without_a_tool_is_flagged(make_agent, logs):
+    llm = ScriptedLLM(LLMResponse(content="Playing your favorite music in Spotify."),
+                      LLMResponse(content="Transferring Spotify playback to Echo..."))
     reply = make_agent(llm).handle("play something nice")
     assert "did not run any tool" in reply and "warn" in kinds(logs)
+
+
+def test_model_claiming_an_action_is_nudged_and_then_really_does_it(make_agent, logs):
+    llm = ScriptedLLM(LLMResponse(content="Transferring playback..."), call("fake_echo", text="x"), LLMResponse(content="Done."))
+    reply = make_agent(llm).handle("say x back now")
+    assert reply == "Done." and "did not run any tool" not in reply
+    nudge = llm.calls[1][-1]
+    assert nudge["role"] == "user" and "did not call a tool" in nudge["content"]
 
 
 def test_plain_chat_is_not_flagged(make_agent):
@@ -178,3 +187,140 @@ def test_plain_chat_is_not_flagged(make_agent):
 def test_claim_after_a_real_tool_call_is_not_flagged(make_agent):
     llm = ScriptedLLM(call("fake_echo", text="x"), LLMResponse(content="Done, I echoed it."))
     assert "did not run any tool" not in make_agent(llm).handle("say x back please")
+
+
+
+# ---------- several commands in one sentence ----------
+def _chain_agent(logs, spotify_ok=True):
+    from pydantic import BaseModel
+
+    from orbit.agent.loop import Agent
+    from orbit.agent.router import Router
+    from orbit.agent.safety import Safety
+    from orbit.tools.base import Registry, Tool, ToolResult
+
+    class Name(BaseModel):
+        name: str
+
+    class Title(BaseModel):
+        title: str
+
+    class Query(BaseModel):
+        query: str
+
+    class Dev(BaseModel):
+        device: str = "this"
+        volume: int | None = None
+
+    class Vol(BaseModel):
+        level: int
+        device: str = ""
+
+    done = []
+    reg = Registry()
+
+    def tool(name, params, fn):
+        reg.register(Tool(name, "d", params, "os", "low", fn))
+
+    tool("os_open_app", Name, lambda p: done.append(("open", p.name)) or ToolResult.success(f"opened {p.name}"))
+    tool("os_close_window", Title, lambda p: done.append(("close", p.title)) or ToolResult.success(f"closed {p.title}"))
+    tool("api_spotify_play", Query, lambda p: done.append(("play", p.query)) or (
+        ToolResult.success("playing") if spotify_ok else ToolResult.failure("no device", retryable=False)))
+    tool("api_spotify_transfer", Dev, lambda p: done.append(("transfer", p.device, p.volume)) or (
+        ToolResult.success(f"moved to {p.device}") if p.device.lower() in ("echo", "this") else ToolResult.failure("no such device", retryable=False, not_found=True)))
+    log = lambda k, m: logs.append((k, m))  # noqa: E731
+    agent = Agent(ScriptedLLM(LLMResponse(content="(model)")), reg, Router(log), Safety(), log)
+    return agent, done
+
+
+def test_two_commands_run_in_order_without_the_model(logs):
+    agent, done = _chain_agent(logs)
+    reply = agent.handle("open spotify and play my fav music")
+    assert done == [("open", "Spotify"), ("play", "liked songs")]
+    assert reply == "opened Spotify; playing" and agent.llm.calls == []
+
+
+def test_it_inside_a_chain_means_what_the_previous_part_opened(logs):
+    agent, done = _chain_agent(logs)
+    agent.handle("open the clock app, then close it")
+    assert done == [("open", "Clock"), ("close", "Clock")]
+
+
+def test_chain_stops_at_the_first_failure_and_says_so(logs):
+    agent, done = _chain_agent(logs, spotify_ok=False)
+    reply = agent.handle("open spotify and play my fav music and close spotify")
+    assert done == [("open", "Spotify"), ("play", "liked songs")]  # the close never ran
+    assert "no device" in reply and "stopped at" in reply
+
+
+def test_a_sentence_with_an_unknown_part_goes_to_the_model(logs):
+    agent, done = _chain_agent(logs)
+    agent.handle("open spotify and do a little dance")
+    assert done == [] and len(agent.llm.calls) == 1  # nothing ran half-way: the model got the whole sentence
+
+
+def test_transfer_with_volume_is_one_tool_call(logs):
+    agent, done = _chain_agent(logs)
+    reply = agent.handle("move the music to echo with 30% volume on it")
+    assert done == [("transfer", "echo", 30)]
+    assert "moved to echo" in reply and agent.llm.calls == []
+
+
+def test_switch_to_x_is_a_spotify_device_only_after_a_spotify_request(logs):
+    agent, done = _chain_agent(logs)
+    agent.handle("play my fav music")
+    agent.handle("switch to echo with 30% volume")
+    assert done == [("play", "liked songs"), ("transfer", "echo", 30)]
+
+
+def test_switch_to_x_without_spotify_context_is_not_taken_for_a_device(logs):
+    agent, done = _chain_agent(logs)
+    agent.handle("switch to echo")
+    assert done == [] and len(agent.llm.calls) == 1
+
+
+def test_context_guess_that_fails_for_another_reason_is_reported_not_hidden(logs):
+    from orbit.tools.base import ToolResult
+    agent, done = _chain_agent(logs)
+    agent.handle("play my fav music")
+    tool = agent.registry.get_exposed("api_spotify_transfer")
+    tool.run = lambda p: ToolResult.failure("Spotify still reports a different active device", retryable=False)  # a real failure, not "unknown device"
+    reply = agent.handle("switch to echo")
+    assert "different active device" in reply and agent.llm.calls == []  # the model must not paper over it
+
+
+def test_context_guess_that_matches_no_device_falls_back_to_the_model(logs):
+    agent, done = _chain_agent(logs)
+    agent.handle("play my fav music")
+    agent.handle("switch to chrome")  # looks like a device switch, but no such device: model gets it instead
+    assert done[-1] == ("transfer", "chrome", None) and len(agent.llm.calls) == 1
+
+
+def test_pause_and_next_go_through_spotify_after_a_spotify_request(logs):
+    from pydantic import BaseModel
+    from orbit.agent.loop import Agent
+    from orbit.agent.router import Router
+    from orbit.agent.safety import Safety
+    from orbit.tools.base import Registry, Tool, ToolResult
+
+    class Query(BaseModel):
+        query: str
+
+    class Key(BaseModel):
+        key: str
+
+    class Action(BaseModel):
+        action: str
+
+    seen = []
+    reg = Registry()
+    reg.register(Tool("api_spotify_play", "d", Query, "api", "low", lambda p: seen.append(("play", p.query)) or ToolResult.success("playing")))
+    reg.register(Tool("api_spotify_control", "d", Action, "api", "low", lambda p: seen.append(("spotify", p.action)) or ToolResult.success("ok")))
+    reg.register(Tool("os_media_key", "d", Key, "os", "low", lambda p: seen.append(("media key", p.key)) or ToolResult.success("ok")))
+    log = lambda k, m: logs.append((k, m))  # noqa: E731
+    agent = Agent(ScriptedLLM(), reg, Router(log), Safety(), log)
+    agent.handle("pause")                  # no Spotify request yet: the PC media key
+    agent.handle("play my fav music")
+    agent.handle("pause")
+    agent.handle("previous song")
+    assert seen == [("media key", "pause"), ("play", "liked songs"), ("spotify", "pause"), ("spotify", "previous")]

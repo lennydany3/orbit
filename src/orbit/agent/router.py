@@ -22,10 +22,12 @@ class Router:
     def __init__(self, log: Log, verify_retries: int = config.VERIFY_RETRIES):
         self.log = log
         self.verify_retries = verify_retries
+        self._not_found = False  # did the last failed attempt mean "that thing does not exist"?
 
     def run(self, candidates: list[Tool], params: BaseModel) -> ToolResult:
         """`candidates` = same-capability tools, best layer first (Registry.alternatives)."""
         last_error = "no tool available"
+        self._not_found = False
         for i, tool in enumerate(candidates):
             result, last_error = self._try_tool(tool, params)
             if result is not None:
@@ -34,7 +36,9 @@ class Router:
                 nxt = candidates[i + 1]
                 self.log("fallback", f"{tool.layer} layer failed ({last_error}); falling back to {nxt.layer}: {nxt.name}")
         names = " -> ".join(f"{t.layer}:{t.name}" for t in candidates)
-        return ToolResult.failure(f"could not complete and verify the action on any layer ({names}). Last error: {last_error}")
+        return ToolResult.failure(
+            f"could not complete and verify the action on any layer ({names}). Last error: {last_error}",
+            not_found=self._not_found and len(candidates) == 1)
 
     def _try_tool(self, tool: Tool, params: BaseModel) -> tuple[ToolResult | None, str]:
         attempts = 1 if (tool.risk == "confirm" or not tool.idempotent) else 1 + self.verify_retries
@@ -48,6 +52,7 @@ class Router:
             if not result.ok:
                 error = result.error
                 self.log("act", f"{tool.layer}:{tool.name} failed in {took:.2f}s: {error}")
+                self._not_found = result.not_found
                 if not result.retryable:
                     break
                 continue
@@ -61,6 +66,7 @@ class Router:
                 self.log("verify", f"{tool.name}: OK ({verdict.detail})")
                 return result, ""
             error = f"verification failed: {verdict.detail}"
+            self._not_found = False
             self.log("verify", f"{tool.name}: FAILED ({verdict.detail})")
         return None, error
 
