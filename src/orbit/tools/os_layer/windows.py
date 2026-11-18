@@ -120,6 +120,13 @@ def match_windows(windows: list[Window], hints: list[str]) -> list[Window]:
                 score = max(score, 2)
             elif len(squashed) >= 4 and w.exe and squashed in w.exe:
                 score = max(score, 1)
+            elif len(squashed) >= 4 and squashed in title.replace(" ", ""):  # "speed test" vs "Speedtest"
+                score = max(score, 2)
+            # The query has extra words ("Speedtest by Ookla"): the window's process or title name sits inside it.
+            elif len(w.exe) >= 4 and f" {w.exe} " in f" {h} ":
+                score = max(score, 3)
+            elif len(title) >= 4 and f" {title} " in f" {h} ":
+                score = max(score, 2)
         if score:
             scored.append((-score, order, w))
     return [w for _, _, w in sorted(scored, key=lambda t: (t[0], t[1]))]

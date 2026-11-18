@@ -88,7 +88,9 @@ def focus_window(p: FocusParams) -> ToolResult:
     matches = windows.match_windows(windows.list_windows(), [p.title])
     if not matches:
         open_now = ", ".join(repr(w.title[:40]) for w in windows.list_windows()[:8])
-        return ToolResult.failure(f"no window matches '{p.title}'. Open windows include: {open_now}", retryable=False)
+        return ToolResult.failure(
+            f"no window matches '{p.title}'. Open windows include: {open_now}. "
+            "If one of these is what the user meant, call again with that title.", retryable=False)
     windows.focus(matches[0].hwnd)
     return ToolResult.success(f"focused '{matches[0].title}'")
 
@@ -116,7 +118,10 @@ def _closable(query: str) -> list[windows.Window]:
 def close_window(p: CloseParams) -> ToolResult:
     matches = _closable(p.title)
     if not matches:
-        return ToolResult.failure(f"no open window matches '{p.title}'", retryable=False)
+        open_now = ", ".join(repr(w.title[:40]) for w in windows.list_windows()[:8])
+        return ToolResult.failure(
+            f"no open window matches '{p.title}'. Open windows include: {open_now}. "
+            "If one of these is what the user meant, call again with that title.", retryable=False)
     target = matches[0]
     windows.close(target.hwnd)
     result = ToolResult.success(f"asked '{target.title}' to close")

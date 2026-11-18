@@ -40,6 +40,15 @@ def run_auth(service: str) -> int:
     return 0
 
 
+def spotify_status(registry: Registry) -> str:
+    """One line at startup, so a missing Spotify setup is visible instead of silently disabling the tools."""
+    if any(t.layer == "api" for t in registry.all()):
+        if spotify_auth.is_logged_in():
+            return "Spotify: connected."
+        return "Spotify: not logged in yet. Run:  auth spotify"
+    return f"Spotify: OFF ({spotify_auth.CLIENT_ID_ENV} is not set), so Spotify requests will not work."
+
+
 def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: bool = False) -> Agent:
     logger = setup_logging()
     log = ActionLog(logger=logger)
@@ -81,6 +90,7 @@ def _main(argv: list[str] | None) -> int:
 
     mode = "rules only" if args.no_llm else f"model {args.model}"
     print(f"{config.APP_NAME} ready ({mode}). Type 'help' for hints, 'quit' to exit. Ctrl+C stops a running request.")
+    print("  " + spotify_status(agent.registry))
     while True:
         try:
             text = input(f"{config.APP_NAME}> ").strip()

@@ -32,8 +32,23 @@ class AuthError(Exception):
     """Login failed. The message is safe to show."""
 
 
+def _read_user_env(name: str) -> str | None:
+    """The Windows *user* environment (what `setx` writes). A terminal or editor opened before `setx`
+    does not have it in its own environment, so we also look here."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            return winreg.QueryValueEx(key, name)[0] or None
+    except OSError:
+        return None
+
+
 def client_id_from_env() -> str | None:
-    return os.environ.get(CLIENT_ID_ENV) or None
+    return os.environ.get(CLIENT_ID_ENV) or _read_user_env(CLIENT_ID_ENV)
+
+
+def is_logged_in() -> bool:
+    return credstore.load_secret(CREDENTIAL_TARGET) is not None
 
 
 def make_pkce() -> tuple[str, str]:

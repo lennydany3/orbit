@@ -158,6 +158,7 @@ def fake(monkeypatch):
     monkeypatch.setattr(credstore, "save_secret", lambda *a, **k: None)
     monkeypatch.setattr(spotify, "SETTLE_TIMEOUT_S", 0.5)
     monkeypatch.setattr(spotify, "DEVICE_WAIT_S", 0.0)
+    monkeypatch.setattr(spotify, "launch_spotify", lambda: pytest.fail("must not launch Spotify unless it is needed"))
     monkeypatch.setattr(spotify.socket, "gethostname", lambda: "Atlas")
     return fs, client
 
@@ -202,10 +203,11 @@ def test_premium_required_message(fake, run):
     assert not r.ok and "Premium is required" in r.error
 
 
-def test_no_device_message_tells_model_to_open_spotify(fake, run):
+def test_no_device_message_tells_model_to_open_spotify(fake, run, monkeypatch):
     fs, _ = fake
     fs.devices = []
     fs.play_error = (404, {"error": {"message": "Player command failed: No active device found", "reason": "NO_ACTIVE_DEVICE"}})
+    monkeypatch.setattr(spotify, "launch_spotify", lambda: False)  # and Spotify cannot be started either
     r = run("api_spotify_play", PlayParams(query="Daft Punk"))
     assert not r.ok and "os_open_app" in r.error
 
@@ -239,8 +241,61 @@ def test_connector_only_registered_when_configured(monkeypatch):
     from orbit.tools.api_layer import register_api_tools
     reg = Registry()
     monkeypatch.delenv("SPOTIFY_CLIENT_ID", raising=False)
+    monkeypatch.setattr(spotify_auth, "_read_user_env", lambda name: None)
     register_api_tools(reg)
     assert reg.all() == []
     monkeypatch.setenv("SPOTIFY_CLIENT_ID", "x")
     register_api_tools(reg)
     assert {t.layer for t in reg.all()} == {"api"}
+
+
+def test_client_id_falls_back_to_the_windows_user_environment(monkeypatch):
+    """A terminal opened before `setx` doesn't have the variable, but the Windows user environment does."""
+    monkeypatch.delenv("SPOTIFY_CLIENT_ID", raising=False)
+    monkeypatch.setattr(spotify_auth, "_read_user_env", lambda name: "from-registry")
+    assert spotify_auth.client_id_from_env() == "from-registry"
+    monkeypatch.setenv("SPOTIFY_CLIENT_ID", "from-process")
+    assert spotify_auth.client_id_from_env() == "from-process"
+
+
+def test_spotify_closed_it_is_started_then_used(fake, run, monkeypatch):
+    fs, _ = fake
+    all_devices = fs.devices
+    fs.devices = []  # the app is closed: no devices at all
+    launched = []
+
+    def start():
+        launched.append(1)
+        fs.devices = all_devices  # the app starts and registers itself
+        return True
+
+    monkeypatch.setattr(spotify, "launch_spotify", start)
+    monkeypatch.setattr(spotify, "DEVICE_WAIT_S", 1.5)
+    r = run("api_spotify_play", PlayParams(query="my favourite music"))
+    assert r.ok and r.verified and launched == [1] and "started Spotify first" in r.summary
+
+
+def test_spotify_not_installed_gives_a_clear_error(fake, run, monkeypatch):
+    fs, _ = fake
+    fs.devices = []
+    fs.play_error = (404, {"error": {"message": "No active device found", "reason": "NO_ACTIVE_DEVICE"}})
+    monkeypatch.setattr(spotify, "launch_spotify", lambda: False)
+    r = run("api_spotify_play", PlayParams(query="Daft Punk"))
+    assert not r.ok and "os_open_app" in r.error
+
+
+def test_transfer_also_starts_spotify_when_closed(fake, run, monkeypatch):
+    fs, _ = fake
+    all_devices = fs.devices
+    fs.devices = []
+    monkeypatch.setattr(spotify, "launch_spotify", lambda: setattr(fs, "devices", all_devices) or True)
+    monkeypatch.setattr(spotify, "DEVICE_WAIT_S", 1.5)
+    r = run("api_spotify_transfer", TransferParams(device="this"))
+    assert r.ok and r.verified and "started Spotify first" in r.summary
+
+
+def test_other_devices_are_never_launched(fake, run):
+    fs, _ = fake
+    fs.devices = [d for d in DEVICES if d["type"] != "Speaker"]
+    r = run("api_spotify_transfer", TransferParams(device="kitchen"))  # launch_spotify would fail the test
+    assert not r.ok and "no Spotify device matches" in r.error

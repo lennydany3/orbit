@@ -79,6 +79,17 @@ def test_match_by_process_when_title_has_no_app_name():
     assert [w.hwnd for w in match_windows(WINS, ["spotify"])] == [3]
 
 
+@pytest.mark.parametrize("query", ["Speedtest by Ookla", "speed test", "the Speedtest app"])
+def test_match_when_the_query_has_extra_or_split_words(query):
+    wins = [Window(1, "Speedtest", "speedtest"), Window(2, "Claude", "claude")]
+    assert [w.hwnd for w in match_windows(wins, [query])] == [1]
+
+
+def test_match_space_insensitive_on_title_for_store_apps():
+    wins = [Window(1, "Speedtest", "applicationframehost"), Window(2, "Claude", "claude")]  # Store apps share one host exe
+    assert [w.hwnd for w in match_windows(wins, ["Speed Test"])] == [1]
+
+
 def test_match_nothing():
     assert match_windows(WINS, ["firefox"]) == []
 

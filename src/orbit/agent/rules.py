@@ -33,7 +33,7 @@ _VERB = r"(?:please )?(?:open|go to|visit|launch)"
 # Anything with extra clauses ("open X and play Y") deliberately does not match and goes to the model.
 RULES: list[tuple[str, re.Pattern, Builder]] = [
     # --- Spotify (API layer; only used if connected) ---
-    ("spotify-liked", re.compile(r"^play (?:my )?(?:favou?rite(?:s| music| songs)?|liked songs|saved songs)(?: on spotify)?$", re.I),
+    ("spotify-liked", re.compile(r"^play (?:my )?(?:favou?rites?|favs?|liked|saved)(?: (?:music|songs?|tracks?|stuff))?(?: on spotify)?$", re.I),
      lambda m: ("api_spotify_play", {"query": "liked songs"})),
     ("spotify-play", re.compile(r"^(?:play|put on)\s+(?P<q>.+?)\s+on spotify$", re.I),
      lambda m: ("api_spotify_play", {"query": m["q"]})),
@@ -55,7 +55,7 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
     ("web-search", re.compile(r"^(?:search|google)\s+(?:for\s+)?(?!.*\b(?:and|then)\b)(?P<q>.+)$", re.I),
      lambda m: ("browser_search", {"query": m["q"]})),
     # --- OS layer ---
-    ("open-app", re.compile(r"^(?:please )?(?:open|launch|start)\s+(?!.*\b(?:and|then)\b)(?P<name>[\w .+&'-]+?)(?: app)?$", re.I),
+    ("open-app", re.compile(r"^(?:please )?(?:open|launch|start)\s+(?:the )?(?!.*\b(?:and|then)\b)(?!(?:it|that|this|them|again)$)(?P<name>[\w .+&'-]+?)(?: app)?$", re.I),
      lambda m: ("os_open_app", {"name": m["name"].strip().title()})),
     ("volume-set", re.compile(rf"^(?:turn |set |put )?{_THE}volume (?:to |at )?(?P<n>\d{{1,3}})\s*%?$", re.I),
      lambda m: ("os_set_volume", {"level": int(m["n"])})),
@@ -85,8 +85,25 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
 ]
 
 
-def match(text: str) -> RuleMatch | None:
-    text = text.strip()
+# Polite filler a person puts around a command: "ok can you close the speed test please?"
+_FILLER_HEAD = re.compile(r"^(?:(?:ok(?:ay)?|yo+|yeah|hey|hi|bro|so|now|then|just|please|pls|can you|could you|would you|will you|can u)\b,?\s+)+", re.I)
+_FILLER_TAIL = re.compile(r"(?:,?\s*(?:please|pls|for me|thanks|thank you))?[\s?.!]*$", re.I)
+_PRONOUN_CLOSE = re.compile(r"^close (?:it|that|this|them)$", re.I)
+_PRONOUN_OPEN = re.compile(r"^(?:(?:re)?open|launch|start) (?:it|that|this|them)(?: again)?$|^(?:re)?open again$", re.I)
+
+
+def normalize(text: str) -> str:
+    text = _FILLER_HEAD.sub("", text.strip())
+    return _FILLER_TAIL.sub("", text).strip()
+
+
+def match(text: str, subject: str | None = None, closed: str | None = None) -> RuleMatch | None:
+    """`subject` = the app/window Orbit last opened or focused ("close it"); `closed` = the last one it closed ("open it")."""
+    text = normalize(text)
+    if subject and _PRONOUN_CLOSE.match(text):
+        return RuleMatch(rule="close-it", tool="os_close_window", args={"title": subject})
+    if (subject or closed) and _PRONOUN_OPEN.match(text):
+        return RuleMatch(rule="open-it", tool="os_open_app", args={"name": subject or closed})
     for name, pattern, build in RULES:
         m = pattern.match(text)
         if m:

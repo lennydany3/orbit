@@ -16,7 +16,7 @@ from . import credstore, spotify_auth
 
 API = "https://api.spotify.com/v1"
 SETTLE_TIMEOUT_S = 8.0
-DEVICE_WAIT_S = 15.0
+DEVICE_WAIT_S = 25.0  # after starting the Spotify app, how long to wait for it to show up as a device
 NOT_LOGGED_IN = "Spotify is not connected yet. Ask the user to run: python -m orbit auth spotify"
 _LIKED = re.compile(r"\b(favou?rites?|liked|saved|my (?:music|songs|library))\b", re.I)
 
@@ -136,11 +136,14 @@ def choose_target(query: str, results: dict) -> Target | None:
     return None
 
 
+THIS_DEVICE_WORDS = {"this", "this device", "here", "this pc", "this computer", "this laptop", "my pc", "my computer", "computer", "pc", "laptop"}
+
+
 def pick_device(devices: list[dict], wanted: str = "this", hostname: str | None = None) -> dict | None:
     """'this'/'here'/'pc' = the Spotify app on this computer. Anything else = match by device name."""
     wanted = (wanted or "this").strip().lower()
     host = (hostname or socket.gethostname()).lower()
-    if wanted in ("this", "this device", "here", "this pc", "this computer", "this laptop", "my pc", "my computer", "computer", "pc", "laptop"):
+    if wanted in THIS_DEVICE_WORDS:
         computers = [d for d in devices if d.get("type") == "Computer"]
         named = [d for d in computers if d.get("name", "").lower() == host or host in d.get("name", "").lower()]
         if named:
@@ -179,10 +182,31 @@ def _find_device(client: SpotifyClient, wanted: str, wait_s: float = 0) -> dict 
         time.sleep(1)
 
 
+def launch_spotify() -> bool:
+    """Start the Spotify desktop app (an OS-layer helper). True if a launch was started."""
+    from ..os_layer import apps
+    app, _ = apps.resolve_app("Spotify", apps.installed_apps())
+    if app is None:
+        return False
+    apps.launch(app)
+    return True
+
+
+def _ensure_device(client: SpotifyClient, wanted: str) -> tuple[dict | None, bool]:
+    """The device to use, starting the Spotify app on this PC first if it is not running.
+    Returns (device or None, whether we had to start Spotify). Other devices (phone, speaker) are never launched."""
+    device = _find_device(client, wanted)
+    if device or (wanted or "this").strip().lower() not in THIS_DEVICE_WORDS:
+        return device, False
+    if not launch_spotify():
+        return None, False
+    return _find_device(client, wanted, wait_s=DEVICE_WAIT_S), True
+
+
 def play(p: PlayParams) -> ToolResult:
     try:
         client = get_client()
-        device = _find_device(client, "this", wait_s=DEVICE_WAIT_S)
+        device, started = _ensure_device(client, "this")
         params = {"device_id": device["id"]} if device else None
         query = p.query.strip()
         if not query:
@@ -204,7 +228,7 @@ def play(p: PlayParams) -> ToolResult:
     except SpotifyError as e:
         return _fail(e)
     where = f" on {device['name']}" if device else ""
-    result = ToolResult.success(f"playing {target.label}{where}")
+    result = ToolResult.success(f"playing {target.label}{where}" + (" (started Spotify first)" if started else ""))
     result.context.update(kind=target.kind, uri=target.uri, uris=target.body.get("uris"))
     return result
 
@@ -274,7 +298,7 @@ def now_playing(p: NoParams) -> ToolResult:
 def transfer(p: TransferParams) -> ToolResult:
     try:
         client = get_client()
-        device = _find_device(client, p.device, wait_s=DEVICE_WAIT_S)
+        device, started = _ensure_device(client, p.device)
         if device is None:
             have = ", ".join(d["name"] for d in (client.call("GET", "/me/player/devices") or {}).get("devices", [])) or "none"
             return ToolResult.failure(f"no Spotify device matches '{p.device}'. Available: {have}. If Spotify is closed, open it first", retryable=False)
@@ -282,7 +306,7 @@ def transfer(p: TransferParams) -> ToolResult:
         client.call("PUT", "/me/player", json={"device_ids": [device["id"]], "play": bool(state and state.get("is_playing"))})
     except SpotifyError as e:
         return _fail(e)
-    result = ToolResult.success(f"moved playback to {device['name']}")
+    result = ToolResult.success(f"moved playback to {device['name']}" + (" (started Spotify first)" if started else ""))
     result.context["device_id"] = device["id"]
     return result
 

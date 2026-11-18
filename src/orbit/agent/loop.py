@@ -1,4 +1,5 @@
 """The agent: rules first, then the LLM; every tool call goes validate -> safety -> router(verify)."""
+import re
 import time
 
 from pydantic import ValidationError
@@ -18,11 +19,17 @@ SYSTEM_PROMPT = (
     "but never swap in a different app, window or target than the user asked for: if it is not available, say so. "
     "Exception: if the error says 'closest: X' and X is plainly the same thing the user meant, call the tool again with X. "
     "Use the short, common name of an app (Speedtest, not Speedtest by Ookla). "
+    "Never say you did something unless a tool result confirmed it; if no tool can do it, say you can't. "
     "Earlier messages in this chat are context: use them to understand words like 'it', 'that' or 'again'. "
     "When the task is done, or if no tool fits, answer in one short sentence."
 )
 
 _REMEMBERED_RESULT_CHARS = 300
+_CLAIMS_ACTION = re.compile(
+    r"\b(playing|played|opened|opening|closed|closing|paused|muted|unmuted|turned|launched|launching|started|"
+    r"switched|searching|searched|checking|increased|decreased|done|completed|all set)\b", re.I)
+# Tools whose success tells us what "it" means next time, and which argument names the thing.
+_SUBJECT_PARAM = {"os_open_app": "name", "os_focus_window": "title"}
 
 
 class Agent:
@@ -45,6 +52,8 @@ class Agent:
         self.max_failures = max_failures
         self.turns: list[list[dict]] = []  # short-term memory: one list of messages per earlier request
         self.last_request = ""
+        self.last_subject: str | None = None  # app/window Orbit last opened or focused: what "it" means
+        self.last_closed: str | None = None   # the one it closed last: what "open it" means
 
     # ---- public ----
     def handle(self, text: str) -> str:
@@ -62,6 +71,8 @@ class Agent:
         """Clear the conversation memory."""
         self.turns.clear()
         self.last_request = ""
+        self.last_subject = None
+        self.last_closed = None
 
     # ---- memory ----
     def _remember(self, turn: list[dict]) -> None:
@@ -83,7 +94,7 @@ class Agent:
     # ---- internals ----
     def _handle(self, text: str) -> str:
         previous, self.last_request = self.last_request, text
-        m = rules.match(text)
+        m = rules.match(text, self.last_subject, self.last_closed)
         if m and self.registry.get_exposed(m.tool):
             self.log("rule", f"'{m.rule}' matched, no model call")
             result = self.execute(m.tool, m.args)
@@ -105,7 +116,12 @@ class Agent:
             resp = self.llm.chat(messages, schemas)
             self.log("llm", f"step {step}/{self.max_steps}: {len(resp.tool_calls)} tool call(s) in {resp.elapsed_s:.1f}s")
             if not resp.tool_calls:
-                return self._finish(turn, resp.content.strip() or "(the model gave no reply)")
+                reply = resp.content.strip() or "(the model gave no reply)"
+                if len(turn) == 1 and _CLAIMS_ACTION.search(reply):
+                    # The small model sometimes says "Playing your music" without calling anything. Never let that pass as done.
+                    self.log("warn", "the model described an action but ran no tool")
+                    reply += "\n  (Note: I did not run any tool, so nothing was actually done.)"
+                return self._finish(turn, reply)
             assistant = {
                 "role": "assistant",
                 "content": resp.content,
@@ -151,4 +167,10 @@ class Agent:
         if not allowed:
             self.log("safety", f"blocked: {why}")
             return ToolResult.failure(why)
-        return self.router.run(candidates, params)
+        result = self.router.run(candidates, params)
+        if result.ok:
+            if name in _SUBJECT_PARAM:
+                self.last_subject = getattr(params, _SUBJECT_PARAM[name])
+            elif name == "os_close_window":
+                self.last_closed, self.last_subject = self.last_subject or params.title, None
+        return result

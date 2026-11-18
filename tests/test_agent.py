@@ -136,3 +136,45 @@ def test_forget_clears_memory(make_agent):
     agent.forget()
     agent.handle("hello again")
     assert [m["role"] for m in llm.calls[1]] == ["system", "user"]
+
+
+def test_close_it_closes_what_was_just_opened_without_the_model(logs):
+    from pydantic import BaseModel
+    from orbit.agent.loop import Agent
+    from orbit.agent.router import Router
+    from orbit.agent.safety import Safety
+    from orbit.tools.base import Registry, Tool, ToolResult
+
+    class OpenP(BaseModel):
+        name: str
+
+    class CloseP(BaseModel):
+        title: str
+
+    done = []
+    reg = Registry()
+    reg.register(Tool("os_open_app", "d", OpenP, "os", "low", lambda p: done.append(("open", p.name)) or ToolResult.success("opened")))
+    reg.register(Tool("os_close_window", "d", CloseP, "os", "low", lambda p: done.append(("close", p.title)) or ToolResult.success("closed")))
+    log = lambda k, m: logs.append((k, m))  # noqa: E731
+    agent = Agent(ScriptedLLM(), reg, Router(log), Safety(), log)
+    agent.handle("ok can you open the clock app")
+    assert "closed" in agent.handle("can you close it")
+    assert done == [("open", "Clock"), ("close", "Clock")]
+    agent.llm = None
+    assert "switched off" in agent.handle("can you close it")  # after closing, "it" is no longer known
+
+
+def test_model_claiming_an_action_without_a_tool_is_flagged(make_agent, logs):
+    llm = ScriptedLLM(LLMResponse(content="Playing your favorite music in Spotify."))
+    reply = make_agent(llm).handle("play something nice")
+    assert "did not run any tool" in reply and "warn" in kinds(logs)
+
+
+def test_plain_chat_is_not_flagged(make_agent):
+    llm = ScriptedLLM(LLMResponse(content="Hello! How can I assist you today?"))
+    assert "did not run any tool" not in make_agent(llm).handle("hi there friend")
+
+
+def test_claim_after_a_real_tool_call_is_not_flagged(make_agent):
+    llm = ScriptedLLM(call("fake_echo", text="x"), LLMResponse(content="Done, I echoed it."))
+    assert "did not run any tool" not in make_agent(llm).handle("say x back please")
