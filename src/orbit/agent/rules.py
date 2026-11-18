@@ -88,7 +88,7 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
      lambda m: ("os_set_volume", {"level": int(m["n"])})),
     ("volume-step", re.compile(rf"^(?:turn )?{_THE}volume (?P<dir>up|down)$|^turn it (?P<dir2>up|down)$", re.I),
      lambda m: ("os_change_volume", {"delta": 10 if (m["dir"] or m["dir2"]).lower() == "up" else -10})),
-    ("close-window", re.compile(r"^(?:please )?close\s+(?:the )?(?!(?:it|that|this|them|window|app|tab)$)(?P<t>[\w .+&'-]+?)(?: (?:app|window))?$", re.I),
+    ("close-window", re.compile(r"^(?:please )?close\s+(?:the )?(?!(?:it|that|this|them|window|app|tab|both|all|everything|everything i opened|them all|all of them|both of them)$)(?P<t>[\w .+&'-]+?)(?: (?:app|window))?$", re.I),
      lambda m: ("os_close_window", {"title": m["t"].strip().title()})),
     ("mute", re.compile(r"^(?P<un>un)?mute(?: the (?:sound|volume|audio))?$", re.I),
      lambda m: ("os_set_mute", {"muted": not m["un"]})),
@@ -115,7 +115,8 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
 # Polite filler a person puts around a command: "ok can you close the speed test please?"
 _FILLER_HEAD = re.compile(r"^(?:(?:ok(?:ay)?|yo+|yeah|hey|hi|bro|so|now|then|just|please|pls|can you|could you|would you|will you|can u)\b,?\s+)+", re.I)
 _FILLER_TAIL = re.compile(r"(?:,?\s*(?:please|pls|for me|thanks|thank you))?[\s?.!]*$", re.I)
-_PRONOUN_CLOSE = re.compile(r"^close (?:it|that|this|them)$", re.I)
+_PRONOUN_CLOSE = re.compile(r"^close (?:it|that|this)$", re.I)
+_PLURAL_CLOSE = re.compile(r"^close (?:both|them|them all|all|all of them|both of them|everything)(?: i opened)?$", re.I)
 _PRONOUN_OPEN = re.compile(r"^(?:(?:re)?open|launch|start) (?:it|that|this|them)(?: again)?$|^(?:re)?open again$", re.I)
 
 
@@ -127,17 +128,47 @@ def normalize(text: str) -> str:
 _SPLIT = re.compile(r"\s*,\s*(?:and\s+|then\s+)?|\s+(?:and\s+then|then|and|&)\s+", re.I)
 
 
+COMMAND_WORDS = frozenset(
+    "open launch start close quit exit play pause resume stop next skip previous prev mute unmute set turn volume "
+    "switch move transfer send cast change search google go visit show list tell what whats what's who how "
+    "fullscreen full minimize maximize put make increase decrease raise lower find watch look try use say read check bring".split())
+_SHARE_VERB = frozenset({"open", "close", "launch", "start", "quit"})  # "close the clock and the calculator"
+_NOT_A_NAME = frozenset("do it that this them tell show what how why please also maybe then".split())
+
+
+def is_command(part: str) -> bool:
+    """Does this piece of a sentence start like a request? (Used to decide whether "A and B" is two requests.)"""
+    first = part.split(None, 1)[0].lower() if part.split() else ""
+    return first in COMMAND_WORDS
+
+
 def split_commands(text: str) -> list[str]:
-    """"open spotify and play my fav music" -> two commands. A part that is not a command makes the caller use the model."""
-    return [p for p in (normalize(part) for part in _SPLIT.split(normalize(text))) if p]
+    """"open spotify and play my fav music" -> two commands. "close the clock and the calculator" -> two closes."""
+    parts = [p for p in (normalize(part) for part in _SPLIT.split(normalize(text))) if p]
+    out: list[str] = []
+    for part in parts:
+        words = part.lower().split()
+        looks_like_a_name = words[0] not in _NOT_A_NAME and (words[0] in ("the", "my", "a", "an") or len(words) <= 2)
+        if out and not is_command(part) and looks_like_a_name:
+            verb = out[-1].split(None, 1)[0].lower()
+            if verb in _SHARE_VERB:
+                part = f"{verb} {part}"
+        out.append(part)
+    return out
 
 
-def match(text: str, subject: str | None = None, closed: str | None = None, spotify_active: bool = False) -> RuleMatch | None:
+def match(text: str, subject: str | None = None, closed: str | None = None, spotify_active: bool = False,
+          subjects: list[str] | None = None) -> RuleMatch | None:
     """`subject` = the app/window Orbit last opened or focused ("close it"); `closed` = the last one it closed ("open it");
-    `spotify_active` = the conversation is about Spotify, so "switch to echo" means a Spotify device."""
+    `spotify_active` = the conversation is about Spotify, so "switch to echo" means a Spotify device;
+    `subjects` = everything Orbit opened lately ("close both")."""
     text = normalize(text)
     if subject and _PRONOUN_CLOSE.match(text):
         return RuleMatch(rule="close-it", tool="os_close_window", args={"title": subject})
+    if subjects and _PLURAL_CLOSE.match(text):
+        first, *rest = subjects
+        return RuleMatch(rule="close-them", tool="os_close_window", args={"title": first},
+                         then=[("os_close_window", {"title": name}) for name in rest])
     if (subject or closed) and _PRONOUN_OPEN.match(text):
         return RuleMatch(rule="open-it", tool="os_open_app", args={"name": subject or closed})
     if spotify_active:

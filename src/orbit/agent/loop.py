@@ -30,7 +30,10 @@ _REMEMBERED_RESULT_CHARS = 300
 _CLAIMS_ACTION = re.compile(
     r"\b(playing|played|opened|opening|closed|closing|paused|muted|unmuted|turned|launched|launching|started|"
     r"switched|switching|searching|searched|checking|increased|decreased|done|completed|all set|"
-    r"transferring|transferred|moving|moved|changing|changed|setting|sending|casting|adjusting|raising|lowering)\b", re.I)
+    r"transferring|transferred|moving|moved|changing|changed|setting|sending|casting|adjusting|raising|lowering|asked|has been|have been|is now|are now|i've|i have|i did|successfully)\b", re.I)
+# "what windows are open?" answered with no tool call is invented data, even though it contains no "action" word.
+_ASKS_STATE = re.compile(
+    r"^(?:what|whats|what's|which|tell|show|list|is|are)\b.*\b(?:windows?|playing|volume|devices?|apps?|tabs?|page|song|track|music|open)\b", re.I)
 # Tools whose success tells us what "it" means next time, and which argument names the thing.
 _SUBJECT_PARAM = {"os_open_app": "name", "os_focus_window": "title"}
 
@@ -58,6 +61,8 @@ class Agent:
         self.last_subject: str | None = None  # app/window Orbit last opened or focused: what "it" means
         self.last_closed: str | None = None   # the one it closed last: what "open it" means
         self.spotify_active = False           # the last thing done was a Spotify action: "switch to echo" = a Spotify device
+        self._part_failed = False             # did the last tool call of the current request fail? (stops a chain)
+        self.recent_subjects: list[str] = []  # everything opened or focused lately that is still open: "close both"
 
     # ---- public ----
     def handle(self, text: str) -> str:
@@ -77,6 +82,7 @@ class Agent:
         self.last_request = ""
         self.last_subject = None
         self.last_closed = None
+        self.recent_subjects.clear()
         self.spotify_active = False
 
     # ---- memory ----
@@ -98,16 +104,31 @@ class Agent:
 
     # ---- internals ----
     def _handle(self, text: str) -> str:
-        previous, self.last_request = self.last_request, text
-        user = [{"role": "user", "content": text}]
-
-        # Several commands in one sentence ("open spotify and play my fav music"): run them in order, no model,
-        # but only if EVERY part is a known command. Otherwise the model decides.
+        # Several requests in one sentence ("open spotify and then tell me what is playing"): handle them one at a
+        # time, each as its own small request (a rule if one fits, otherwise the model). A small model is far
+        # more reliable on one thing at a time. Only done when every part starts like a request.
         parts = rules.split_commands(text)
-        if len(parts) > 1 and all(self._rule_for(p, placeholder=True) for p in parts):
-            self.log("rule", f"{len(parts)} commands in one sentence, no model call")
-            return self._finish(user, self._run_chain(parts))
+        if len(parts) > 1 and all(rules.is_command(p) for p in parts):
+            self.log("rule", f"{len(parts)} requests in one sentence: doing them one by one")
+            return self._run_parts(parts)
+        previous, self.last_request = self.last_request, text
+        return self._handle_one(text, previous)
 
+    def _run_parts(self, parts: list[str]) -> str:
+        replies = []
+        for i, part in enumerate(parts, 1):
+            self.log("rule", f"part {i}/{len(parts)}: '{part}'")
+            previous, self.last_request = self.last_request, part
+            self._part_failed = False
+            replies.append(self._handle_one(part, previous))
+            if self._part_failed and i < len(parts):
+                replies.append(f"(Stopped here: '{part}' did not work, so I did not run the rest.)")
+                break
+        return "\n".join(replies)
+
+    def _handle_one(self, text: str, previous: str) -> str:
+        """One request: a fast rule if one fits, otherwise the model."""
+        user = [{"role": "user", "content": text}]
         m = self._rule_for(text)
         if m:
             self.log("rule", f"'{m.rule}' matched, no model call")
@@ -117,13 +138,13 @@ class Agent:
             # "switch to chrome" right after a Spotify request: there is no Spotify device called that, so it meant a window.
             self.log("rule", f"'{m.rule}' was only a guess from context and nothing matched; asking the model instead")
         if self.llm is None:
+            self._part_failed = True
             return "No rule matches that, and the model is switched off (--no-llm)."
         return self._llm_loop(text, previous)
 
-    def _rule_for(self, text: str, placeholder: bool = False) -> rules.RuleMatch | None:
-        """The rule for a command, if its tool is available. `placeholder` = check only, so "it" always resolves."""
-        subject, closed = ("?", "?") if placeholder else (self.last_subject, self.last_closed)
-        m = rules.match(text, subject, closed, self.spotify_active or placeholder)
+    def _rule_for(self, text: str) -> rules.RuleMatch | None:
+        """The rule for a command, if its tool is available."""
+        m = rules.match(text, self.last_subject, self.last_closed, self.spotify_active, self.recent_subjects)
         if m and m.tool == "os_media_key" and self.spotify_active and self.registry.get_exposed("api_spotify_control"):
             # Right after a Spotify request, "pause"/"next" mean Spotify itself: the media keys only reach this PC.
             action = {"prev": "previous"}.get(m.args["key"], m.args["key"])
@@ -141,18 +162,6 @@ class Agent:
             said.append(result.summary)
         return True, "; ".join(said), False
 
-    def _run_chain(self, parts: list[str]) -> str:
-        said = []
-        for part in parts:
-            m = self._rule_for(part)  # re-resolved each time: "it" may now mean what the previous part opened
-            if m is None:
-                return "; ".join(said + [f"Stopped: I could not understand '{part}' after that."])
-            ok, reply, _ = self._run_rule(m)
-            said.append(reply)
-            if not ok:
-                return "; ".join(said) + f"  (stopped at '{part}')"
-        return "; ".join(said)
-
     def _llm_loop(self, text: str, previous: str = "") -> str:
         # Rank tools using this request plus the previous one, so a follow-up like "close it" keeps the right tools.
         tools = self.registry.relevant(f"{text} {previous}", config.MAX_TOOLS_PER_REQUEST)
@@ -167,7 +176,7 @@ class Agent:
             self.log("llm", f"step {step}/{self.max_steps}: {len(resp.tool_calls)} tool call(s) in {resp.elapsed_s:.1f}s")
             if not resp.tool_calls:
                 reply = resp.content.strip() or "(the model gave no reply)"
-                if len(turn) == 1 and _CLAIMS_ACTION.search(reply):
+                if len(turn) == 1 and (_CLAIMS_ACTION.search(reply) or _ASKS_STATE.search(text)):
                     # The small model sometimes says "Transferring your music" without calling anything.
                     if not nudged:
                         nudged = True
@@ -179,6 +188,7 @@ class Agent:
                         ]
                         continue
                     self.log("warn", "the model still described an action without running a tool")
+                    self._part_failed = True
                     reply += "\n  (Note: I did not run any tool, so nothing was actually done.)"
                 return self._finish(turn, reply)
             assistant = {
@@ -210,6 +220,7 @@ class Agent:
             error = f"unknown tool '{name}'." + (f" Closest: {', '.join(hint)}." if hint else "")
             error += f" Available: {', '.join(t.name for t in self.registry.exposed())}."
             self.log("error", error)
+            self._part_failed = True
             return ToolResult.failure(error)
 
         try:
@@ -218,6 +229,7 @@ class Agent:
             problems = "; ".join(f"'{'.'.join(map(str, err['loc'])) or 'args'}': {err['msg']}" for err in e.errors())
             error = f"invalid arguments for {name}: {problems}. Expected: {tool.signature()}"
             self.log("error", error)
+            self._part_failed = True
             return ToolResult.failure(error)
 
         self.log("act", f"{name}({params.model_dump()})  [risk={tool.risk}]")
@@ -227,6 +239,7 @@ class Agent:
             self.log("safety", f"blocked: {why}")
             return ToolResult.failure(why)
         result = self.router.run(candidates, params)
+        self._part_failed = not result.ok
         if result.ok:
             if name.startswith("api_spotify"):
                 self.spotify_active = True
@@ -234,6 +247,10 @@ class Agent:
                 self.spotify_active = False
             if name in _SUBJECT_PARAM:
                 self.last_subject = getattr(params, _SUBJECT_PARAM[name])
+                if self.last_subject in self.recent_subjects:
+                    self.recent_subjects.remove(self.last_subject)
+                self.recent_subjects = (self.recent_subjects + [self.last_subject])[-5:]
             elif name == "os_close_window":
                 self.last_closed, self.last_subject = self.last_subject or params.title, None
+                self.recent_subjects = [n for n in self.recent_subjects if n.lower() != params.title.lower()]
         return result

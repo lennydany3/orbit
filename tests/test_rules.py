@@ -98,6 +98,18 @@ def test_play_next_is_the_media_key():
     ("open github, then search cats", ["open github", "search cats"]),
     ("ok can you open the clock app, close it please", ["open the clock app", "close it"]),
     ("play my fav music", ["play my fav music"]),
+    ("close the clock and the calculator", ["close the clock", "close the calculator"]),
+    ("open spotify and chrome", ["open spotify", "open chrome"]),
+    ("open spotify and do a little dance", ["open spotify", "do a little dance"]),
+    ("search cats and dogs", ["search cats", "dogs"]),  # "dogs" is not a command, so the caller keeps the sentence whole
 ])
 def test_split_commands(text, parts):
     assert rules.split_commands(text) == parts
+
+
+@pytest.mark.parametrize("text", ["close both", "close them", "close them all", "close all of them", "can you close everything I opened"])
+def test_close_several_things_that_were_just_opened(text):
+    assert rules.match(text) is None  # nothing opened yet
+    m = rules.match(text, subjects=["Calculator", "Clock"])
+    assert m and m.tool == "os_close_window" and m.args == {"title": "Calculator"}
+    assert m.then == [("os_close_window", {"title": "Clock"})]

@@ -237,7 +237,7 @@ def test_two_commands_run_in_order_without_the_model(logs):
     agent, done = _chain_agent(logs)
     reply = agent.handle("open spotify and play my fav music")
     assert done == [("open", "Spotify"), ("play", "liked songs")]
-    assert reply == "opened Spotify; playing" and agent.llm.calls == []
+    assert reply == "opened Spotify\nplaying" and agent.llm.calls == []
 
 
 def test_it_inside_a_chain_means_what_the_previous_part_opened(logs):
@@ -250,7 +250,7 @@ def test_chain_stops_at_the_first_failure_and_says_so(logs):
     agent, done = _chain_agent(logs, spotify_ok=False)
     reply = agent.handle("open spotify and play my fav music and close spotify")
     assert done == [("open", "Spotify"), ("play", "liked songs")]  # the close never ran
-    assert "no device" in reply and "stopped at" in reply
+    assert "no device" in reply and "Stopped here" in reply
 
 
 def test_a_sentence_with_an_unknown_part_goes_to_the_model(logs):
@@ -324,3 +324,76 @@ def test_pause_and_next_go_through_spotify_after_a_spotify_request(logs):
     agent.handle("pause")
     agent.handle("previous song")
     assert seen == [("media key", "pause"), ("play", "liked songs"), ("spotify", "pause"), ("spotify", "previous")]
+
+
+def test_close_two_things_in_one_sentence(logs):
+    agent, done = _chain_agent(logs)
+    agent.handle("close the clock and the calculator")
+    assert done == [("close", "Clock"), ("close", "Calculator")]
+
+
+def test_a_part_without_a_rule_is_handed_to_the_model_on_its_own(logs):
+    """"open spotify and tell me what is playing": the first part is a rule, the second is a small request for the model."""
+    agent, done = _chain_agent(logs)
+    agent.llm = ScriptedLLM(LLMResponse(content="I can look that up once you ask for a specific song."))
+    reply = agent.handle("open spotify and tell me a joke")
+    assert done == [("open", "Spotify")] and len(agent.llm.calls) == 1
+    assert agent.llm.calls[0][-1]["content"] == "tell me a joke"  # the model sees only this part (plus memory)
+    assert reply == "opened Spotify\nI can look that up once you ask for a specific song."
+
+
+def test_a_model_part_that_uses_a_tool_then_a_rule_part(logs):
+    agent, done = _chain_agent(logs)
+    agent.llm = ScriptedLLM(call("api_spotify_play", query="jazz"), LLMResponse(content="Playing jazz."))
+    agent.handle("play some jazz music for me and then close the clock")
+    # part 1 is not a rule ("play some jazz ...") so the model handles it; part 2 is a rule
+    assert done == [("play", "jazz"), ("close", "Clock")]
+
+
+def test_chain_stops_when_a_model_part_fails(logs):
+    agent, done = _chain_agent(logs, spotify_ok=False)
+    agent.llm = ScriptedLLM(call("api_spotify_play", query="jazz"), LLMResponse(content="That did not work."))
+    reply = agent.handle("play some jazz music and then close the clock")
+    assert done == [("play", "jazz")] and "Stopped here" in reply
+
+
+def test_a_model_part_that_only_talks_stops_the_chain(logs):
+    agent, done = _chain_agent(logs)
+    agent.llm = ScriptedLLM(LLMResponse(content="Playing jazz."), LLMResponse(content="Playing jazz now."))
+    reply = agent.handle("play some jazz and close the clock")
+    assert done == [] and "did not run any tool" in reply and "Stopped here" in reply
+
+
+def test_one_sentence_that_is_really_one_request_is_not_split(logs):
+    agent, done = _chain_agent(logs)
+    agent.llm = ScriptedLLM(LLMResponse(content="ok"))
+    agent.handle("play rock and roll classics")
+    assert len(agent.llm.calls) == 1 and agent.llm.calls[0][-1]["content"] == "play rock and roll classics"
+
+
+def test_open_two_then_close_both(logs):
+    agent, done = _chain_agent(logs)
+    agent.handle("open calculator and clock app and then close both")
+    assert done == [("open", "Calculator"), ("open", "Clock"), ("close", "Calculator"), ("close", "Clock")]
+    assert agent.recent_subjects == []
+
+
+def test_a_closed_app_is_no_longer_part_of_both(logs):
+    agent, done = _chain_agent(logs)
+    agent.handle("open calculator and open clock app")
+    agent.handle("close the calculator")
+    agent.handle("close both")  # only the clock is still open
+    assert done[-2:] == [("close", "Calculator"), ("close", "Clock")]
+
+
+def test_a_state_question_answered_without_a_tool_is_nudged_and_flagged(make_agent, logs):
+    llm = ScriptedLLM(LLMResponse(content='[{"title": "Spotify"}, {"title": "Clock"}]'),
+                      LLMResponse(content='[{"title": "Spotify"}]'))
+    reply = make_agent(llm).handle("tell me what windows are open")
+    assert "did not run any tool" in reply and len(llm.calls) == 2  # invented data is never presented as real
+
+
+def test_chitchat_is_not_nudged(make_agent):
+    llm = ScriptedLLM(LLMResponse(content="I am Orbit."))
+    reply = make_agent(llm).handle("who are you")
+    assert reply == "I am Orbit." and len(llm.calls) == 1

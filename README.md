@@ -42,7 +42,7 @@ Orbit opens its own visible Chrome window with a separate profile in `.browser-p
 
 ## Several commands in one sentence
 
-"open spotify and play my fav music", "open the clock app, then close it" and "move the music to echo with 30% volume" run in order with no model call, but only when every part is a known command; otherwise the whole sentence goes to the model. A chain stops at the first failure and says where.
+"open spotify and play my fav music", "close the clock and the calculator", "open calculator and clock then close both" and "open the clock app and tell me what windows are open" are split into separate requests and done one at a time, in order. Each part uses a fast rule if one fits, otherwise the model sees just that part (a small model is far more reliable on one thing at a time). "it" and "both" refer to what the earlier parts opened. The chain stops at the first part that fails and says so. A sentence is only split when every part starts like a request, so "play rock and roll" or "search cats and dogs" stay whole.
 
 ## Known limits (honest list)
 
