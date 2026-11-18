@@ -1,0 +1,77 @@
+"""Text REPL. Ctrl+C while a request runs stops it; Ctrl+C at the prompt (or 'quit') exits."""
+import argparse
+import sys
+
+from . import config
+from .agent.loop import Agent
+from .agent.router import Router
+from .agent.safety import Safety
+from .llm.ollama_llm import OllamaLLM
+from .logging_setup import ActionLog, setup_logging
+from .tools.api_layer import register_api_tools
+from .tools.base import Registry
+from .tools.fake import register_fake_tools
+from .tools.os_layer import register_os_tools
+
+HELP = """Commands: help | tools | quit
+Anything else is a request. Fast rules (no model): open spotify | volume 30 | volume up | mute | pause | play | next | previous
+Anything else goes to the model:  switch to chrome | what's playing? | what windows are open?
+(start with --fake-tools to also get the echo/danger test tools)"""
+
+
+def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: bool = False) -> Agent:
+    logger = setup_logging()
+    log = ActionLog(logger=logger)
+    registry = Registry()
+    register_api_tools(registry)   # empty until Step 4
+    register_os_tools(registry)
+    if fake_tools:
+        register_fake_tools(registry)  # test tools from Step 1; off by default so the model isn't tempted to use them
+    llm = OllamaLLM(model=model) if use_llm else None
+    return Agent(llm, registry, Router(log), Safety(), log)
+
+
+def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    parser = argparse.ArgumentParser(prog="orbit", description=f"{config.APP_NAME}: local desktop assistant")
+    parser.add_argument("request", nargs="*", help="run one request and exit (otherwise start the REPL)")
+    parser.add_argument("--no-llm", action="store_true", help="rules only, never call the model")
+    parser.add_argument("--fake-tools", action="store_true", help="also register the Step 1 test tools")
+    parser.add_argument("--model", default=config.MODEL, help=f"Ollama model (default {config.MODEL})")
+    args = parser.parse_args(argv)
+
+    agent = build_agent(use_llm=not args.no_llm, model=args.model, fake_tools=args.fake_tools)
+
+    if args.request:
+        print(agent.handle(" ".join(args.request)))
+        return 0
+
+    mode = "rules only" if args.no_llm else f"model {args.model}"
+    print(f"{config.APP_NAME} ready ({mode}). Type 'help' for hints, 'quit' to exit. Ctrl+C stops a running request.")
+    while True:
+        try:
+            text = input(f"{config.APP_NAME}> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not text:
+            continue
+        if text.lower() in ("quit", "exit"):
+            return 0
+        if text.lower() == "help":
+            print(HELP)
+            continue
+        if text.lower() == "tools":
+            for t in agent.registry.exposed():
+                alts = [a.layer for a in agent.registry.alternatives(t)]
+                print(f"  {t.signature()}  layer={'>'.join(alts)} risk={t.risk}  - {t.description}")
+            continue
+        try:
+            print(agent.handle(text))
+        except KeyboardInterrupt:
+            print("\n  [stopped] request cancelled by Ctrl+C")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

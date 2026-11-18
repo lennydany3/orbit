@@ -1,0 +1,53 @@
+# Test set: what each request should turn into.
+#   via:    rules = matched by the fast rules (no model); llm = the model must pick the tool call
+#   step:   the build step that makes this case possible. Cases for later steps are skipped until then.
+#   expect: the tool call(s), in order. Only the first call is compared by the eval runner (tests/eval_llm.py).
+# Run the same file against any new model/provider to compare instead of guessing.
+
+# ---- Step 1: fake tools (prove the loop) ----
+- {request: "echo hello world", via: rules, step: 1,
+   expect: [{tool: fake_echo, args: {text: "hello world"}}]}
+- {request: "test retry hi", via: rules, step: 1,
+   expect: [{tool: fake_echo, args: {text: "hi", verify_mode: fail_once}}]}
+- {request: "test fallback hi", via: rules, step: 1,
+   expect: [{tool: fake_echo, args: {text: "hi", verify_mode: fail_always}}]}
+- {request: "danger old files", via: rules, step: 1,
+   expect: [{tool: fake_danger, args: {text: "old files"}}]}
+- {request: "please repeat back the word banana", via: llm, step: 1,
+   expect: [{tool: fake_echo, args: {text: "banana"}}]}
+
+# ---- Step 2: OS layer ----
+- {request: "open spotify", via: rules, step: 2,
+   expect: [{tool: os_open_app, args: {name: "Spotify"}}]}
+- {request: "turn the volume to 30", via: rules, step: 2,
+   expect: [{tool: os_set_volume, args: {level: 30}}]}
+- {request: "pause the music", via: rules, step: 2,
+   expect: [{tool: os_media_key, args: {key: pause}}]}
+- {request: "next song", via: rules, step: 2,
+   expect: [{tool: os_media_key, args: {key: next}}]}
+- {request: "volume up", via: rules, step: 2,
+   expect: [{tool: os_change_volume, args: {delta: 10}}]}
+- {request: "mute", via: rules, step: 2,
+   expect: [{tool: os_set_mute, args: {muted: true}}]}
+- {request: "switch to chrome", via: llm, step: 2,
+   expect: [{tool: os_focus_window, args: {title: "Chrome"}}]}
+- {request: "what windows do I have open?", via: llm, step: 2,
+   expect: [{tool: os_list_windows, args: {}}]}
+
+# ---- Step 3: browser layer ----
+- {request: "open github", via: rules, step: 3,
+   expect: [{tool: browser_open, args: {url: "https://github.com"}}]}
+- {request: "open youtube", via: rules, step: 3,
+   expect: [{tool: browser_open, args: {url: "https://www.youtube.com"}}]}
+- {request: "go to wikipedia.org", via: llm, step: 3,
+   expect: [{tool: browser_open, args: {url: "https://wikipedia.org"}}]}
+- {request: "what page am I on?", via: llm, step: 3,
+   expect: [{tool: browser_page_info, args: {}}]}
+- {request: "search cats on youtube and fullscreen the first video", via: llm, step: 3,
+   expect: [{tool: browser_youtube_play, args: {query: "cats"}}, {tool: browser_fullscreen, args: {}}]}
+
+# ---- Step 4: API layer (needs Spotify credentials) ----
+- {request: "play something by Daft Punk on spotify", via: llm, step: 4,
+   expect: [{tool: api_spotify_play, args: {query: "Daft Punk"}}]}
+- {request: "open spotify, play my favourite music, and move playback to this device", via: llm, step: 4,
+   expect: [{tool: api_spotify_play, args: {query: "favourite music"}}, {tool: api_spotify_transfer, args: {device: "this"}}]}
