@@ -26,7 +26,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "pyyaml"]
 # Local voice, added step by step (V1 shown; later steps add faster-whisper, piper-tts, pynput, openwakeword).
-voice = ["sounddevice", "numpy", "onnxruntime", "psutil"]
+voice = ["sounddevice", "numpy", "onnxruntime", "psutil", "faster-whisper", "piper-tts", "pyttsx3"]
 
 [project.scripts]
 orbit = "orbit.cli:main"

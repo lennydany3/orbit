@@ -1,0 +1,8 @@
+open_spotify|open spotify
+volume_30|volume thirty
+play_lofi|play lofi on youtube
+whats_playing|what's playing right now
+close_tabs|close all other youtube tabs
+github_windows|open my github and then tell me what windows are open
+echo_pop|switch to the echo pop speaker
+quieter|reduce the volume a little bit

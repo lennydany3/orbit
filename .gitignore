@@ -6,3 +6,5 @@ __pycache__/
 .env
 .browser-profile/
 models/
+tests/voice/fixtures/*.wav
+tests/voice/fixtures_*/

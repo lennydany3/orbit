@@ -15,6 +15,21 @@ SPEAKER_DEVICE = os.environ.get("ORBIT_SPEAKER")  # same for playback
 MODELS_DIR = app_config.PROJECT_ROOT / "models"
 SILERO_MODEL = MODELS_DIR / "silero_vad.onnx"
 
+# --- Speech-to-text (faster-whisper, CPU only: the GPU belongs to the LLM) ---
+WHISPER_DIR = MODELS_DIR / "whisper"             # one folder per model, e.g. models/whisper/base.en
+WHISPER_MODEL = "small.en"                       # chosen from the V2 benchmark: about 11% word error on real recordings vs 18-26% for base.en
+WHISPER_COMPUTE = "int8"
+WHISPER_THREADS = 4                              # of 12 logical cores
+WHISPER_BEAM = 1                                 # greedy decoding: fastest, good enough for short commands
+# A vocabulary hint: Whisper spells names it was shown ("GitHub", not "get-up"). Empty string turns it off.
+WHISPER_PROMPT = "Orbit, Spotify, GitHub, YouTube, Brave, Chrome, Echo Pop, lofi."
+FIXTURES_DIR = app_config.PROJECT_ROOT / "tests" / "voice" / "fixtures"
+
+# --- Text-to-speech (Piper on the CPU; pyttsx3 = the built-in Windows voice, as a fallback) ---
+PIPER_DIR = MODELS_DIR / "piper"                 # <voice>.onnx + <voice>.onnx.json
+PIPER_VOICE = "en_US-hfc_female-medium"          # a female voice, chosen in V3 (amy and lessac are also downloaded)
+PIPER_LENGTH_SCALE = 1.0                         # below 1.0 = faster speech, above = slower
+
 # --- Voice activity detection (Silero VAD) ---
 VAD_WINDOW = 512                 # Silero v5 at 16 kHz judges 512 samples (32 ms) at a time
 VAD_CONTEXT = 64                 # ...with the last 64 samples of the previous window in front
