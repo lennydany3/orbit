@@ -59,3 +59,12 @@ VAD_END_SILENCE_S = 0.9          # this much silence after speech ends the utter
 VAD_PREROLL_S = 0.3              # audio kept from before speech started, so the first word is not clipped
 VAD_KEEP_TAIL_S = 0.3            # trailing silence kept in the clip (the rest is trimmed: Whisper never sees silence)
 VAD_MAX_UTTERANCE_S = 20.0       # hard stop for one utterance (wake word); push-to-talk gets longer in V4
+
+# --- Voice loop (V5): `python -m orbit --voice` ---
+FOLLOW_UP = True                                 # after a reply, listen this long for a next request without the wake word
+FOLLOW_UP_S = 2.0
+CONFIRM_TIMEOUT_S = 6.0                          # how long to wait for yes / no after a spoken confirmation question
+SPOKEN_MAX_SENTENCES = 2                         # replies are spoken short; the full text stays in the CLI
+SPOKEN_MAX_CHARS = 220
+LOG_TRANSCRIPTS = False                          # what you said is shown in the console, and only written to logs/voice.log if True
+VOICE_LOG = app_config.LOG_DIR / "voice.log"     # every state transition, with a timestamp (never the audio)

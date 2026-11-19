@@ -53,6 +53,20 @@ Voice lives in `src/orbit/voice/` (test bench: `python -m orbit.voice.run --help
 - **Nothing is recorded while idle.** Audio is only kept in memory for the turn being processed. No audio is saved by default: the only recordings are the test clips you make yourself with `python -m orbit.voice.run record` / `record-wake` (git-ignored, local only).
 - **Models:** `python -m orbit.voice.fetch_models ...` is the only thing that downloads voice models, and only when you run it.
 
+### Talking to Orbit: `python -m orbit --voice`
+
+Everything the text REPL does, by voice. Start a turn by **holding Right Ctrl** while you speak and releasing it, or by saying **"hey orbit"** (add `--no-wake` for hold-to-talk only; `--mic "<name>"` picks the microphone). Orbit transcribes what you said, runs the same `agent.handle(text)` as the text REPL (the agent is unchanged), and speaks a short reply.
+
+- **Short spoken replies.** One or two sentences, never URLs, code or lists; the full reply is always printed in the terminal ("The rest is on screen.").
+- **Risky actions ask by voice.** "Do you want me to close window Notepad? Say yes or no." Only a clear yes runs it; silence, "maybe" or anything unclear is a no.
+- **Follow-up window.** For 2 s after a reply you can say the next request without the wake word (`--no-follow-up` turns it off).
+- **Half-duplex.** The microphone is off while Orbit transcribes, thinks and speaks, so it never hears itself. Holding the key while it speaks **interrupts it immediately** and starts listening. (Headphones would allow wake-word interruption later; not built.)
+- **Kill switch:** Ctrl+Alt+Esc stops the microphone instantly; Orbit carries on in text mode. If voice cannot start at all (no microphone, a missing model) it says why and falls back to the text prompt instead of crashing.
+- **States you can see:** `[listening]`, `[thinking]`, `[speaking]`, plus the wake-word and confirmation lines. Every state change is also logged with a timestamp to `logs/voice.log` (add `--verbose` in the dev bench to print them). What you said is only written to that log if `LOG_TRANSCRIPTS = True` in `voice/config.py`; audio is never written.
+- **Where the time goes** (printed after each turn): on this PC, from the end of your speech to the first spoken word is about 2.3 s (speech-to-text about 2.0 s, the agent for a rule command about 0.1 s, the voice about 0.3 s) plus the 0.9 s end-of-speech wait, so about 3.2 s after you stop talking; with hold-to-talk the key release ends the turn, so about 2.8 s. A busy PC makes it slower (one run took 5.5 s while the system was at 85% load). Speech-to-text dominates; options are listed in "Known limits".
+
+Dev bench without a microphone or a real agent: `python -m orbit.voice.loop --echo-agent --wav replay.wav` (a stand-in agent that only repeats your request; "close notepad" pretends to be risky so you can try the spoken yes / no).
+
 ### Wake word: "Hey Orbit"
 
 openWakeWord ships no "Orbit" model, so `hey_orbit` is trained here, offline, in about 6 minutes: `python -m orbit.voice.run train-wake` (needs the feature models: `fetch_models wakeword hey_mycroft`). It learns from "hey orbit" spoken by your Piper voices at many speeds, with noise and room echo, against ordinary speech and look-alikes ("hey mycroft", "a little bit"). The result is `models/openwakeword/hey_orbit.npz` (not committed).
