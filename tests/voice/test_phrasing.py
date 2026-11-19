@@ -87,3 +87,28 @@ def test_fillers_come_from_the_lists():
 
 def test_empty_stays_empty():
     assert say("") == "" and say("   ") == ""
+
+
+@pytest.mark.parametrize("reply, expected", [
+    ("Failed: x (os:os_close_window). Last error: 'Task Manager' runs as administrator, so Windows does not let Orbit close it. Start Orbit ...",
+     "Sorry, Task Manager runs as administrator, so Windows won't let me close it. If you start Orbit as administrator, I can."),
+    ("Failed: x. Last error: 'Task Manager' runs as administrator, so Windows does not let Orbit minimize it. Start Orbit ...",
+     "Sorry, Task Manager runs as administrator, so Windows won't let me minimize it. If you start Orbit as administrator, I can."),
+    ("asked 'ChatGPT' to close, but chatgpt is still running in the background (the system tray). Say 'quit ChatGPT' to exit it completely",
+     "I closed ChatGPT, but it's still running in the background. Say quit ChatGPT to close it completely."),
+    ("quit ChatGPT completely (12 process(es) ended)", "Okay, I quit ChatGPT completely."),
+    ("minimize: 'Japanese Music - Japanese Music'", "Okay, Japanese Music - Japanese Music is minimized."),
+    ("left: 'Notepad'", "Okay, Notepad is snapped to the left."),
+    ("pause on ATLAS", "Okay, paused."),
+    ("next on ATLAS", "Okay, skipping to the next song."),
+    ("I couldn't reach the model: Ollama error 500: llama-server process no longer running: exit status 0xc0000409",
+     "Sorry, my language model isn't responding right now. Simple commands like open Spotify still work."),
+])
+def test_closing_quitting_and_error_messages_sound_human(reply, expected):
+    assert say(reply) == expected
+
+
+def test_not_found_failures_say_what_could_not_be_found():
+    assert say("Failed: could not complete and verify the action on any layer (os:os_close_window). Last error: no open window matches "
+               "'Tragedy'. Open windows include: 'Task Manager', 'ChatGPT'. If one of these is what the user meant, call again.")         == "Sorry, I couldn't find a window called Tragedy."
+    assert say("Failed: x. Last error: nothing running matches 'chatgpt'") == "Sorry, I don't see chatgpt running."

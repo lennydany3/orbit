@@ -78,6 +78,8 @@ class Phraser:
             heard = clean_title(request, 70).rstrip(".!?,;: ")          # no doubled punctuation inside the quotes
             return (f'Sorry, I didn\'t catch what to do with "{heard}". Could you say that another way?' if heard
                     else "Sorry, I didn't understand that. Could you say it another way?")
+        if text.startswith("I couldn't reach the model"):
+            return "Sorry, my language model isn't responding right now. Simple commands like open Spotify still work."
         if text.startswith("Failed:"):
             return self._failure(text)
         text = text.replace("was already open; brought it to the front", "was already open, brought it to the front")   # its own ";" is not a split
@@ -85,6 +87,16 @@ class Phraser:
         return _capitalize_sentences(" ".join(self._part(p) for p in parts))
 
     def _failure(self, text: str) -> str:
+        m = re.search(r"'(.+?)' runs as administrator, so Windows does not let Orbit (\w+) it", text)
+        if m:
+            return (f"Sorry, {clean_title(m.group(1))} runs as administrator, so Windows won't let me {m.group(2)} it. "
+                    "If you start Orbit as administrator, I can.")
+        m = re.search(r"no open window matches '(.+?)'", text)
+        if m:
+            return f"Sorry, I couldn't find a window called {clean_title(m.group(1))}."
+        m = re.search(r"nothing running matches '(.+?)'", text)
+        if m:
+            return f"Sorry, I don't see {clean_title(m.group(1))} running."
         m = re.search(r"app '(.+?)' not found", text)
         if m:
             return f"Sorry, I couldn't find an app called {clean_title(m.group(1))}."
@@ -102,6 +114,23 @@ class Phraser:
         m = re.match(r"(?:opened|went to) (https?://\S+)(?: \('(.*)'\))?(?: in (?:your Brave|the current tab).*)?$", s, re.I)
         if m:
             return f"{ok()}opening {site_name(m.group(1))}."
+        m = re.match(r"asked '(.+?)' to close, but .+? is still running in the background", s, re.I)
+        if m:
+            name = clean_title(m.group(1))
+            return f"I closed {name}, but it's still running in the background. Say quit {name} to close it completely."
+        m = re.match(r"quit (.+?) completely \(\d+ process", s, re.I)
+        if m:
+            return f"{ok()}I quit {clean_title(m.group(1))} completely."
+        m = re.match(r"(maximize|minimize|restore|left|right|top|bottom|center): '(.+?)'$", s, re.I)
+        if m:
+            done = {"maximize": "maximized", "minimize": "minimized", "restore": "restored", "left": "snapped to the left",
+                    "right": "snapped to the right", "top": "snapped to the top", "bottom": "snapped to the bottom",
+                    "center": "centered"}[m.group(1).lower()]
+            return f"{ok()}{clean_title(m.group(2))} is {done}."
+        m = re.match(r"(play|pause|next|previous|prev|resume) on .+$", s, re.I)
+        if m:
+            return f"{ok()}" + {"play": "playing.", "resume": "playing.", "pause": "paused.", "next": "skipping to the next song.",
+                                 "previous": "going back to the previous song.", "prev": "going back to the previous song."}[m.group(1).lower()]
         m = re.match(r"asked '(.+?)' to close$", s, re.I)
         if m:
             return f"{ok()}closing {clean_title(m.group(1))}."

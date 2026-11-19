@@ -8,6 +8,7 @@ from pathlib import Path
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 dwmapi = ctypes.WinDLL("dwmapi")
+advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 
 _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 user32.EnumWindows.argtypes = [_WNDENUMPROC, wintypes.LPARAM]
@@ -31,6 +32,8 @@ kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
 kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+advapi32.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
 
 _GWL_EXSTYLE = -20
 _WS_EX_TOOLWINDOW = 0x80
@@ -44,6 +47,8 @@ _WM_CLOSE = 0x0010
 _VK_MENU = 0x12
 _KEYEVENTF_KEYUP = 2
 _QUERY_LIMITED = 0x1000
+_TOKEN_QUERY = 0x0008
+_TOKEN_ELEVATION = 20
 
 
 @dataclass(frozen=True)
@@ -184,9 +189,57 @@ def console_hwnd() -> int:
     return int(kernel32.GetConsoleWindow() or 0)
 
 
-def close(hwnd: int) -> None:
-    """Ask a window to close, like clicking its X. The app may still ask to save; nothing is force-killed."""
-    user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0)
+def close(hwnd: int) -> int:
+    """Ask a window to close, like clicking its X. The app may still ask to save; nothing is force-killed.
+    Returns 0 if Windows delivered the request, else the Windows error code (5 = access denied: the window runs as administrator)."""
+    ctypes.set_last_error(0)
+    if user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0):
+        return 0
+    return ctypes.get_last_error() or -1
+
+
+def pid_of(hwnd: int) -> int:
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return int(pid.value)
+
+
+def is_elevated(hwnd: int) -> bool | None:
+    """Does this window's program run as administrator? None if Windows will not tell us (or the handle is not a real window).
+    A normal program cannot open an administrator program's security token, which is exactly the barrier that also
+    stops it from closing, minimizing or moving that program's windows."""
+    pid = pid_of(hwnd)
+    if not pid:
+        return None
+    handle = kernel32.OpenProcess(_QUERY_LIMITED, False, pid)
+    if not handle:
+        return None
+    try:
+        token = wintypes.HANDLE()
+        ctypes.set_last_error(0)
+        if not advapi32.OpenProcessToken(handle, _TOKEN_QUERY, ctypes.byref(token)):
+            return True if ctypes.get_last_error() == 5 else None
+        try:
+            flag, size = wintypes.DWORD(), wintypes.DWORD()
+            if advapi32.GetTokenInformation(token, _TOKEN_ELEVATION, ctypes.byref(flag), 4, ctypes.byref(size)):
+                return bool(flag.value)
+            return None
+        finally:
+            kernel32.CloseHandle(token)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def orbit_is_admin() -> bool:
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError):
+        return False
+
+
+def needs_admin(hwnd: int) -> bool:
+    """True when this window runs as administrator and Orbit does not, so Windows would refuse to let Orbit control it."""
+    return not orbit_is_admin() and is_elevated(hwnd) is True
 
 
 # ---- size, position and state (maximize / minimize / move) ----

@@ -34,6 +34,7 @@ def test_only_a_clear_yes_counts(text, expected):
 def test_risky_action_is_described_in_plain_words():
     assert describe_action("os_close_window({'title': 'Notepad'}) is a risky action. Allow?") == "close window Notepad"
     assert describe_action("browser_click({'text': 'Delete account', 'scope': 'this'}) is a risky action. Allow?") == "click Delete account this"
+    assert describe_action("os_quit_app({'name': 'ChatGPT'}) is a risky action. Allow?") == "quit ChatGPT completely"
     assert describe_action("something odd") == "do something that needs your permission"
 
 

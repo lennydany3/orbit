@@ -192,6 +192,11 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
     ("arrange-state", re.compile(r"^(?P<act>maximi[sz]e|minimi[sz]e|restore)\s+(?:the\s+|my\s+)?(?!(?:it|that|this|them|window|app)$)(?P<t>[\w .+&'-]+?)(?: (?:app|window))?$", re.I),
      lambda m: ("os_arrange_window", {"title": m["t"].strip().title(), "action": _ACTIONS[m["act"][:3].lower()]})),
     ("arrange-snap", _SNAP, lambda m: ("os_arrange_window", {"title": m["t"].strip().title(), "action": m["side"].lower()})),
+    # Quitting an app completely (tray apps keep running after their window closes). Asks first: it can lose unsaved work.
+    ("quit-app", re.compile(r"^(?:please )?(?:quit|exit|kill|terminate|force quit|force close|shut ?down)\s+(?:the )?(?!(?:it|that|this|them|window|app|tab|both|all|everything|orbit|full ?screen)$)(?P<t>[\w .+&'-]+?)(?: (?:app|completely|fully|for good|process))?$", re.I),
+     lambda m: ("os_quit_app", {"name": m["t"].strip()})),
+    ("quit-app-completely", re.compile(r"^(?:please )?close\s+(?:the )?(?P<t>[\w .+&'-]+?)\s+(?:completely|fully|entirely|totally|for good)$", re.I),
+     lambda m: ("os_quit_app", {"name": m["t"].strip()})),
     ("close-window", re.compile(r"^(?:please )?close\s+(?:the )?(?!(?:it|that|this|them|window|app|tab|both|all|everything|everything i opened|them all|all of them|both of them)$)(?P<t>[\w .+&'-]+?)(?: (?:app|window))?$", re.I),
      lambda m: ("os_close_window", {"title": m["t"].strip().title()})),
     ("mute", re.compile(r"^(?P<un>un)?mute(?: the (?:sound|volume|audio))?$", re.I),

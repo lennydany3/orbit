@@ -61,6 +61,8 @@ def describe_action(question: str) -> str:
         params = ast.literal_eval(m.group(2))
     except (ValueError, SyntaxError):
         params = {}
+    if words == ["quit", "app"] and params.get("name"):
+        return f"quit {params['name']} completely"
     detail = " ".join(str(v) for v in params.values() if isinstance(v, (str, int, float)) and not isinstance(v, bool) and str(v).strip())
     return (" ".join(words) + " " + detail).strip()[:120] or "do that"
 
@@ -202,10 +204,12 @@ class VoiceLoop:
         except KeyboardInterrupt:
             reason = "quit"
         finally:
-            self.tts.stop()
-            if self.keys:
-                self.keys.stop()
-            self.mic.stop()
+            for cleanup in (self.tts.stop, self.keys.stop if self.keys else None, self.mic.stop):
+                try:                                   # a second Ctrl+C during shutdown must not print a traceback
+                    if cleanup:
+                        cleanup()
+                except BaseException:  # noqa: BLE001
+                    pass
         if self.monitor is not None:
             self.out("\n--- voice report ---\n" + self.monitor.report())
         return reason
@@ -556,6 +560,8 @@ def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bo
     out("Speech-to-text, the wake word and the voice all run on this PC. Nothing is recorded or sent anywhere.\n")
     try:
         return loop.run(seconds)
+    except KeyboardInterrupt:
+        return "quit"
     except Exception as e:  # noqa: BLE001 - e.g. the microphone is busy or unplugged: carry on in text mode
         out(f"Voice stopped ({type(e).__name__}: {e}). Falling back to text mode.")
         return "failed"
