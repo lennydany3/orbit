@@ -49,11 +49,8 @@ Two ways to use a browser, chosen with `--browser-mode` (or `ORBIT_BROWSER_MODE`
 
 Voice lives in `src/orbit/voice/` (test bench: `python -m orbit.voice.run --help`).
 
-- **Always local:** microphone capture, wake word, voice-activity detection, hotkeys and the spoken reply (Piper). While idle, nothing is recorded, saved or sent anywhere.
-- **Speech-to-text goes to Groq after activation.** Only when the wake word or the hold-to-talk key fires, the VAD-trimmed speech clip (16 kHz mono WAV) of that one turn is sent to Groq (`whisper-large-v3-turbo`). Empty or silent clips are never sent, and the agent does not run on an empty transcript.
-- **Fallback and offline mode:** `ORBIT_STT=auto` (default) tries Groq first and uses local Whisper if there is no key, no internet, no answer within 8 s, or HTTP 429; every fallback is printed with its reason. `ORBIT_STT=local` never contacts Groq (fully offline); `ORBIT_STT=groq` never falls back. Each turn shows which provider handled it.
-- **API key:** read only from the `GROQ_API_KEY` environment variable (`setx GROQ_API_KEY "<key>"`, then open a new terminal). It is never written to a file or a log.
-- **No audio is saved by default.** The only recordings are the test clips you make yourself with `python -m orbit.voice.run record` (git-ignored).
+- **Everything is local.** Microphone capture, wake word, voice-activity detection, hotkeys, speech-to-text (Whisper `small.en` on the CPU) and the spoken reply (Piper) all run on this PC. No audio ever leaves it, and the voice code makes no network calls.
+- **Nothing is recorded while idle.** Audio is only kept in memory for the turn being processed. No audio is saved by default: the only recordings are the test clips you make yourself with `python -m orbit.voice.run record` / `record-wake` (git-ignored, local only).
 - **Models:** `python -m orbit.voice.fetch_models ...` is the only thing that downloads voice models, and only when you run it.
 
 ### Wake word: "Hey Orbit"

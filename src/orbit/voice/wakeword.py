@@ -41,12 +41,13 @@ class WakeVerifier:
     def __init__(self, model: str = config.WAKE_VERIFY_MODEL, threads: int = 2):
         from .stt import Transcriber
 
-        # No vocabulary hint here on purpose: a hint containing the wake word would make Whisper "hear" it in anything.
-        self._engine = Transcriber(model, threads=threads, prompt="")
+        self._engine = Transcriber(model, threads=threads, prompt=config.WAKE_VERIFY_PROMPT)
         self.model = model
 
     def check(self, audio: np.ndarray) -> tuple[bool, str]:
-        heard = self._engine.transcribe(audio).text
+        peak = max(1, int(np.abs(audio).max()))        # a quiet mic (peaks near -23 dBFS) makes Whisper mishear: bring it to -3 dBFS
+        loud = np.clip(audio.astype(np.float32) * (0.708 * 32767 / peak), -32768, 32767).astype(np.int16)
+        heard = self._engine.transcribe(loud).text
         return sounds_like_orbit(heard), heard
 
 

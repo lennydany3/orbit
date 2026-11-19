@@ -15,19 +15,7 @@ SPEAKER_DEVICE = os.environ.get("ORBIT_SPEAKER")  # same for playback
 MODELS_DIR = app_config.PROJECT_ROOT / "models"
 SILERO_MODEL = MODELS_DIR / "silero_vad.onnx"
 
-# --- Which speech-to-text handles a turn ---
-# "auto" = Groq first, local Whisper if Groq is unavailable; "groq" = Groq only; "local" = local only (fully offline).
-# PRIVACY: with "groq" or "auto", the speech clip of a turn is sent to Groq, only after the wake word or hotkey fired.
-# Nothing is sent while idle. The API key is read only from the GROQ_API_KEY environment variable.
-STT_PROVIDER = os.environ.get("ORBIT_STT", "auto").lower()
-GROQ_MODEL = "whisper-large-v3-turbo"
-GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
-GROQ_KEY_ENV = "GROQ_API_KEY"
-GROQ_TIMEOUT_S = 8.0                             # waiting for Groq's answer; then fall back to local
-STT_MIN_CLIP_S = 0.15                            # a clip shorter than this (or pure digital silence) is "empty": nothing is sent or run
-STT_PRELOAD_LOCAL = True                         # load local Whisper in the background so a fallback is not delayed by the 4 s model load
-
-# --- Local speech-to-text (faster-whisper, CPU only: the GPU belongs to the LLM) ---
+# --- Speech-to-text (faster-whisper, local, CPU only: the GPU belongs to the LLM) ---
 WHISPER_DIR = MODELS_DIR / "whisper"             # one folder per model, e.g. models/whisper/base.en
 WHISPER_MODEL = "small.en"                       # chosen from the V2 benchmark: about 11% word error on real recordings vs 18-26% for base.en
 WHISPER_COMPUTE = "int8"
@@ -49,6 +37,9 @@ WAKE_THRESHOLD = 0.5                             # model score (0-1) that counts
 WAKE_HITS = 2                                    # consecutive 80 ms frames above the threshold before it counts as a wake
 WAKE_VERIFY = True                               # custom words only: confirm each candidate with a quick local Whisper pass
 WAKE_VERIFY_MODEL = "tiny.en"
+# The hint matters: without it Whisper (tiny) kept only 11 of 25 real "hey orbit" clips; with it, 25 of 25. It also makes Whisper
+# say "Hey Orbit" for some look-alike speech, so the check cuts false candidates by roughly 80%, not 100%.
+WAKE_VERIFY_PROMPT = "Hey Orbit."
 WAKE_REJECT_COOLDOWN_S = 1.0                     # after a rejected candidate, wait this long before checking again
 WAKE_REFRACTORY_S = 1.5                          # ignore further wakes for this long after one
 PTT_KEY = "ctrl_r"                               # hold to talk (pynput key name)
