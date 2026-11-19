@@ -8,6 +8,7 @@
   python -m orbit.voice.run bench                    compare tiny.en / base.en / small.en on the recorded clips
   python -m orbit.voice.run say ["text"]             speak a text (Piper; --engine windows for the fallback voice)
   python -m orbit.voice.run voices                   audition every downloaded Piper voice with the same sentence
+  python -m orbit.voice.run echotest                 can you interrupt Orbit by voice with your speaker and mic? (measures the echo)
   python -m orbit.voice.run keys                     test the hold-to-talk key and the kill switch (no audio)
   python -m orbit.voice.run wake [--seconds 120]     wake word only: idle CPU, false accepts / rejects
   python -m orbit.voice.run listen                   hold Right Ctrl or say the wake word -> text
@@ -364,6 +365,88 @@ def cmd_record_wake(args) -> int:
     return 0
 
 
+# ---------- interrupting by voice: does it work with YOUR speakers and microphone? ----------
+def cmd_echotest(args) -> int:
+    """Plays a reply through your speaker while listening, measures how much of it your microphone hears and how much of that
+    the echo canceller removes, then plays a second voice saying the wake word over the reply to see if it is still heard."""
+    from .aec import EchoCanceller, ReferenceAligner, ReferenceTimeline
+    from .tts import PiperTTS
+    from .wake_train import to_16k
+    from .wakeword import WakeWord
+    import sounddevice as sd
+
+    timeline = ReferenceTimeline()
+    tts = PiperTTS(config.PIPER_VOICE, args.speaker, reference=timeline)
+    other = PiperTTS("en_US-lessac-medium" if config.PIPER_VOICE != "en_US-lessac-medium" else "en_US-amy-medium", args.speaker)
+    phrase = to_16k(np.concatenate(list(other.synthesize("Hey Orbit, open Spotify."))), other.sample_rate)
+    out_dev = tts.device
+    reply = ("Okay, I opened Spotify, set the volume to thirty percent, and moved the window to your secondary monitor. "
+             "Your music is playing on the Echo Pop speaker. Is there anything else you would like me to do for you today?")
+    aec, wake_raw, wake_aec = EchoCanceller(), WakeWord(config.WAKEWORD_MODEL), WakeWord(config.WAKEWORD_MODEL)
+    print(f"Speaker: {device_label(out_dev)}")
+    print("This plays a reply and a second voice on your speaker for about 25 seconds. Keep the room quiet and do not talk.\n")
+
+    def run_case(interrupt_at):
+        timeline.reset()
+        aec.reset_history()
+        wake_raw.reset()
+        wake_aec.reset()
+        aligner, mic = ReferenceAligner(timeline), MicStream(args.device)
+        mic.start()
+        done, hits, raw, clean, refs = threading.Event(), {"raw": [], "aec": []}, [], [], []
+        threading.Thread(target=lambda: (tts.speak(reply), done.set()), daemon=True).start()
+        began = time.perf_counter()
+        if interrupt_at is not None:
+            threading.Thread(target=lambda: (time.sleep(interrupt_at), sd.play(phrase, 16000, device=out_dev)), daemon=True).start()
+        end_at = None
+        while True:
+            item = mic.read_timed(0.2)
+            if done.is_set() and end_at is None:
+                end_at = time.perf_counter() + 1.5
+            if end_at and time.perf_counter() > end_at:
+                break
+            if item is None:
+                continue
+            frame, t = item
+            ref = aligner.next(len(frame), t)
+            cleaned = aec.process(frame, ref)
+            raw.append(frame)
+            clean.append(cleaned)
+            refs.append(ref)
+            for label, w, f in (("raw", wake_raw, frame), ("aec", wake_aec, cleaned)):
+                if w.process(f).triggered:
+                    hits[label].append(time.perf_counter() - began)
+        mic.stop()
+        sd.wait()
+        return np.concatenate(raw).astype(np.float64), np.concatenate(clean).astype(np.float64), np.concatenate(refs), hits
+
+    raw, clean, ref, hits = run_case(None)
+    n = len(raw)
+    c = np.fft.irfft(np.fft.rfft(raw - raw.mean(), 2 * n) * np.conj(np.fft.rfft(ref - ref.mean(), 2 * n)))
+    coupling = float(np.abs(c[: int(0.6 * config.SAMPLE_RATE)]).max() / (np.linalg.norm(raw - raw.mean()) * np.linalg.norm(ref - ref.mean()) + 1e-9))
+    rms = lambda x: float(np.sqrt((x ** 2).mean()))
+    removed = 20 * np.log10(rms(raw[len(raw) // 2:]) / (rms(clean[len(clean) // 2:]) + 1e-9))
+    print(f"1. Orbit speaks alone: your microphone's similarity to what Orbit played = {coupling:.3f}   "
+          f"(below 0.03: it hardly hears the speaker; 0.1 or more: clearly hears it)")
+    print(f"   echo removed in the second half of the reply: {removed:.1f} dB; false wake words: raw {len(hits['raw'])}, cancelled {len(hits['aec'])}")
+    raw2, clean2, ref2, hits2 = run_case(4.5)
+    print("2. A second voice says 'Hey Orbit' 4.5 s into the reply:")
+    for label in ("raw", "aec"):
+        found = [h for h in hits2[label] if h > 4.5]
+        print(f"   wake word heard on the {'raw microphone' if label == 'raw' else 'echo-cancelled microphone'}: "
+              + (f"yes, {found[0] - 4.5:.1f} s after it started" if found else "no"))
+    print()
+    if coupling < 0.03:
+        print("RESULT: your microphone hardly hears your speaker (earbuds, headphones, or a quiet speaker). There is no echo to remove: "
+              "say the wake word any time Orbit is talking.")
+    elif hits2["aec"] or removed >= 8:
+        print(f"RESULT: your microphone hears your speaker, and the echo canceller handles it ({removed:.0f} dB removed). Interrupting by voice should work.")
+    else:
+        print("RESULT: your microphone hears your speaker but the canceller cannot remove enough of it (some microphones process the sound "
+              "in a way that cannot be undone). Use headphones, lower the volume, or hold the key to interrupt.")
+    return 0
+
+
 # ---------- V4 ----------
 def cmd_keys(args) -> int:
     """Test the global hotkeys without any audio."""
@@ -671,6 +754,8 @@ def main(argv: list[str] | None = None) -> int:
     ls.add_argument("--no-wake", action="store_true", help="hold-to-talk only")
     ls.add_argument("--no-ptt", action="store_true", help="wake word only")
     ls.add_argument("--wav", help="test mode: replay this 16 kHz mono WAV in real time instead of using the microphone")
+    et = add("echotest", cmd_echotest, mic=True)
+    et.add_argument("--speaker", default=config.SPEAKER_DEVICE, help="the output device Orbit speaks through (default: the Windows default)")
     tw = add("train-wake", cmd_train_wake)
     tw.add_argument("--pos", type=int, default=60, help="synthetic 'hey orbit' clips per voice")
     tw.add_argument("--neg", type=int, default=170, help="synthetic other-speech clips per voice")

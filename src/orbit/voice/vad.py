@@ -56,7 +56,7 @@ def speech_seconds(vad: SileroVAD, clip: np.ndarray, threshold: float = config.V
 
 @dataclass
 class VadEvent:
-    kind: str                          # "start" | "end" | "ignored"
+    kind: str                          # "start" | "pause" | "end" | "ignored"   ("pause" only when asked for: the clip so far, at a short silence)
     t: float                           # seconds on the audio clock (time the segmenter has been fed)
     speech_s: float = 0.0              # seconds of actual speech (end / ignored)
     clip: np.ndarray | None = None     # int16 audio (end only)
@@ -75,6 +75,7 @@ class SpeechSegmenter:
         preroll_s: float = config.VAD_PREROLL_S,
         keep_tail_s: float = config.VAD_KEEP_TAIL_S,
         max_utterance_s: float = config.VAD_MAX_UTTERANCE_S,
+        pause_s: float | None = None,
     ):
         self.vad = vad
         self.start_threshold, self.end_threshold = start_threshold, end_threshold
@@ -84,6 +85,7 @@ class SpeechSegmenter:
         self._end_silence = round(end_silence_s / self.window_s)    # all limits below are counted in windows
         self._keep_tail = round(keep_tail_s / self.window_s)
         self._max_windows = round(max_utterance_s / self.window_s)
+        self._pause_windows = round(pause_s / self.window_s) if pause_s else None
         self._preroll: collections.deque = collections.deque(maxlen=round(preroll_s / self.window_s) + start_windows)
         self.last_prob = 0.0
         self.reset()
@@ -134,14 +136,20 @@ class SpeechSegmenter:
             self._silence += 1
         if self._silence >= self._end_silence:
             return self._finish(now, "silence")
+        if self._pause_windows is not None and self._silence == self._pause_windows and self._voiced * self.window_s >= self.min_speech_s:
+            # A short pause: hand over the clip as it would end up if you have stopped, so transcription can start early.
+            return VadEvent("pause", now + self.window_s, speech_s=self._voiced * self.window_s, clip=self._trimmed_clip())
         if len(self._clip) >= self._max_windows:
             return self._finish(now, "max_length")
         return None
 
+    def _trimmed_clip(self) -> np.ndarray:
+        drop = max(0, self._silence - self._keep_tail)    # trim trailing silence down to the tail we keep
+        return np.concatenate(self._clip[: len(self._clip) - drop])
+
     def _finish(self, now: float, reason: str) -> VadEvent:
         speech_s = self._voiced * self.window_s
-        drop = max(0, self._silence - self._keep_tail)    # trim trailing silence down to the tail we keep
-        clip = np.concatenate(self._clip[: len(self._clip) - drop])
+        clip = self._trimmed_clip()
         self.speaking = False
         self._clip, self._preroll = [], collections.deque(maxlen=self._preroll.maxlen)
         self._highs = self._silence = self._voiced = 0

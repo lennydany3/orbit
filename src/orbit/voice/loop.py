@@ -25,6 +25,7 @@ from logging.handlers import RotatingFileHandler
 import numpy as np
 
 from . import config
+from .aec import EchoCanceller, ReferenceAligner, ReferenceTimeline
 from .phrasing import Phraser
 from .state import State, TurnTimer, VoiceState
 from .summarize import spoken_summary
@@ -101,6 +102,46 @@ class VoiceConfirm:
             return None
 
 
+_FILLERS = frozenset({"uh", "um", "umm", "uhh", "hmm", "hm", "mm", "mmm", "ah", "oh", "huh", "er", "erm", "eh", "okay", "ok",
+                      "so", "well", "and", "the", "a", "you"})
+# What Whisper "hears" in silence or noise. Never a request.
+_HALLUCINATIONS = frozenset({"thank you", "thank you.", "thanks for watching", "thanks for watching!", "bye", "bye bye", "bye.",
+                             "thanks", "you", "the end", "subtitles by the amara.org community"})
+
+
+def is_noise(text: str) -> bool:
+    """A "transcript" that is only filler ("Uh...") or something Whisper invents for silence: not a request."""
+    clean = re.sub(r"[^a-z' ]+", " ", (text or "").lower()).split()
+    if not clean:
+        return True
+    return len(clean) <= 3 and all(w in _FILLERS for w in clean) or " ".join(clean) in _HALLUCINATIONS
+
+
+def media_is_playing() -> bool:
+    """Is something playing on this PC right now (Spotify, a browser video ...)? False if Windows cannot tell."""
+    try:
+        from ..tools.os_layer import media
+
+        return media.state().status == "playing"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _keep_model_warm(llm, out, every_s: float = 20 * 60) -> None:
+    """Load the language model now and touch it every 20 minutes, so no request ever pays the ~20 s cold start."""
+    first = True
+    while True:
+        try:
+            seconds = llm.warm_up()
+            if first:
+                out(f"  [llm] language model is ready ({seconds:.1f}s)")
+        except Exception as e:  # noqa: BLE001 - Ollama may simply not be running: simple commands still work
+            if first:
+                out(f"  [llm] could not warm up the language model ({e}); the first model answer may be slow")
+        first = False
+        time.sleep(every_s)
+
+
 def _file_logger() -> logging.Logger:
     logger = logging.getLogger("orbit.voice")
     if not logger.handlers:
@@ -118,7 +159,9 @@ class VoiceLoop:
     def __init__(self, agent, mic, transcriber, tts, keys=None, wake=None, segmenter=None, check_vad=None, *,
                  follow_up: bool = config.FOLLOW_UP, use_ptt: bool = True, wake_name: str = config.WAKEWORD_MODEL,
                  out=print, verbose: bool = False, monitor=None, file_log=None, clock=time.monotonic,
-                 conversational: bool = config.CONVERSATIONAL, fillers: bool = config.FILLERS, rng: random.Random | None = None):
+                 conversational: bool = config.CONVERSATIONAL, fillers: bool = config.FILLERS, rng: random.Random | None = None,
+                 aec: EchoCanceller | None = None, reference: ReferenceTimeline | None = None, barge_in: bool = config.BARGE_IN,
+                 media_check=None):
         self.agent, self.mic, self.transcriber, self.tts = agent, mic, transcriber, tts
         self.keys, self.wake, self.segmenter, self.check_vad = keys, wake, segmenter, check_vad
         self.follow_up, self.use_ptt, self.wake_name, self.out, self.verbose, self.monitor = follow_up, use_ptt, wake_name, out, verbose, monitor
@@ -127,6 +170,12 @@ class VoiceLoop:
         self._clock = clock
         self.conversational, self.fillers, self.phraser = conversational, fillers, Phraser(rng)
         self.request_text = ""                      # what you said, kept so a failure can say what it heard
+        self.aec, self.reference, self.barge_in_enabled = aec, reference, barge_in
+        self._media_playing = media_check or media_is_playing
+        self.aligner = ReferenceAligner(reference) if reference is not None else None
+        self._barge = False                        # may the wake word interrupt the speech that is playing now?
+        self._spec: tuple | None = None            # (clip, future): an early transcription started at a short pause
+        self._aec_until = 0.0                      # keep cancelling for a moment after an interruption (the voice tail)
         self._filler_future: Future | None = None
         self._fillers_said = 0
         self._last_spoken = ""
@@ -174,7 +223,7 @@ class VoiceLoop:
         self.st.to(State.IDLE, reason)
         self._resume_mic()
         self._reset_listeners()
-        self.mode, self.heard = "", False
+        self.mode, self.heard, self._spec = "", False, None
 
     @staticmethod
     def _text_of(future: Future):
@@ -200,7 +249,8 @@ class VoiceLoop:
                 if self.killed:
                     reason = "killed"
                     break
-                self._tick(self.mic.read(timeout=0.05))
+                item = self.mic.read_timed(timeout=0.05)
+                self._tick(*(item if item else (None, 0.0)))
         except KeyboardInterrupt:
             reason = "quit"
         finally:
@@ -214,11 +264,19 @@ class VoiceLoop:
             self.out("\n--- voice report ---\n" + self.monitor.report())
         return reason
 
-    def _tick(self, frame) -> None:
+    def _echo_free(self, frame, t: float):
+        """The microphone frame with Orbit's own voice subtracted (when that is possible and helps), else the frame itself."""
+        if self.aec is None or self.aligner is None:
+            return frame
+        return self.aec.process(frame, self.aligner.next(len(frame), t))
+
+    def _tick(self, frame, t: float = 0.0) -> None:
         s = self.st.state
         if s is State.IDLE:
             self._tick_idle(frame)
         elif s in (State.LISTENING, State.FOLLOW_UP):
+            if frame is not None and self._clock() < self._aec_until:
+                frame = self._echo_free(frame, t)               # right after an interruption the tail of Orbit's voice is still around
             self._tick_listen(frame)
         elif s is State.TRANSCRIBING:
             self._tick_transcribing()
@@ -227,7 +285,7 @@ class VoiceLoop:
         elif s is State.CONFIRMING:
             self._tick_confirming(frame)
         elif s is State.SPEAKING:
-            self._tick_speaking()
+            self._tick_speaking(frame, t)
 
     # ---- hotkeys ----
     def _handle_keys(self) -> None:
@@ -294,7 +352,7 @@ class VoiceLoop:
             reason = "listening for your request"
         keep = list(self.preroll) if mode == "ptt" else []
         self._resume_mic()
-        self.mode, self.heard = mode, False
+        self.mode, self.heard, self._spec = mode, False, None
         self.ptt_frames = keep
         if self.segmenter:
             self.segmenter.reset()
@@ -329,6 +387,8 @@ class VoiceLoop:
                     if self.st.is_(State.FOLLOW_UP):
                         self.st.to(State.LISTENING, "follow-up speech")
                         self.out("[listening] (follow-up, no wake word needed)")
+                elif e.kind == "pause" and config.SPECULATIVE_STT:
+                    self._spec = (e.clip, spawn(self.transcriber.transcribe, e.clip))      # a head start; discarded if you carry on
                 elif e.kind == "end":
                     self.turn = TurnTimer(self._clock)
                     self.turn.mark("speech_end")
@@ -346,7 +406,13 @@ class VoiceLoop:
     def _begin_transcribe(self, clip: np.ndarray) -> None:
         self._pause_mic()
         self.st.to(State.TRANSCRIBING, f"{len(clip) / config.SAMPLE_RATE:.1f}s of speech")
-        self.future = spawn(self.transcriber.transcribe, clip)
+        spec, self._spec = self._spec, None
+        if spec is not None and len(spec[0]) == len(clip) and np.array_equal(spec[0], clip):
+            self.future = spec[1]                      # you really had stopped: the early transcription is already under way
+            if self.verbose:
+                self.out("  (using the early transcription)")
+        else:
+            self.future = spawn(self.transcriber.transcribe, clip)
 
     def _tick_transcribing(self) -> None:
         if not self.future.done():
@@ -360,7 +426,11 @@ class VoiceLoop:
         self.turn.mark("text")
         if self.monitor is not None:
             self.monitor.add_timing("speech-to-text", result.seconds)
-        if not re.search(r"[A-Za-z0-9]", text):
+        if not re.search(r"[A-Za-z0-9]", text) or is_noise(text):
+            if self.mode == "followup":                    # nobody addressed Orbit here: say nothing, just stop listening
+                self.out(f'  (ignored: "{text.strip()}" is not a request)')
+                self._idle("noise in the follow-up window")
+                return
             self.out("  (empty transcript: the agent will not run)")
             self._speak("Sorry, I didn't catch that.", "empty transcript")
             return
@@ -419,15 +489,37 @@ class VoiceLoop:
             self._filler_future = None
 
     # ---- speaking ----
+    def _can_barge_in(self, text: str) -> bool:
+        """May the wake word interrupt this reply? Not if Orbit might say its own wake word, or cannot be paused."""
+        return (self.barge_in_enabled and self.wake is not None and bool(getattr(self.tts, "supports_pause", False))
+                and "orbit" not in text.lower())
+
     def _speak(self, text: str, reason: str) -> None:
-        self._pause_mic()
+        self._barge = self._can_barge_in(text)
+        if self._barge:
+            self._resume_mic()                         # stay open: you may interrupt with the wake word
+            self._reset_listeners()
+            if self.reference is not None:
+                self.reference.reset()                 # a new utterance for the echo canceller (it keeps what it learned)
+            if self.aec is not None:
+                self.aec.reset_history()
+        else:
+            self._pause_mic()                          # half-duplex: Orbit never hears itself
         self.st.to(State.SPEAKING, reason)
         self.out("[speaking]")
         self._speak_started = self._clock()
         self._last_spoken = text
         self.future = spawn(self.tts.speak, text)
 
-    def _tick_speaking(self) -> None:
+    def _tick_speaking(self, frame=None, t: float = 0.0) -> None:
+        if self._barge and frame is not None and not self.future.done():
+            result = self.wake.process(self._echo_free(frame, t), on_candidate=self.tts.pause)   # mute at once, verify after
+            if result.rejected:
+                self.tts.resume()                                  # a false alarm: carry on talking
+                self.out(f'  (that was not the wake word: the check heard "{result.heard}"; carrying on)')
+            elif result.triggered:
+                self._barge_in()
+                return
         if not self.future.done():
             return
         stats, error = self._text_of(self.future)
@@ -440,7 +532,11 @@ class VoiceLoop:
             if self.monitor is not None:
                 self.monitor.add_timing("end of speech -> first spoken word", self.turn.gap("speech_end", "first_audio"))
         self.turns += 1
-        if self.follow_up:
+        if self.follow_up and not config.FOLLOW_UP_WHILE_MEDIA and self._media_check():
+            self.out('  (music is playing, so no follow-up without the wake word: say "'
+                     + self.wake_name.replace("_", " ") + '" or hold the key)')
+            self._idle("media is playing")
+        elif self.follow_up:
             self._resume_mic()
             self._reset_listeners()
             self.mode, self.heard = "followup", False
@@ -451,6 +547,24 @@ class VoiceLoop:
                 self.out("[listening] (Orbit asked a question: just answer, no wake word needed)")
         else:
             self._idle("finished")
+
+    def _media_check(self) -> bool:
+        """Is media playing? Asked in a helper thread with a short deadline, so a slow answer never stalls the loop."""
+        try:
+            return bool(spawn(self._media_playing).result(timeout=0.6))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _barge_in(self) -> None:
+        """You said the wake word while Orbit was talking: stop talking and listen to the new request."""
+        self.out('[interrupted] heard "' + self.wake_name.replace("_", " ") + '" while speaking')
+        self.tts.stop()
+        try:
+            self.future.result(timeout=1.0)
+        except Exception:  # noqa: BLE001
+            pass
+        self._aec_until = self._clock() + 0.7
+        self._start_listening("wake", "wake word interrupted the speech")
 
     # ---- confirming a risky action by voice ----
     def _begin_confirm(self, question: str, reply: dict) -> None:
@@ -534,7 +648,8 @@ def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bo
         lower_priority()
         out("Loading voice (speech-to-text, wake word, voice) ...")
         transcriber = Transcriber()
-        segmenter, check_vad = SpeechSegmenter(SileroVAD()), SileroVAD()
+        segmenter = SpeechSegmenter(SileroVAD(), pause_s=config.SPECULATIVE_PAUSE_S if config.SPECULATIVE_STT else None)
+        check_vad = SileroVAD()
         wake = None
         if wake_enabled:
             try:
@@ -545,19 +660,28 @@ def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bo
                 out(f"  wake word unavailable ({str(e).splitlines()[0]}); hold-to-talk only")
         mic = FileMic(wav) if wav else MicStream(device)
         keys = Hotkeys()
-        tts = make_tts(log=out)
+        reference = ReferenceTimeline() if config.AEC and config.BARGE_IN else None
+        tts = make_tts(log=out, reference=reference)
     except Exception as e:  # noqa: BLE001 - any setup problem: fall back to text
         out(f"Voice could not start ({type(e).__name__}: {e}). Falling back to text mode.")
         return "failed"
 
     loop = VoiceLoop(agent, mic, transcriber, tts, keys, wake, segmenter, check_vad,
-                     follow_up=config.FOLLOW_UP if follow_up is None else follow_up, out=out, verbose=verbose, monitor=Monitor())
+                     follow_up=config.FOLLOW_UP if follow_up is None else follow_up, out=out, verbose=verbose, monitor=Monitor(),
+                     aec=EchoCanceller() if reference is not None else None, reference=reference)
     agent.safety.confirm = loop.confirm              # risky actions are confirmed by voice from now on
     loop.monitor.start()
+    llm = getattr(agent, "llm", None)
+    if llm is not None and hasattr(llm, "warm_up"):
+        threading.Thread(target=_keep_model_warm, args=(llm, out), daemon=True, name="llm-warm").start()
     triggers = [f"hold {config.PTT_KEY}"] + ([f'say "{config.WAKEWORD_MODEL.replace("_", " ")}"'] if wake else [])
     out(f"Mic: {getattr(mic, 'label', None) or device_label(mic.device)}")
     out(f"Voice is on. Start a turn: {' or '.join(triggers)}.  Kill switch: {config.KILL_COMBO}.  Ctrl+C quits.")
-    out("Speech-to-text, the wake word and the voice all run on this PC. Nothing is recorded or sent anywhere.\n")
+    out("Speech-to-text, the wake word and the voice all run on this PC. Nothing is recorded or sent anywhere.")
+    if loop._can_barge_in("ok"):
+        out(f'You can interrupt Orbit by saying "{config.WAKEWORD_MODEL.replace("_", " ")}" while it talks, or by holding {config.PTT_KEY}.\n')
+    else:
+        out("")
     try:
         return loop.run(seconds)
     except KeyboardInterrupt:

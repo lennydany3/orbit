@@ -119,8 +119,9 @@ class WakeWord:
         scores = self._model.predict(frame)
         return float(max(scores.values())) if scores else 0.0
 
-    def process(self, frame: np.ndarray) -> WakeResult:
-        """frame: int16, 1280 samples (80 ms)."""
+    def process(self, frame: np.ndarray, on_candidate=None) -> WakeResult:
+        """frame: int16, 1280 samples (80 ms). `on_candidate()` is called as soon as the model fires, before the (slower)
+        Whisper check, so a caller can e.g. mute Orbit's own voice at once and un-mute it if the check says "no"."""
         score = self.predict(frame)
         self._ring.append(frame)
         self._clock += len(frame) / config.SAMPLE_RATE
@@ -129,6 +130,8 @@ class WakeWord:
             return WakeResult(score, False)
         self._streak = 0
         heard = ""
+        if on_candidate is not None:
+            on_candidate()
         if self.verifier is not None:
             ok, heard = self.verifier.check(np.concatenate(self._ring))
             if not ok:

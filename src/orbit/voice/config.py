@@ -75,3 +75,14 @@ FILLERS = True                                   # "One moment." while the agent
 FILLER_AFTER_S = 2.5                             # first filler after this long without an answer...
 FILLER_AGAIN_S = 8.0                             # ...and one more ("Still working on it.") after this long
 FOLLOW_UP_QUESTION_S = 6.0                       # when Orbit asks YOU a question, wait this long for the answer (no wake word needed)
+
+# --- Interrupting Orbit by voice ---
+BARGE_IN = True                                  # say the wake word while Orbit is talking: it stops and listens
+AEC = True                                       # echo cancellation for that (only engages when it measurably helps; headphones need none)
+
+# --- Not acting on background sound ---
+FOLLOW_UP_WHILE_MEDIA = False                    # False: while music / a video plays, the no-wake follow-up stays closed (lyrics are not commands)
+
+# --- Speculative speech-to-text ---
+SPECULATIVE_STT = True                           # start transcribing at a short pause; keep the result only if you really stopped
+SPECULATIVE_PAUSE_S = 0.55                       # silence after which the early transcription starts (the full end-of-speech wait is 0.9 s)

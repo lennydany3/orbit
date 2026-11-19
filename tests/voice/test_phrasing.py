@@ -112,3 +112,16 @@ def test_not_found_failures_say_what_could_not_be_found():
     assert say("Failed: could not complete and verify the action on any layer (os:os_close_window). Last error: no open window matches "
                "'Tragedy'. Open windows include: 'Task Manager', 'ChatGPT'. If one of these is what the user meant, call again.")         == "Sorry, I couldn't find a window called Tragedy."
     assert say("Failed: x. Last error: nothing running matches 'chatgpt'") == "Sorry, I don't see chatgpt running."
+
+
+@pytest.mark.parametrize("reply", [
+    'api_spotify_control {"action": "pause"}', "api_spotify_next {}", 'os_arrange_window {"title": "Task Manager", "action": "minimize"}',
+    "os_set_volume(level=60)", '{"name": "os_set_volume", "arguments": {"level": 60}}',
+])
+def test_a_raw_tool_call_is_never_read_out_loud(reply):
+    assert say(reply) == "Sorry, I didn't catch that. Could you say it again?"
+
+
+@pytest.mark.parametrize("reply", ["Volume set to 50%.", "Okay (done).", "minimize: 'Notepad'", "I set the volume (it was 30)."])
+def test_ordinary_replies_are_not_mistaken_for_tool_calls(reply):
+    assert "didn't catch that" not in say(reply)

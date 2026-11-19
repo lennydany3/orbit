@@ -124,7 +124,7 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
     # --- Spotify (API layer; only used if connected) ---
     ("spotify-liked", re.compile(r"^play (?:my )?(?:favou?rites?|favs?|liked|saved)(?: (?:music|songs?|tracks?|stuff))?(?: on spotify)?$", re.I),
      lambda m: ("api_spotify_play", {"query": "liked songs"})),
-    ("spotify-play", re.compile(r"^(?:play|put on)\s+(?P<q>.+?)\s+on spotify$", re.I),
+    ("spotify-play", re.compile(r"^(?:play|put on)\s+(?:me\s+)?(?:(?:a|an|some|the|any)\s+)?(?!(?:it|that|this|them)\s+(?:on|from|in)\b)(?P<q>.+?)\s+(?:on|from|in|using|via|through|with)\s+spotify$", re.I),
      lambda m: ("api_spotify_play", {"query": m["q"]})),
     ("spotify-transfer", re.compile(r"^(?:move|transfer|switch|send)\s+(?:the )?(?:playback|music|spotify)\s+to\s+(?:this|my)\s+(?:device|pc|computer|laptop)$", re.I),
      lambda m: ("api_spotify_transfer", {"device": "this"})),

@@ -15,6 +15,7 @@ import numpy as np
 import sounddevice as sd
 
 from . import config
+from .aec import ReferenceTimeline
 from .audio_io import resolve_device
 
 _BLOCK = 2048              # samples written to the sound card at a time (about 90 ms): bounds how long stop() can take
@@ -40,7 +41,7 @@ class PiperTTS:
     name = "piper"
 
     def __init__(self, voice: str = config.PIPER_VOICE, device: str | int | None = config.SPEAKER_DEVICE,
-                 threads: int = 2, length_scale: float = config.PIPER_LENGTH_SCALE):
+                 threads: int = 2, length_scale: float = config.PIPER_LENGTH_SCALE, reference: ReferenceTimeline | None = None):
         model = config.PIPER_DIR / f"{voice}.onnx"
         if not model.exists():
             raise FileNotFoundError(
@@ -61,10 +62,14 @@ class PiperTTS:
             session=ort.InferenceSession(str(model), sess_options=options, providers=["CPUExecutionProvider"]),
         )
         self._length_scale = length_scale
+        self.reference = reference     # when set, every block played is also recorded here (16 kHz) for echo cancellation
         self._syn = SynthesisConfig(length_scale=length_scale)
         self.sample_rate = self._voice.config.sample_rate
         self.device = resolve_device(device, "output")
         self._stop = threading.Event()
+        self._run = threading.Event()                 # cleared = speech paused (nothing more is written to the sound card)
+        self._run.set()
+        self.supports_pause = True
         list(self.synthesize("Ready."))   # warm-up: the first synthesis pays one-time setup costs
 
     def synthesize(self, text: str, **style) -> Iterator[np.ndarray]:
@@ -80,9 +85,18 @@ class PiperTTS:
 
     def stop(self) -> None:
         self._stop.set()
+        self._run.set()                                # release a paused speaker so it can notice the stop
+
+    def pause(self) -> None:
+        """Mute at once: the sound card plays out what it already has (about 0.1-0.3 s), then silence."""
+        self._run.clear()
+
+    def resume(self) -> None:
+        self._run.set()
 
     def speak(self, text: str) -> SpeakStats:
         self._stop.clear()
+        self._run.set()
         start = time.perf_counter()
         audio_q: queue.Queue = queue.Queue(maxsize=3)   # at most 3 sentences synthesized ahead of playback
         synth = {"s": 0.0, "error": None}
@@ -115,11 +129,22 @@ class PiperTTS:
                 if not first_sentence:
                     audio = np.concatenate([np.zeros(int(_SENTENCE_PAUSE_S * self.sample_rate), np.int16), audio])
                 first_sentence = False
+                ref16 = None
+                if self.reference is not None:               # the sentence at 16 kHz, resampled as a whole (no seams between blocks)
+                    from scipy.signal import resample_poly
+
+                    ref16 = resample_poly(audio.astype(np.float32), config.SAMPLE_RATE, self.sample_rate)
                 for i in range(0, len(audio), _BLOCK):
+                    while not self._run.is_set() and not self._stop.is_set():
+                        time.sleep(0.01)                        # paused
                     if self._stop.is_set():
                         interrupted = True
                         break
                     stream.write(audio[i:i + _BLOCK].reshape(-1, 1))
+                    if ref16 is not None:
+                        a = round(i * config.SAMPLE_RATE / self.sample_rate)
+                        b = round(min(i + _BLOCK, len(audio)) * config.SAMPLE_RATE / self.sample_rate)
+                        self.reference.add(ref16[a:b].astype(np.int16), time.perf_counter())
                     if first_audio is None:
                         first_audio = time.perf_counter() - start
                     played += min(_BLOCK, len(audio) - i)
@@ -177,6 +202,23 @@ class FallbackTTS:
     def __init__(self, engines: list, log=print):
         self.engines, self.log = engines, log
 
+    @property
+    def supports_pause(self) -> bool:
+        return bool(self.engines) and getattr(self.engines[0], "supports_pause", False)
+
+    def pause(self) -> None:
+        if self.supports_pause:
+            self.engines[0].pause()
+
+    def resume(self) -> None:
+        if self.supports_pause:
+            self.engines[0].resume()
+
+    @property
+    def reference(self):
+        """The echo-cancellation reference of the engine that will speak first (None for the Windows voice: it cannot report it)."""
+        return getattr(self.engines[0], "reference", None) if self.engines else None
+
     def stop(self) -> None:
         for engine in self.engines:
             engine.stop()
@@ -192,10 +234,11 @@ class FallbackTTS:
         return SpeakStats("text", time.perf_counter() - start)
 
 
-def make_tts(voice: str = config.PIPER_VOICE, device: str | int | None = config.SPEAKER_DEVICE, log=print) -> FallbackTTS:
+def make_tts(voice: str = config.PIPER_VOICE, device: str | int | None = config.SPEAKER_DEVICE, log=print,
+             reference: ReferenceTimeline | None = None) -> FallbackTTS:
     """Piper first, then the Windows voice. Whatever cannot load is skipped with a printed reason."""
     engines = []
-    for build in (lambda: PiperTTS(voice, device), WindowsTTS):
+    for build in (lambda: PiperTTS(voice, device, reference=reference), WindowsTTS):
         try:
             engines.append(build())
         except Exception as e:

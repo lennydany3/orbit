@@ -18,6 +18,8 @@ _EMOJI = re.compile("[\U0001F000-\U0001FAFF☀-➿⬀-⯿️‍]+")
 _SITES = {"youtube.com": "YouTube", "github.com": "GitHub", "google.com": "Google", "spotify.com": "Spotify", "reddit.com": "Reddit",
           "twitter.com": "Twitter", "x.com": "X", "netflix.com": "Netflix", "amazon.com": "Amazon", "wikipedia.org": "Wikipedia",
           "gmail.com": "Gmail", "twitch.tv": "Twitch"}
+# The model sometimes WRITES a tool call as its answer ("api_spotify_control {"action": "pause"}", "os_set_volume(level=60)").
+_RAW_TOOL_CALL = re.compile(r"^\s*(?:[a-z]+_[a-z_]+\s*[\{\(].*[\}\)]|\{.*\}|```.*```)\s*$", re.S)
 _BROWSER_SUFFIX = re.compile(r"\s+[-–|]\s+(Brave|Google Chrome|Chrome|Microsoft Edge|Mozilla Firefox)$", re.I)
 
 
@@ -74,6 +76,8 @@ class Phraser:
         if not text:
             return ""
         self._first = True
+        if _RAW_TOOL_CALL.match(text):
+            return "Sorry, I didn't catch that. Could you say it again?"
         if text.startswith("Nothing was done"):
             heard = clean_title(request, 70).rstrip(".!?,;: ")          # no doubled punctuation inside the quotes
             return (f'Sorry, I didn\'t catch what to do with "{heard}". Could you say that another way?' if heard

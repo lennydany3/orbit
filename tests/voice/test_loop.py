@@ -10,7 +10,7 @@ import pytest
 
 from orbit.voice import config
 from orbit.voice.hotkey import KeyEvent
-from orbit.voice.loop import EchoAgent, VoiceLoop, describe_action, parse_yes_no
+from orbit.voice.loop import EchoAgent, VoiceLoop, describe_action, is_noise, parse_yes_no
 from orbit.voice.state import State
 from orbit.voice.stt import Transcript
 from orbit.voice.tts import SpeakStats
@@ -92,6 +92,10 @@ class SimMic:
             return LOUD
         return QUIET
 
+    def read_timed(self, timeout=0.05):
+        frame = self.read(timeout)
+        return None if frame is None else (frame, self.sim.t)
+
 
 class FakeKeys:
     def __init__(self):
@@ -109,8 +113,17 @@ class FakeKeys:
 
 
 class FakeTTS:
+    supports_pause = True
+
     def __init__(self, mic, slow=False):
         self.mic, self.slow, self.spoken, self.mic_paused_while_speaking, self.stopped = mic, slow, [], [], threading.Event()
+        self.events = []                                   # "pause" / "resume" calls, in order
+
+    def pause(self):
+        self.events.append("pause")
+
+    def resume(self):
+        self.events.append("resume")
 
     def speak(self, text):
         self.spoken.append(text)
@@ -127,19 +140,24 @@ class FakeTTS:
 
 class FakeTranscriber:
     def __init__(self, *texts):
-        self.texts = list(texts)
+        self.texts, self.calls = list(texts), 0
 
     def transcribe(self, clip):
+        self.calls += 1
         return Transcript(self.texts.pop(0) if self.texts else "", 0.2, len(clip) / config.SAMPLE_RATE)
 
 
 class FakeWake:
     def __init__(self, sim):
-        self.sim, self.armed = sim, False
+        self.sim, self.armed, self.reject = sim, False, False
 
-    def process(self, frame):
+    def process(self, frame, on_candidate=None):
         if self.armed:
             self.armed = False
+            if on_candidate:
+                on_candidate()                              # the model fired, before the slower check
+            if self.reject:
+                return WakeResult(1.0, False, rejected=True, heard="hey bit")
             return WakeResult(1.0, True)
         return WakeResult(0.0, False)
 
@@ -147,17 +165,20 @@ class FakeWake:
         pass
 
 
-def build(*texts, agent=None, tts_slow=False, with_wake=False, follow_up=True, **loop_kwargs):
+def build(*texts, agent=None, tts_slow=False, with_wake=False, follow_up=True, pause_s=None, **loop_kwargs):
     sim = Sim()
     mic, keys = SimMic(sim), FakeKeys()
     tts = FakeTTS(mic, slow=tts_slow)
     out: list[str] = []
     wake = FakeWake(sim) if with_wake else None
     agent = agent or EchoAgent()
-    loop = VoiceLoop(agent, mic, FakeTranscriber(*texts), tts, keys, wake, SpeechSegmenter(LoudnessVAD()), LoudnessVAD(),
+    loop_kwargs.setdefault("media_check", lambda: False)                     # never ask the real PC what is playing
+    transcriber = FakeTranscriber(*texts)
+    loop = VoiceLoop(agent, mic, transcriber, tts, keys, wake, SpeechSegmenter(LoudnessVAD(), pause_s=pause_s), LoudnessVAD(),
                      follow_up=follow_up, out=out.append, file_log=lambda line: None, clock=sim.clock, **loop_kwargs)
     agent.safety.confirm = loop.confirm
     # the user's habits: hold the key and talk when idle; stop talking and release when done
+    loop.test_transcriber = transcriber
     return sim, loop, keys, tts, wake, out
 
 
@@ -463,3 +484,161 @@ def test_the_answer_to_orbits_question_is_heard_after_a_pause_longer_than_the_no
     sim.stop_when = lambda: loop.turns == 2
     loop.run()
     assert loop.agent.reply and len(tts.spoken) == 2
+
+
+# ------------------------------------------------------------------ interrupting Orbit by voice
+def _talk_then_interrupt(texts, reply="Here is a long answer that goes on for a while.", **kw):
+    sim, loop, keys, tts, wake, out = build(*texts, agent=ScriptedAgent(reply), tts_slow=True, with_wake=True, **kw)
+    user_holds_key_and_talks(sim, loop, keys)
+    return sim, loop, keys, tts, wake, out
+
+
+def test_the_wake_word_interrupts_speech_and_the_new_request_is_handled():
+    sim, loop, keys, tts, wake, out = _talk_then_interrupt(["tell me a story", "Hey Orbit, open Spotify."])
+    sim.when(lambda: loop.st.is_(State.SPEAKING) and sim.reads > 30, lambda: setattr(wake, "armed", True))
+    sim.when(lambda: loop.mode == "wake" and loop.st.is_(State.LISTENING) and sim.talk == 0 and not loop.heard,
+             lambda: setattr(sim, "talk", 15))
+    sim.stop_when = lambda: loop.turns >= 1 and len(tts.spoken) >= 2                   # the interruption got its own full turn
+    started = time.perf_counter()
+    loop.run()
+    assert tts.mic_paused_while_speaking[0] is False                  # the microphone stayed open while Orbit talked
+    assert tts.events[:1] == ["pause"]                               # muted the instant the model fired...
+    assert tts.stopped.is_set() and time.perf_counter() - started < 2.5   # ...and stopped for good once the check agreed (not the 3 s)
+    assert ("speaking", "listening") in moves(loop)
+    assert any("[interrupted]" in line for line in out)
+    assert len(tts.spoken) >= 2                                      # the interruption got its own reply
+
+
+def test_a_wake_candidate_the_check_rejects_does_not_cut_the_speech_for_good():
+    sim, loop, keys, tts, wake, out = _talk_then_interrupt(["tell me a story"])
+    wake.reject = True
+    sim.when(lambda: loop.st.is_(State.SPEAKING) and sim.reads > 30, lambda: setattr(wake, "armed", True))
+    sim.stop_when = lambda: loop.turns == 1
+    loop.run()
+    assert tts.events[:2] == ["pause", "resume"]                     # muted for the check, then un-muted: it carried on
+    assert ("speaking", "listening") not in moves(loop)
+    assert any("not the wake word" in line for line in out)
+
+
+def test_replies_that_say_the_wake_word_stay_half_duplex_so_orbit_cannot_trigger_itself():
+    sim, loop, keys, tts, wake, out = _talk_then_interrupt(["help"], reply="Just say hey orbit whenever you need me.")
+    sim.stop_when = lambda: loop.turns == 1
+    loop.run()
+    assert tts.mic_paused_while_speaking == [True]
+
+
+def test_without_a_wake_word_the_microphone_stays_off_while_orbit_talks():
+    sim, loop, keys, tts, _, _ = build("tell me a story", agent=ScriptedAgent("A story."), tts_slow=False)
+    user_holds_key_and_talks(sim, loop, keys)
+    sim.stop_when = lambda: loop.turns == 1
+    loop.run()
+    assert tts.mic_paused_while_speaking == [True]
+
+
+def test_barge_in_can_be_switched_off():
+    sim, loop, keys, tts, wake, _ = _talk_then_interrupt(["tell me a story"], barge_in=False)
+    sim.stop_when = lambda: loop.turns == 1
+    loop.run()
+    assert tts.mic_paused_while_speaking == [True]
+
+
+def test_the_echo_canceller_sees_every_frame_while_orbit_speaks_and_not_when_it_is_quiet():
+    class CountingAEC:
+        def __init__(self):
+            self.frames, self.resets = 0, 0
+
+        def process(self, mic, ref):
+            self.frames += 1
+            return mic
+
+        def reset_history(self):
+            self.resets += 1
+
+    from orbit.voice.aec import ReferenceTimeline
+
+    aec, timeline = CountingAEC(), ReferenceTimeline()
+    sim, loop, keys, tts, wake, _ = _talk_then_interrupt(["tell me a story"], aec=aec, reference=timeline)
+    sim.when(lambda: loop.st.is_(State.SPEAKING) and sim.reads > 60, lambda: tts.stopped.set())     # let the slow voice finish
+    sim.stop_when = lambda: loop.turns == 1
+    loop.run()
+    assert aec.resets == 1 and aec.frames > 0
+
+
+# ------------------------------------------------------------------ not acting on background sound
+@pytest.mark.parametrize("text, noise", [
+    ("Uh...", True), ("um", True), ("Hmm.", True), ("Okay.", True), ("uh huh", True), ("", True), ("...", True),
+    ("Thank you.", True), ("Thanks for watching!", True), ("you", True), ("Bye.", True),
+    ("open spotify", False), ("pause", False), ("volume 30", False), ("Thank you Orbit, open Spotify", False), ("close it", False),
+])
+def test_filler_and_silence_hallucinations_are_noise(text, noise):
+    assert is_noise(text) is noise
+
+
+def test_follow_up_stays_closed_while_music_is_playing():
+    sim, loop, keys, tts, _, out = build("open spotify", media_check=lambda: True)
+    user_holds_key_and_talks(sim, loop, keys)
+    sim.stop_when = lambda: loop.turns == 1 and loop.st.is_(State.IDLE)
+    loop.run()
+    assert ("speaking", "idle") in moves(loop) and ("speaking", "follow_up") not in moves(loop)
+    assert any("music is playing" in line for line in out)
+
+
+def test_follow_up_opens_normally_when_nothing_is_playing():
+    sim, loop, keys, tts, _, _ = build("open spotify", media_check=lambda: False)
+    user_holds_key_and_talks(sim, loop, keys)
+    sim.stop_when = lambda: loop.turns == 1 and loop.st.is_(State.FOLLOW_UP)
+    loop.run()
+    assert ("speaking", "follow_up") in moves(loop)
+
+
+def test_a_filler_in_the_follow_up_window_is_ignored_without_an_apology_or_the_agent():
+    sim, loop, keys, tts, _, out = build("open spotify", "Uh...")
+    user_holds_key_and_talks(sim, loop, keys)
+    sim.when(lambda: loop.st.is_(State.FOLLOW_UP) and sim.talk == 0 and not loop.heard and loop.turns == 1, lambda: setattr(sim, "talk", 12))
+    sim.stop_when = lambda: any("ignored" in line for line in out) and loop.st.is_(State.IDLE)
+    loop.run()
+    assert loop.agent.calls == ["open spotify"]                                  # "Uh..." never reached the agent
+    assert len(tts.spoken) == 1                                                   # and nobody apologised for a stranger's noise
+
+
+def test_a_filler_after_a_deliberate_request_still_gets_an_apology():
+    sim, loop, keys, tts, _, _ = build("Uh...")
+    user_holds_key_and_talks(sim, loop, keys)
+    sim.stop_when = lambda: loop.turns == 1
+    loop.run()
+    assert loop.agent.calls == [] and tts.spoken == ["Sorry, I didn't catch that."]
+
+
+# ------------------------------------------------------------------ speculative transcription
+def _wake_turn(texts, speak_plan, **kw):
+    sim, loop, keys, tts, wake, out = build(*texts, with_wake=True, pause_s=0.55, **kw)
+    sim.when(lambda: sim.reads > 5, lambda: setattr(wake, "armed", True))
+    state = {"i": 0}
+
+    def next_burst():
+        if state["i"] < len(speak_plan):
+            n, gap = speak_plan[state["i"]]
+            state["i"] += 1
+            sim.talk = n
+            sim.gap_frames = gap
+
+    sim.when(lambda: loop.st.is_(State.LISTENING) and sim.talk == 0, next_burst)
+    return sim, loop, tts
+
+
+def test_when_you_really_stopped_the_early_transcription_is_the_one_that_is_used():
+    sim, loop, tts = _wake_turn(["open spotify"], [(15, 0)])
+    sim.stop_when = lambda: loop.turns == 1
+    loop.run()
+    assert loop.test_transcriber.calls == 1                                       # one transcription served both the pause and the end
+    assert loop.agent.calls == ["open spotify"]
+
+
+def test_when_you_carry_on_after_a_pause_the_early_result_is_thrown_away():
+    sim, loop, tts = _wake_turn(["open", "open spotify"], [(12, 0)])
+    # after the first burst and a 0.7 s pause, speak again: the early transcription ("open") must not be used
+    sim.when(lambda: loop.st.is_(State.LISTENING) and loop.mode == "wake" and sim.talk == 0 and loop._spec is not None,
+             lambda: setattr(sim, "talk", 12))                                  # the moment the early transcription starts, carry on talking
+    sim.stop_when = lambda: loop.turns == 1
+    loop.run()
+    assert loop.agent.calls[-1] == "open spotify" and loop.test_transcriber.calls == 2

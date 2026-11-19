@@ -308,3 +308,18 @@ def test_a_kind_of_device_needs_no_spotify_context(text, device, volume):
     m = rules.match(text)
     expected = {"device": device, **({"volume": volume} if volume else {})}
     assert m and (m.tool, m.args) == ("api_spotify_transfer", expected)
+
+
+@pytest.mark.parametrize("text, query", [
+    ("play lofi on spotify", "lofi"), ("Can you play a funk playlist from Spotify?", "funk playlist"),
+    ("Can you play Japanese music from Spotify?", "Japanese music"), ("please play some jazz in spotify", "jazz"),
+    ("play the weeknd from spotify", "weeknd"), ("play me Closer using spotify", "Closer"),
+])
+def test_spotify_play_phrasings_skip_the_slow_model(text, query):
+    m = rules.match(text)
+    assert m and m.tool == "api_spotify_play" and m.args == {"query": query}
+
+
+@pytest.mark.parametrize("text", ["play it on spotify", "play that from spotify", "play this in spotify"])
+def test_a_pronoun_still_goes_to_the_model_which_knows_what_it_refers_to(text):
+    assert rules.match(text) is None

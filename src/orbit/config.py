@@ -10,6 +10,7 @@ OLLAMA_HOST = "http://localhost:11434"
 NUM_CTX = 4096          # context window; keep small on a 6 GB GPU
 TEMPERATURE = 0.1       # low = predictable tool calls
 LLM_TIMEOUT_S = 120
+KEEP_ALIVE = "30m"            # how long Ollama keeps the model in memory after a request (loading it again takes ~20 s)
 
 # --- Agent limits ---
 MAX_STEPS = 8                 # LLM round-trips per request
