@@ -2,6 +2,7 @@
 
   python -m orbit.voice.fetch_models whisper tiny.en base.en small.en
   python -m orbit.voice.fetch_models piper en_US-amy-medium en_US-lessac-medium
+  python -m orbit.voice.fetch_models wakeword hey_jarvis alexa hey_mycroft
 
 Models land in models/ and are loaded from there afterwards (no network at run time).
 """
@@ -40,12 +41,26 @@ def fetch_piper(names: list[str]) -> int:
     return 0
 
 
+def fetch_wakeword(names: list[str]) -> int:
+    """Pre-trained openWakeWord words plus the two shared feature models they all need."""
+    from openwakeword.utils import download_models
+
+    config.WAKEWORD_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading openWakeWord feature models and {', '.join(names)} -> {config.WAKEWORD_DIR}")
+    download_models(model_names=names, target_directory=str(config.WAKEWORD_DIR))
+    for f in sorted(config.WAKEWORD_DIR.iterdir()):
+        print(f"  {f.name}  {f.stat().st_size / 1e6:.2f} MB")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if len(args) >= 2 and args[0] == "whisper":
         return fetch_whisper(args[1:])
     if len(args) >= 2 and args[0] == "piper":
         return fetch_piper(args[1:])
+    if len(args) >= 2 and args[0] == "wakeword":
+        return fetch_wakeword(args[1:])
     print(__doc__)
     return 2
 

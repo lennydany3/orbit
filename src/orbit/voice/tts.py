@@ -60,15 +60,22 @@ class PiperTTS:
             config=PiperConfig.from_dict(json.loads(Path(f"{model}.json").read_text(encoding="utf-8"))),
             session=ort.InferenceSession(str(model), sess_options=options, providers=["CPUExecutionProvider"]),
         )
+        self._length_scale = length_scale
         self._syn = SynthesisConfig(length_scale=length_scale)
         self.sample_rate = self._voice.config.sample_rate
         self.device = resolve_device(device, "output")
         self._stop = threading.Event()
         list(self.synthesize("Ready."))   # warm-up: the first synthesis pays one-time setup costs
 
-    def synthesize(self, text: str) -> Iterator[np.ndarray]:
-        """Int16 mono audio, one array per sentence. No sound is played (used for tests and timing)."""
-        for chunk in self._voice.synthesize(text, self._syn):
+    def synthesize(self, text: str, **style) -> Iterator[np.ndarray]:
+        """Int16 mono audio, one array per sentence. No sound is played (used for tests, timing and wake-word training).
+        `style` may override length_scale (speed), noise_scale and noise_w_scale to vary how the voice sounds."""
+        syn = self._syn
+        if style:
+            from piper import SynthesisConfig
+
+            syn = SynthesisConfig(**{"length_scale": self._length_scale, **style})
+        for chunk in self._voice.synthesize(text, syn):
             yield np.asarray(chunk.audio_int16_array).reshape(-1)
 
     def stop(self) -> None:

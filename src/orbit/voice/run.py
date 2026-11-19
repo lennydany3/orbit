@@ -5,14 +5,19 @@
   python -m orbit.voice.run vad [--seconds 30]       live mic: print speech start/end, then a CPU/RAM/timing report
   python -m orbit.voice.run record                   record the test sentences into tests/voice/fixtures (your voice, local only)
   python -m orbit.voice.run stt [--seconds 60]       live mic -> text, with timings; add --stress to keep Whisper busy the whole time
+  python -m orbit.voice.run sttcheck                 Groq vs local on your recorded clips, then every failure path
   python -m orbit.voice.run bench                    compare tiny.en / base.en / small.en on the recorded clips
   python -m orbit.voice.run say ["text"]             speak a text (Piper; --engine windows for the fallback voice)
   python -m orbit.voice.run voices                   audition every downloaded Piper voice with the same sentence
+  python -m orbit.voice.run keys                     test the hold-to-talk key and the kill switch (no audio)
+  python -m orbit.voice.run wake [--seconds 120]     wake word only: idle CPU, false accepts / rejects
+  python -m orbit.voice.run listen                   hold Right Ctrl or say the wake word -> text
 Ctrl+C stops a live command early and still prints its report.
 """
 import argparse
 import gc
 import itertools
+import os
 import statistics
 import sys
 import threading
@@ -24,9 +29,10 @@ import numpy as np
 import psutil
 
 from . import config
-from .audio_io import MicStream, Speaker, device_label, list_devices
+from .audio_io import FileMic, MicStream, Speaker, device_label, list_devices
 from .monitor import Monitor, lower_priority
 from .stt import Transcriber, word_error_rate
+from .stt_router import GroqSTT, LocalSTT, STTRouter, clip_to_wav
 from .vad import SileroVAD, SpeechSegmenter
 
 
@@ -57,6 +63,30 @@ def load_fixtures(directory: Path) -> list[tuple[str, str, np.ndarray]]:
             with wave.open(str(path)) as w:
                 found.append((name, text, np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)))
     return found
+
+
+def make_router(args) -> STTRouter:
+    """The speech-to-text router for a live command, with a one-line privacy statement so it is always visible."""
+    router = STTRouter(args.provider, local=LocalSTT(args.model, args.threads))
+    if args.provider == "local":
+        print(f"Speech-to-text: local Whisper {args.model} only. Audio never leaves this PC.")
+    else:
+        print(f"Speech-to-text: {args.provider}. After the wake word / hotkey, the speech clip of each turn is sent to Groq "
+              f"({config.GROQ_MODEL}); nothing is sent while idle." + (" Local Whisper is the fallback." if args.provider == "auto" else ""))
+        if not os.environ.get(config.GROQ_KEY_ENV):
+            print(f"  {config.GROQ_KEY_ENV} is not set, so " + ("every turn uses local Whisper." if args.provider == "auto" else "nothing can be transcribed."))
+    return router
+
+
+def heard_line(result, timing: str, how: str | None = None) -> str:
+    """One CLI line per turn that always names the provider that handled it."""
+    tag = f"{how}, " if how else ""
+    if result.error:
+        return f"  [stt {result.provider}] no text ({result.error}): the agent will not run"
+    if not result.text.strip():
+        return f"  heard ({tag}{result.provider}): (empty transcript: the agent will not run)"
+    fallback = f", fallback: {result.fallback_reason}" if result.fallback_reason else ""
+    return f'  heard ({tag}{result.provider}{fallback}): "{result.text}"   [STT {result.seconds:.2f}s; {timing}]'
 
 
 # ---------- V1 ----------
@@ -165,8 +195,7 @@ def cmd_stt(args) -> int:
     monitor = Monitor()
     print(f"Priority lowered: {lower_priority()}")
     segmenter = SpeechSegmenter(SileroVAD())
-    transcriber = Transcriber(args.model, threads=args.threads)
-    print(f"Whisper {transcriber.model_name}: loaded + warmed up in {transcriber.load_s:.1f}s, {transcriber.threads} threads, CPU int8 (GPU untouched)")
+    router = make_router(args)
     mic = MicStream(args.device)
     print(f"Mic: {device_label(mic.device)}")
 
@@ -179,10 +208,9 @@ def cmd_stt(args) -> int:
         except Exception as e:  # keep the loop alive if one clip fails
             print(f"  STT failed: {e}")
             return
-        monitor.add_timing("stt transcribe", result.seconds)
+        monitor.add_timing(f"stt {result.provider}", result.seconds)
         monitor.add_timing("speech-end event -> text", time.perf_counter() - speech_end_at)
-        print(f'  heard: "{result.text}"   [{result.seconds:.2f}s for {result.audio_s:.1f}s of audio, '
-              f"{result.realtime_factor:.2f}x real time]")
+        print(heard_line(result, f"{time.perf_counter() - speech_end_at:.2f}s from the end-of-speech event"))
 
     if args.stress:
         clips = [c for _, _, c in load_fixtures(Path(args.fixtures))]
@@ -194,11 +222,11 @@ def cmd_stt(args) -> int:
             for clip in itertools.cycle(clips):
                 if stop_stress.is_set():
                     return
-                result = transcriber.transcribe(clip)
-                monitor.add_timing("stt transcribe (under stress)", result.seconds)
+                result = router.local.engine.transcribe(clip)   # the stress test is about the LOCAL CPU model, whatever the provider
+                monitor.add_timing("stt local (under stress)", result.seconds)
 
         threading.Thread(target=keep_whisper_busy, name="stress", daemon=True).start()
-        print("STRESS: Whisper is transcribing recorded clips back to back while the mic is read. Gaps should stay near 80 ms.")
+        print("STRESS: local Whisper is transcribing recorded clips back to back while the mic is read. Gaps should stay near 80 ms.")
     print(f"\nListening for {args.seconds:.0f}s. Speak a sentence, then pause. Ctrl+C to stop.\n")
 
     monitor.start()
@@ -220,7 +248,7 @@ def cmd_stt(args) -> int:
                         print(f"[{now - started:6.2f}s] speech start")
                     elif e.kind == "end":
                         print(f"[{now - started:6.2f}s] speech end ({e.speech_s:.1f}s) -> transcribing")
-                        future = transcriber.submit(e.clip)
+                        future = router.submit(clip_to_wav(e.clip))
                         pending.append(future)
                         future.add_done_callback(lambda f, t=now: report(f, t))
                     else:
@@ -232,7 +260,7 @@ def cmd_stt(args) -> int:
     finally:
         stop_stress.set()
         monitor.stop()
-        transcriber.close()
+        router.close()
 
     print("\n--- report ---")
     print(f"frames read: {mic.frames}   mic overflows (driver lost audio): {mic.overflows}   dropped (we were too slow): {mic.dropped}")
@@ -292,6 +320,380 @@ def cmd_bench(args) -> int:
             print(f"\n{model} mistakes:")
             for expected, heard in wrong:
                 print(f'  said "{expected}"  ->  heard "{heard}"')
+    return 0
+
+
+# ---------- speech-to-text providers: verification ----------
+class _Spy:
+    """Wraps a provider and counts how often the router called it (to prove an empty clip is never sent)."""
+
+    def __init__(self, inner):
+        self.inner, self.calls = inner, 0
+
+    def transcribe(self, wav_bytes, sample_rate=config.SAMPLE_RATE):
+        self.calls += 1
+        return self.inner.transcribe(wav_bytes, sample_rate)
+
+
+def _fake_groq_server(status: int, delay_s: float = 0.0):
+    """A real local HTTP server that answers like a failing Groq. The real API key is never sent to it (a dummy key is used)."""
+    import http.server
+    import json
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            time.sleep(delay_s)
+            body = json.dumps({"error": {"message": "simulated failure"}}).encode()
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except OSError:
+                pass   # the client already gave up (timeout test)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}/openai/v1/audio/transcriptions"
+
+
+def cmd_sttcheck(args) -> int:
+    """Part 1: your recorded clips through Groq and local Whisper. Part 2: every failure path, with real failures."""
+    fixtures = load_fixtures(Path(args.fixtures))
+    if not fixtures:
+        print(f"No recorded clips in {args.fixtures}. Run: python -m orbit.voice.run record")
+        return 1
+    groq, local = GroqSTT(), LocalSTT(args.model, args.threads)
+    has_key = bool(os.environ.get(config.GROQ_KEY_ENV))
+    print(f"Groq model {config.GROQ_MODEL} (key set: {has_key})  |  local Whisper {args.model}, {args.threads} threads")
+    print("Loading local Whisper first, so its model-load time is not counted as transcription time ...")
+    local.engine
+    print(f"\n=== Part 1: {len(fixtures)} clips, same audio through both providers ===")
+    totals = {"groq": [], "local": []}
+    times = {"groq": [], "local": []}
+    for name, expected, clip in fixtures:
+        wav = clip_to_wav(clip)
+        print(f'\n{name}: said "{expected}"  ({len(clip) / config.SAMPLE_RATE:.1f}s)')
+        for provider in (groq, local):
+            try:
+                r = provider.transcribe(wav)
+            except Exception as e:
+                print(f"  {provider.name:6}: FAILED ({getattr(e, 'reason', e)})")
+                continue
+            wer = word_error_rate(expected, r.text)
+            totals[provider.name].append(wer)
+            times[provider.name].append(r.seconds)
+            print(f'  {provider.name:6}: "{r.text}"   {r.seconds:.2f}s   word error {100 * wer:.0f}%')
+    print("\nSummary:")
+    for name in ("groq", "local"):
+        if totals[name]:
+            print(f"  {name:6} word error {100 * statistics.fmean(totals[name]):5.1f}%   median {statistics.median(times[name]):.2f}s   "
+                  f"max {max(times[name]):.2f}s   ({len(totals[name])} clips; the first Groq call also pays the connection setup)")
+
+    print("\n=== Part 2: failure paths (real failures; the real API key is only ever sent to api.groq.com) ===")
+    clip = fixtures[0][2]
+    wav, dummy = clip_to_wav(clip), "dummy-key-not-real"
+    results = []
+
+    def scenario(title: str, expect: str, router: STTRouter, audio: bytes = wav, expect_provider: str | None = None):
+        logs: list[str] = []
+        router.log = logs.append
+        r = router.transcribe(audio)
+        ok = (expect.lower() in " ".join(logs + [r.error, r.fallback_reason]).lower()) and (expect_provider is None or r.provider == expect_provider)
+        results.append(ok)
+        print(f"\n[{'PASS' if ok else 'FAIL'}] {title}")
+        for line in logs:
+            print(f"   log: {line.strip()}")
+        print(f'   result: provider={r.provider}, text="{r.text}", error="{r.error}", {r.seconds:.2f}s')
+        return r
+
+    saved = os.environ.pop(config.GROQ_KEY_ENV, None)      # 1. no key (restored in the finally below)
+    try:
+        scenario("1. No API key -> falls back to local", "no API key", STTRouter("auto", GroqSTT(), local, preload_local=False), expect_provider="local")
+    finally:
+        if saved is not None:
+            os.environ[config.GROQ_KEY_ENV] = saved
+    scenario("2. No internet (host that cannot resolve) -> falls back to local", "no internet",
+             STTRouter("auto", GroqSTT(url="https://api.groq.invalid/openai/v1/audio/transcriptions", api_key=dummy), local, preload_local=False),
+             expect_provider="local")
+    server429, url429 = _fake_groq_server(429)
+    scenario("3. HTTP 429 (a real local server answers 429) -> falls back to local", "429",
+             STTRouter("auto", GroqSTT(url=url429, api_key=dummy), local, preload_local=False), expect_provider="local")
+    scenario("4. HTTP 429 with provider=groq -> NO fallback, empty result", "429",
+             STTRouter("groq", GroqSTT(url=url429, api_key=dummy), local, preload_local=False), expect_provider="groq")
+    server429.shutdown()
+    slow, slow_url = _fake_groq_server(200, delay_s=3.0)
+    scenario("5. Timeout (server answers after 3 s, limit set to 1 s for this test) -> falls back to local", "timeout",
+             STTRouter("auto", GroqSTT(url=slow_url, api_key=dummy, timeout_s=1.0), local, preload_local=False), expect_provider="local")
+    slow.shutdown()
+    spy_groq, spy_local = _Spy(groq), _Spy(local)
+    router = STTRouter("auto", spy_groq, spy_local, preload_local=False)
+    for title, audio in (("6a. Empty clip: 1 s of digital silence", clip_to_wav(np.zeros(config.SAMPLE_RATE, np.int16))),
+                         ("6b. Empty clip: 40 ms (too short)", clip_to_wav(clip[:640])),
+                         ("6c. Empty clip: nothing recorded", clip_to_wav(np.zeros(0, np.int16)))):
+        r = scenario(title + " -> nothing sent, agent will not run", "empty clip", router, audio, expect_provider="none")
+    clean = spy_groq.calls == 0 and spy_local.calls == 0
+    results.append(clean)
+    print(f"\n[{'PASS' if clean else 'FAIL'}] 6. Providers called for the three empty clips: groq {spy_groq.calls}, local {spy_local.calls} (must be 0 and 0)")
+    print(f"\n{sum(results)} of {len(results)} checks passed.")
+    return 0 if all(results) else 1
+
+
+# ---------- custom wake word ----------
+def cmd_train_wake(args) -> int:
+    from .wake_train import train
+
+    return train(args.pos, args.neg, args.seed, args.folds, args.fresh)
+
+
+def cmd_record_wake(args) -> int:
+    """Record yourself saying "hey orbit" (positives) and normal talking (negatives) for training. Saved locally, git-ignored."""
+    directory = config.FIXTURES_DIR.parent / "fixtures_wake"
+    directory.mkdir(parents=True, exist_ok=True)
+    segmenter = SpeechSegmenter(SileroVAD())
+    mic = MicStream(args.device)
+    print(f"Mic: {device_label(mic.device)}\nSaving into {directory} (local only; these are the only audio files this saves).")
+    styles = ["normal voice", "a bit quieter", "a bit faster", "slowly and clearly", "from further away from the mic",
+              "casually, like calling a friend", "a bit louder", "like you are tired"]
+    with mic:
+        have = len(list(directory.glob("hey_orbit_*.wav")))
+        for i in range(args.count):
+            print(f'\n[{i + 1}/{args.count}] Say "hey orbit"  ({styles[i % len(styles)]})')
+            mic.pause()
+            mic.resume()
+            segmenter.reset()
+            while True:
+                frame = mic.read(timeout=1.0)
+                if frame is None:
+                    continue
+                done = [e for e in segmenter.feed(frame) if e.kind in ("end", "ignored")]
+                if done and done[0].kind == "end":
+                    have += 1
+                    write_wav(directory / f"hey_orbit_{have:03d}.wav", done[0].clip)
+                    print(f"  saved hey_orbit_{have:03d}.wav ({len(done[0].clip) / config.SAMPLE_RATE:.1f}s)")
+                    break
+                if done:
+                    print("  too short, try again")
+        if args.talk:
+            n = len(list(directory.glob("negative_*.wav"))) + 1
+            print(f"\nNow talk normally for {args.talk:.0f}s (or play a YouTube video / TV / music). Do NOT say \"hey orbit\". Starting in 3s ...")
+            time.sleep(3)
+            mic.pause()
+            mic.resume()
+            frames, started = [], time.perf_counter()
+            while time.perf_counter() - started < args.talk:
+                frame = mic.read(timeout=1.0)
+                if frame is not None:
+                    frames.append(frame)
+            write_wav(directory / f"negative_{n:03d}.wav", np.concatenate(frames))
+            print(f"  saved negative_{n:03d}.wav ({len(frames) * config.FRAME_MS / 1000:.0f}s)")
+    print("\nDone. Train with:  python -m orbit.voice.run train-wake")
+    return 0
+
+
+# ---------- V4 ----------
+def cmd_keys(args) -> int:
+    """Test the global hotkeys without any audio."""
+    from .hotkey import Hotkeys
+
+    keys = Hotkeys(args.ptt)
+    keys.start()
+    print(f"Hold {args.ptt} to test hold-to-talk. A quick tap, or a shortcut like {args.ptt}+C, is reported as ignored.")
+    print(f"Press {config.KILL_COMBO} (the kill switch) to quit. It should work from any window.\n")
+    try:
+        while not keys.killed.is_set():
+            for e in keys.poll():
+                if e.kind == "down":
+                    print("  key DOWN  -> would start listening")
+                elif e.kind == "up":
+                    print(f"  key UP    held {e.held_s:.2f}s -> " + ("a real hold-to-talk" if e.valid else "ignored (tap or shortcut)"))
+                else:
+                    print("  KILL SWITCH pressed -> would stop the microphone")
+            time.sleep(0.02)
+    except KeyboardInterrupt:
+        pass
+    keys.stop()
+    return 0
+
+
+def cmd_wake(args) -> int:
+    """Wake word only (no speech-to-text): for the idle CPU number and false accepts / rejects."""
+    from .wakeword import WakeWord
+
+    monitor = Monitor()
+    print(f"Priority lowered: {lower_priority()}")
+    wake = WakeWord(args.word, args.threshold)
+    mic = MicStream(args.device)
+    print(f"Mic: {device_label(mic.device)}")
+    print(f'Wake word "{args.word.replace("_", " ")}", threshold {wake.threshold}, needs {wake.hits} frames in a row. '
+          f"Listening {args.seconds:.0f}s: talk, play music or TV, and say the wake word a few times. Ctrl+C to stop.\n")
+    triggers, near_misses, top, rejected = [], 0, 0.0, 0
+    monitor.start()
+    started = time.perf_counter()
+    try:
+        with mic:
+            while time.perf_counter() - started < args.seconds:
+                frame = mic.read(timeout=1.0)
+                if frame is None:
+                    continue
+                t0 = time.perf_counter()
+                result = wake.process(frame)
+                monitor.add_timing("wake word per 80ms frame", time.perf_counter() - t0)
+                wall = time.perf_counter() - started
+                top = max(top, result.score)
+                if result.triggered:
+                    triggers.append((wall, result.score))
+                    print(f"[{wall:6.1f}s] WAKE  score {result.score:.2f}" + (f'   (Whisper check heard: "{result.heard}")' if result.heard else ""))
+                elif result.rejected:
+                    rejected += 1
+                    print(f"[{wall:6.1f}s]   candidate REJECTED by the Whisper check (score {result.score:.2f}, heard: \"{result.heard}\")")
+                elif 0.25 <= result.score < wake.threshold:
+                    near_misses += 1
+                    print(f"[{wall:6.1f}s]   near miss, score {result.score:.2f} (below {wake.threshold})")
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    finally:
+        monitor.stop()
+    elapsed = time.perf_counter() - started
+    print("\n--- report ---")
+    print(f"{len(triggers)} wakes in {elapsed / 60:.1f} min ({len(triggers) / max(elapsed / 60, 1e-9):.1f} per minute); "
+          f"{near_misses} near misses; highest score {top:.2f}" + (f"; {rejected} candidates rejected by the Whisper check" if wake.verifier else ""))
+    print(f"mic overflows: {mic.overflows}   dropped: {mic.dropped}")
+    print(monitor.report())
+    return 0
+
+
+def cmd_listen(args) -> int:
+    """Both triggers end to end (hold the key, or say the wake word) -> text. The agent is hooked up in V5."""
+    from collections import deque
+
+    from .hotkey import Hotkeys
+    from .vad import speech_seconds
+    from .wakeword import WakeWord, strip_wake_phrase
+
+    monitor = Monitor()
+    print(f"Priority lowered: {lower_priority()}")
+    segmenter = SpeechSegmenter(SileroVAD())     # cuts the utterance after a wake word
+    check_vad = SileroVAD()                      # checks that a hold-to-talk recording really contains speech
+    wake = None if args.no_wake else WakeWord(args.word)
+    router = make_router(args)
+    keys = Hotkeys(args.ptt)
+    mic = FileMic(args.wav) if args.wav else MicStream(args.device)
+    print(f"Mic: {getattr(mic, 'label', None) or device_label(mic.device)}")
+    triggers = []
+    if not args.no_ptt:
+        triggers.append(f"hold {args.ptt}")
+    if wake:
+        triggers.append(f'say "{args.word.replace("_", " ")}"')
+    print(f"Start a turn: {' or '.join(triggers)}.  Kill switch: {config.KILL_COMBO}.  Ctrl+C also quits.\n")
+
+    pending: list = []
+    counts = {"ptt": 0, "wake": 0}
+
+    def submit(clip: np.ndarray, ended_at: float, how: str) -> None:
+        counts[how] += 1
+        print("[transcribing]")
+        future = router.submit(clip_to_wav(clip))   # only this VAD-trimmed clip, only after the key / wake word, ever leaves the mic loop
+        pending.append(future)
+
+        def show(f) -> None:
+            try:
+                result = f.result()
+            except Exception as e:
+                print(f"  STT failed: {e}")
+                return
+            if not result.error:
+                result.text = strip_wake_phrase(result.text, args.word) if how == "wake" else result.text
+            total = time.perf_counter() - ended_at
+            monitor.add_timing(f"{how}: stt {result.provider}", result.seconds)
+            monitor.add_timing(f"{how}: {'key release' if how == 'ptt' else 'speech-end event'} -> text", total)
+            print(heard_line(result, f"{total:.2f}s from "
+                  f"{'key release' if how == 'ptt' else 'the end-of-speech event, which already waited %.1fs of silence' % config.VAD_END_SILENCE_S}",
+                  how))
+
+        future.add_done_callback(show)
+
+    state, preroll, ptt_frames, wake_at, heard = "idle", deque(maxlen=4), [], 0.0, False
+    keys.start()
+    monitor.start()
+    started = time.perf_counter()
+    try:
+        with mic:
+            while time.perf_counter() - started < args.seconds:
+                frame = mic.read(timeout=0.5)
+                now = time.perf_counter()
+                for e in keys.poll():
+                    if e.kind == "kill":
+                        print("[killed] kill switch pressed: microphone stopped")
+                        raise SystemExit(0)
+                    if args.no_ptt:
+                        continue
+                    if e.kind == "down":
+                        state, ptt_frames = "ptt", list(preroll)
+                        print("[listening] hold-to-talk: speak, then release the key")
+                    elif e.kind == "up" and state == "ptt":
+                        state = "idle"
+                        if not e.valid:
+                            print(f"  (held {e.held_s:.2f}s: a tap or shortcut, not talking)")
+                        elif not ptt_frames:
+                            print("  (no audio)")
+                        else:
+                            clip = np.concatenate(ptt_frames)
+                            speech = speech_seconds(check_vad, clip)
+                            if speech < config.VAD_MIN_SPEECH_S:
+                                print(f"  (no speech heard in {len(clip) / config.SAMPLE_RATE:.1f}s of audio)")
+                            else:
+                                submit(clip, now, "ptt")
+                if frame is None:
+                    continue
+                if state == "ptt":
+                    ptt_frames.append(frame)
+                    if len(ptt_frames) * config.FRAME_MS / 1000 >= config.PTT_MAX_S:
+                        print(f"  (reached the {config.PTT_MAX_S:.0f}s limit)")
+                        state = "idle"
+                        submit(np.concatenate(ptt_frames), now, "ptt")
+                elif state == "wake":
+                    for e in segmenter.feed(frame):
+                        if e.kind == "start":
+                            heard = True
+                            print("[listening] speech detected")
+                        elif e.kind == "end":
+                            state = "idle"
+                            wake.reset()
+                            submit(e.clip, now, "wake")
+                    if state == "wake" and not heard and now - wake_at > config.WAKE_NO_SPEECH_S:
+                        print(f"  (nothing heard for {config.WAKE_NO_SPEECH_S:.1f}s after the wake word, going back to sleep)")
+                        state = "idle"
+                        wake.reset()
+                else:
+                    preroll.append(frame)
+                    if wake:
+                        t0 = time.perf_counter()
+                        result = wake.process(frame)
+                        monitor.add_timing("wake word per 80ms frame", time.perf_counter() - t0)
+                        if result.rejected:
+                            print(f'  (wake candidate rejected: the check heard "{result.heard}")')
+                        if result.triggered:
+                            state, wake_at, heard = "wake", now, False
+                            segmenter.reset()
+                            print(f"[wake] \"{args.word.replace('_', ' ')}\" (score {result.score:.2f}) -> listening")
+            for f in pending:
+                f.result(timeout=30)
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        keys.stop()
+        monitor.stop()
+        router.close()
+    print("\n--- report ---")
+    print(f"turns: {counts['ptt']} hold-to-talk, {counts['wake']} wake word   |   mic overflows {mic.overflows}, dropped {mic.dropped}")
+    print(monitor.report())
     return 0
 
 
@@ -375,7 +777,8 @@ def main(argv: list[str] | None = None) -> int:
     stt = add("stt", cmd_stt, mic=True, fixtures=True, model=True)
     stt.add_argument("--seconds", type=float, default=60.0)
     stt.add_argument("--model", default=config.WHISPER_MODEL)
-    stt.add_argument("--stress", action="store_true", help="keep Whisper busy the whole time to test the mic for glitches")
+    stt.add_argument("--stress", action="store_true", help="keep local Whisper busy the whole time to test the mic for glitches")
+    stt.add_argument("--provider", choices=["auto", "groq", "local"], default=config.STT_PROVIDER)
     bench = add("bench", cmd_bench, fixtures=True, model=True)
     bench.add_argument("--models", nargs="+", default=["tiny.en", "base.en", "small.en"])
     bench.add_argument("--repeats", type=int, default=3)
@@ -387,6 +790,31 @@ def main(argv: list[str] | None = None) -> int:
     say.add_argument("--engine", choices=["piper", "windows"], default="piper")
     say.add_argument("--repeat", type=int, default=1)
     add("voices", cmd_voices).add_argument("--speaker", default=config.SPEAKER_DEVICE)
+    add("keys", cmd_keys).add_argument("--ptt", default=config.PTT_KEY, help="hold-to-talk key (pynput name, e.g. ctrl_r, f9)")
+    wk = add("wake", cmd_wake, mic=True)
+    wk.add_argument("--word", default=config.WAKEWORD_MODEL, help="hey_orbit (custom) | hey_mycroft | hey_jarvis | alexa")
+    wk.add_argument("--threshold", type=float, default=None, help="default: the one chosen when the word was trained")
+    wk.add_argument("--seconds", type=float, default=120.0)
+    ls = add("listen", cmd_listen, mic=True, model=True)
+    ls.add_argument("--model", default=config.WHISPER_MODEL)
+    ls.add_argument("--word", default=config.WAKEWORD_MODEL)
+    ls.add_argument("--ptt", default=config.PTT_KEY)
+    ls.add_argument("--seconds", type=float, default=300.0)
+    ls.add_argument("--no-wake", action="store_true", help="hold-to-talk only")
+    ls.add_argument("--no-ptt", action="store_true", help="wake word only")
+    ls.add_argument("--provider", choices=["auto", "groq", "local"], default=config.STT_PROVIDER)
+    ls.add_argument("--wav", help="test mode: replay this 16 kHz mono WAV in real time instead of using the microphone")
+    tw = add("train-wake", cmd_train_wake)
+    tw.add_argument("--pos", type=int, default=60, help="synthetic 'hey orbit' clips per voice")
+    tw.add_argument("--neg", type=int, default=170, help="synthetic other-speech clips per voice")
+    tw.add_argument("--seed", type=int, default=1)
+    tw.add_argument("--folds", type=int, default=5, help="hold-out folds for testing on your own recordings")
+    tw.add_argument("--fresh", action="store_true", help="regenerate the cached synthetic training data")
+    rw = add("record-wake", cmd_record_wake, mic=True)
+    rw.add_argument("--count", type=int, default=25, help="how many times you say 'hey orbit'")
+    rw.add_argument("--talk", type=float, default=0.0, help="also record this many seconds of normal talking / TV as negatives")
+    sc = add("sttcheck", cmd_sttcheck, fixtures=True, model=True)
+    sc.add_argument("--model", default=config.WHISPER_MODEL)
 
     args = parser.parse_args(argv)
     try:

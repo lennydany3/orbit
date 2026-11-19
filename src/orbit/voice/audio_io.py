@@ -122,6 +122,54 @@ class MicStream:
         self.stop()
 
 
+class FileMic:
+    """Test stand-in for MicStream: replays a 16 kHz mono WAV in real time (silence after the end), 80 ms per frame."""
+
+    def __init__(self, path):
+        import wave
+
+        with wave.open(str(path)) as w:
+            if (w.getframerate(), w.getnchannels(), w.getsampwidth()) != (config.SAMPLE_RATE, 1, 2):
+                raise ValueError("--wav must be a 16 kHz mono 16-bit WAV")
+            self._data = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+        self.device, self.label = None, f"replaying {path} ({len(self._data) / config.SAMPLE_RATE:.0f}s) instead of a microphone"
+        self.overflows = self.dropped = self.frames = 0
+        self._pos, self._next = 0, 0.0
+
+    def start(self) -> None:
+        import time
+
+        self._next = time.perf_counter()
+
+    def read(self, timeout: float = 1.0) -> np.ndarray | None:
+        import time
+
+        time.sleep(max(0.0, self._next - time.perf_counter()))
+        self._next += config.FRAME_MS / 1000
+        frame = np.zeros(config.FRAME_SAMPLES, dtype=np.int16)
+        chunk = self._data[self._pos:self._pos + config.FRAME_SAMPLES]
+        frame[:len(chunk)] = chunk
+        self._pos += config.FRAME_SAMPLES
+        self.frames += 1
+        return frame
+
+    def pause(self) -> None:
+        pass
+
+    def resume(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def __enter__(self) -> "FileMic":
+        self.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.stop()
+
+
 class Speaker:
     """Plays float32/int16 mono audio on the chosen output device."""
 

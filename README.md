@@ -45,6 +45,26 @@ Two ways to use a browser, chosen with `--browser-mode` (or `ORBIT_BROWSER_MODE`
 
 "open my github" opens `github.com/lennydany3` (change with `ORBIT_GITHUB_USER`); "open github" opens the site. Words like "in brave" are ignored. Only http(s) links are opened. Clicking a button whose text looks risky (buy, send, delete, pay...) asks you first. Web search uses DuckDuckGo.
 
+## Voice (in progress) and privacy
+
+Voice lives in `src/orbit/voice/` (test bench: `python -m orbit.voice.run --help`).
+
+- **Always local:** microphone capture, wake word, voice-activity detection, hotkeys and the spoken reply (Piper). While idle, nothing is recorded, saved or sent anywhere.
+- **Speech-to-text goes to Groq after activation.** Only when the wake word or the hold-to-talk key fires, the VAD-trimmed speech clip (16 kHz mono WAV) of that one turn is sent to Groq (`whisper-large-v3-turbo`). Empty or silent clips are never sent, and the agent does not run on an empty transcript.
+- **Fallback and offline mode:** `ORBIT_STT=auto` (default) tries Groq first and uses local Whisper if there is no key, no internet, no answer within 8 s, or HTTP 429; every fallback is printed with its reason. `ORBIT_STT=local` never contacts Groq (fully offline); `ORBIT_STT=groq` never falls back. Each turn shows which provider handled it.
+- **API key:** read only from the `GROQ_API_KEY` environment variable (`setx GROQ_API_KEY "<key>"`, then open a new terminal). It is never written to a file or a log.
+- **No audio is saved by default.** The only recordings are the test clips you make yourself with `python -m orbit.voice.run record` (git-ignored).
+- **Models:** `python -m orbit.voice.fetch_models ...` is the only thing that downloads voice models, and only when you run it.
+
+### Wake word: "Hey Orbit"
+
+openWakeWord ships no "Orbit" model, so `hey_orbit` is trained here, offline, in about 6 minutes: `python -m orbit.voice.run train-wake` (needs the feature models: `fetch_models wakeword hey_mycroft`). It learns from "hey orbit" spoken by your Piper voices at many speeds, with noise and room echo, against ordinary speech and look-alikes ("hey mycroft", "a little bit"). The result is `models/openwakeword/hey_orbit.npz` (not committed).
+
+- **Train it on your own voice** for much better results: `python -m orbit.voice.run record-wake --device "Microphone Array" --count 25 --talk 60`, then `train-wake` again. These clips are saved locally in `tests/voice/fixtures_wake/` (git-ignored).
+- **Every candidate is double-checked** by a quick local Whisper pass (`tiny.en`) that must hear "orbit" in the last 2.4 s, so look-alikes are rejected. The wake-word classifier itself runs all the time at under 1% CPU; the check runs only on candidates.
+- **Honest numbers (V4, synthetic voices only):** on Windows David and Zira at three speeds, which were not used for training, 22 of 24 "hey orbit" clips woke it and 0 of 84 other clips did. Real rooms, TV and your voice are a different test: use `python -m orbit.voice.run wake` to measure false wakes yourself.
+- Pre-trained stand-ins still work: `--word hey_mycroft` (or `alexa`, `hey_jarvis`; note "Jarvis" alone triggers `hey_jarvis`).
+
 ## Known limits (honest list)
 
 - A phone or speaker only shows up as a Spotify device while its Spotify app is open or was used recently (Echo speakers can be slow to wake and sometimes need a second try). Spotify's own "transfer" call sometimes answers HTTP 500 for this PC; Orbit then restarts the current song on the target device instead, and says so.

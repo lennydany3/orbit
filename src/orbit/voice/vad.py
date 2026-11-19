@@ -44,6 +44,16 @@ class SileroVAD:
         return float(out[0, 0])
 
 
+def speech_seconds(vad: SileroVAD, clip: np.ndarray, threshold: float = config.VAD_START_THRESHOLD) -> float:
+    """How much of a clip is speech. Used to skip hold-to-talk recordings that are only silence (Whisper invents text for silence)."""
+    vad.reset()
+    voiced = 0
+    for i in range(0, len(clip) - config.VAD_WINDOW + 1, config.VAD_WINDOW):
+        voiced += vad(clip[i:i + config.VAD_WINDOW].astype(np.float32) / 32768.0) >= threshold
+    vad.reset()
+    return voiced * config.VAD_WINDOW / config.SAMPLE_RATE
+
+
 @dataclass
 class VadEvent:
     kind: str                          # "start" | "end" | "ignored"
