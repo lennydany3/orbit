@@ -42,6 +42,18 @@ def _site_url(site: str, mine: bool) -> str:
 _VERB = r"(?:please )?(?:open|go to|visit|launch)"
 
 
+# Questions about the clock: "what's the time now", "what time is it", "tell me the date", "what day is it", "time and date"
+_ASK = r"(?:(?:what(?:'s|s| is)?|tell me|give me|show me|say|do you know)\s+)?"
+_NOW = r"(?:\s+(?:is it|now|right now|currently|at the moment|today|is today))*"
+_WHAT_TIME = re.compile(rf"^{_ASK}(?:the |a )?(?:current |exact )?(?P<what>time and date|date and time|time){_NOW}$", re.I)
+_WHAT_DATE = re.compile(rf"^{_ASK}(?:the |today's |todays )?(?:current )?(?:date|day){_NOW}$", re.I)
+
+
+def _clock_part(m: re.Match) -> str:
+    what = (m["what"] or "").lower()
+    return "both" if " and " in what else "time"
+
+
 # --- Spotify devices: "switch playback to echo with 30% volume" = move playback, then set that device's volume ---
 _DEV = r"(?P<dev>(?!(?:again|it|that|this|next|previous|prev|something|music|the music)\b)(?![\w .'-]*\b(?:monitor|screen|display|half|side)\b)[\w .'-]+?)"
 _DEV_TAIL = (
@@ -199,6 +211,9 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
      lambda m: ("os_quit_app", {"name": m["t"].strip()})),
     ("close-window", re.compile(r"^(?:please )?close\s+(?:the )?(?!(?:it|that|this|them|window|app|tab|both|all|everything|everything i opened|them all|all of them|both of them)$)(?P<t>[\w .+&'-]+?)(?: (?:app|window))?$", re.I),
      lambda m: ("os_close_window", {"title": m["t"].strip().title()})),
+    # Questions about the clock: answered from the PC clock, never by the model (it only guesses the time).
+    ("what-time", _WHAT_TIME, lambda m: ("os_get_time", {"part": _clock_part(m)})),
+    ("what-date", _WHAT_DATE, lambda m: ("os_get_time", {"part": "date"})),
     ("mute", re.compile(r"^(?P<un>un)?mute(?: the (?:sound|volume|audio))?$", re.I),
      lambda m: ("os_set_mute", {"muted": not m["un"]})),
     ("pause", re.compile(rf"^(?:pause|stop){_MUSIC}$", re.I),

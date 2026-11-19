@@ -1,5 +1,6 @@
 """OS layer tools: launch apps, windows, media keys, volume. Each action is verified by reading the state back."""
 import time
+from datetime import datetime
 from typing import Callable, Literal
 
 from pydantic import BaseModel, Field
@@ -444,6 +445,26 @@ def verify_set_mute(p: MuteParams, r: ToolResult) -> VerifyResult:
     return VerifyResult(now == p.muted, f"mute reads back as {now}")
 
 
+# ---------------------------------------------------------------- clock
+class TimeParams(BaseModel):
+    part: Literal["time", "date", "both"] = Field(default="time", description="time = the time now, date = today's date and weekday, both = all of it")
+
+
+def describe_now(now: datetime, part: str = "time") -> str:
+    clock = f"{now.hour % 12 or 12}:{now.minute:02d} {'AM' if now.hour < 12 else 'PM'}"
+    day = f"{now:%A}, {now:%B} {now.day}, {now.year}"
+    if part == "date":
+        return f"Today is {day}."
+    if part == "both":
+        return f"It's {clock} on {day}."
+    return f"It's {clock}."
+
+
+def get_time(p: TimeParams) -> ToolResult:
+    """The PC's own clock (local time zone). Nothing to verify: it only reads."""
+    return ToolResult.success(describe_now(datetime.now(), p.part))
+
+
 # ---------------------------------------------------------------- registration
 def register_os_tools(registry: Registry) -> None:
     def add(name, description, params, run, verify):
@@ -478,4 +499,6 @@ def register_os_tools(registry: Registry) -> None:
     add("os_set_volume", "Set the system volume to a percent from 0 to 100.", SetVolumeParams, set_volume, verify_set_volume)
     add("os_change_volume", "Turn the system volume up or down by a number of percent.", ChangeVolumeParams, change_volume, verify_change_volume)
     add("os_get_volume", "Read the current system volume and mute state.", NoParams, get_volume, read_only_verify)
+    add("os_get_time", "Tell the current time, and/or today's date and weekday, from the PC clock. Use for any question about the time, date or day.",
+        TimeParams, get_time, read_only_verify)
     add("os_set_mute", "Mute or unmute the system sound.", MuteParams, set_mute, verify_set_mute)

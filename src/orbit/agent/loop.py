@@ -31,6 +31,7 @@ SYSTEM_PROMPT = (
     "\"put it on my phone at 20%\" -> api_spotify_transfer(device=<phone name>, volume=20); "
     "\"close the notes\" -> os_close_window(title=\"Notepad\"); \"turn it down to 20\" -> os_set_volume(level=20); "
     "\"what is playing\" -> os_media_status(); "
+    "\"what time is it\" -> os_get_time(part=\"time\"); "
     "\"move brave to my secondary monitor\" -> os_move_window(title=\"Brave\", monitor=\"secondary\"); "
     "\"put spotify on the left half\" -> os_arrange_window(title=\"Spotify\", action=\"left\")."
 )
