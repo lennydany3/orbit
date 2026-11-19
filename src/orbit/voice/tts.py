@@ -63,6 +63,12 @@ class StreamingTTS:
     def sentences(self, text: str) -> Iterator[np.ndarray]:
         raise NotImplementedError
 
+    emotion = "neutral"
+
+    def set_emotion(self, emotion: str | None) -> None:
+        """How the next reply should sound ("proud", "caring", ...). Unknown names mean neutral."""
+        self.emotion = emotion if emotion in config.EMOTION_STYLE else "neutral"
+
     def stop(self) -> None:
         self._stop.set()
         self._run.set()                                # release a paused speaker so it can notice the stop
@@ -179,6 +185,13 @@ class PiperTTS(StreamingTTS):
     def sentences(self, text: str) -> Iterator[np.ndarray]:
         return self.synthesize(text)
 
+    def set_emotion(self, emotion: str | None) -> None:
+        super().set_emotion(emotion)
+        from piper import SynthesisConfig
+
+        pace = config.EMOTION_STYLE[self.emotion][0]                # the offline voice can only change its speed
+        self._syn = SynthesisConfig(length_scale=self._length_scale / pace)
+
     def synthesize(self, text: str, **style) -> Iterator[np.ndarray]:
         """Int16 mono audio, one array per sentence. No sound is played (used for tests, timing and wake-word training).
         `style` may override length_scale (speed), noise_scale and noise_w_scale to vary how the voice sounds."""
@@ -208,11 +221,14 @@ class SarvamTTS(StreamingTTS):
         self._pool = ThreadPoolExecutor(max_workers=prefetch, thread_name_prefix="tts-cloud")
         self._init_player(device, reference)
 
-    def fetch(self, sentence: str) -> np.ndarray:
+    def fetch(self, sentence: str, emotion: str | None = None) -> np.ndarray:
         """One sentence -> int16 mono audio at self.sample_rate. No sound is played."""
-        data = self.session.post("/text-to-speech", json={
-            "text": sentence, "target_language_code": self.language, "speaker": self.speaker, "model": self.model,
-            "speech_sample_rate": self.sample_rate, "pace": self.pace})
+        pace_mult, temperature = config.EMOTION_STYLE.get(emotion or "neutral", config.EMOTION_STYLE["neutral"])
+        body = {"text": sentence, "target_language_code": self.language, "speaker": self.speaker, "model": self.model,
+                "speech_sample_rate": self.sample_rate, "pace": round(min(2.0, max(0.5, self.pace * pace_mult)), 2)}
+        if temperature is not None:
+            body["temperature"] = temperature                       # how varied and expressive the delivery is (0..1)
+        data = self.session.post("/text-to-speech", json=body)
         try:
             raw = base64.b64decode(data["audios"][0])
             with wave.open(io.BytesIO(raw)) as w:
@@ -229,12 +245,12 @@ class SarvamTTS(StreamingTTS):
         return np.ascontiguousarray(audio)
 
     def sentences(self, text: str) -> Iterator[np.ndarray]:
-        parts = split_sentences(text)
+        parts, emotion = split_sentences(text), self.emotion      # the emotion is fixed for the whole reply
         todo, pending = iter(parts), deque()
 
         def refill() -> None:
             while len(pending) < self.prefetch and (part := next(todo, None)) is not None:
-                pending.append(self._pool.submit(self.fetch, part))
+                pending.append(self._pool.submit(self.fetch, part, emotion))
 
         refill()
         while pending:
@@ -297,6 +313,11 @@ class FallbackTTS:
     def resume(self) -> None:
         if self.supports_pause:
             self.engines[0].resume()
+
+    def set_emotion(self, emotion: str | None) -> None:
+        for engine in self.engines:
+            if hasattr(engine, "set_emotion"):
+                engine.set_emotion(emotion)
 
     @property
     def reference(self):

@@ -50,7 +50,8 @@ def spotify_status(registry: Registry) -> str:
     return f"Spotify: OFF ({spotify_auth.CLIENT_ID_ENV} is not set), so Spotify requests will not work."
 
 
-def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: bool = False, llm_provider: str | None = None) -> Agent:
+def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: bool = False, llm_provider: str | None = None,
+                friend: bool = True) -> Agent:
     logger = setup_logging()
     log = ActionLog(logger=logger)
     registry = Registry()
@@ -60,7 +61,8 @@ def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: boo
     if fake_tools:
         register_fake_tools(registry)  # test tools from Step 1; off by default so the model isn't tempted to use them
     llm, description = make_llm(llm_provider, ollama_model=model) if use_llm else (None, "rules only")
-    agent = Agent(llm, registry, Router(log), Safety(), log)
+    chat_llm = llm.with_temperature(config.CHAT_TEMPERATURE) if hasattr(llm, "with_temperature") else llm
+    agent = Agent(llm, registry, Router(log), Safety(), log, chat_llm=chat_llm, friend_mode=friend and config.FRIEND_MODE)
     agent.llm_description = description   # shown in the start-up banner
     return agent
 
@@ -86,6 +88,7 @@ def _main(argv: list[str] | None) -> int:
     parser.add_argument("--model", default=config.MODEL, help=f"Ollama model, when the local model is used (default {config.MODEL})")
     parser.add_argument("--llm", choices=["auto", "groq", "ollama"], default=None,
                         help="language model: groq = cloud (needs GROQ_API_KEY), ollama = local, auto = groq if a key is set (default)")
+    parser.add_argument("--no-friend", action="store_true", help="PC commands only: no friendly chat (same as ORBIT_FRIEND=0)")
     parser.add_argument("--voice", action="store_true", help="talk to Orbit: hold Right Ctrl or say the wake word (all local)")
     parser.add_argument("--mic", default=None, help="with --voice: microphone index or part of its name (default: ORBIT_MIC / Windows default)")
     parser.add_argument("--no-wake", action="store_true", help="with --voice: hold-to-talk only, no wake word")
@@ -98,7 +101,8 @@ def _main(argv: list[str] | None) -> int:
     browser_session.use(args.browser)
     config.BROWSER_MODE = args.browser_mode
     try:
-        agent = build_agent(use_llm=not args.no_llm, model=args.model, fake_tools=args.fake_tools, llm_provider=args.llm)
+        agent = build_agent(use_llm=not args.no_llm, model=args.model, fake_tools=args.fake_tools, llm_provider=args.llm,
+                            friend=not args.no_friend)
     except LLMError as e:
         print(f"Cannot start the language model: {e}")
         return 2

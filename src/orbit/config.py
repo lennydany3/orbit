@@ -12,8 +12,16 @@ APP_NAME = "Orbit"  # the only place the product name lives: rename here.
 LLM_PROVIDER = os.environ.get("ORBIT_LLM", "auto").lower()        # auto | groq | ollama
 GROQ_MODEL = os.environ.get("ORBIT_GROQ_MODEL", "openai/gpt-oss-120b")   # any Groq model that supports tool calling (list: console.groq.com/docs/models)
 GROQ_REASONING = os.environ.get("ORBIT_GROQ_REASONING", "low")           # gpt-oss models think before answering: low = fastest (low | medium | high)
+GROQ_FALLBACK_MODEL = os.environ.get("ORBIT_GROQ_FALLBACK_MODEL", "openai/gpt-oss-20b")   # used once when the main model hits its rate limit ("" = never)
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 GROQ_TIMEOUT_S = 30
+
+# --- Friend mode: chat with Orbit about your day, doubts, roasts... (anything that is not a PC command) ---
+FRIEND_MODE = os.environ.get("ORBIT_FRIEND", "1").lower() not in ("0", "off", "false", "no")
+USER_NAME = os.environ.get("ORBIT_USER_NAME", "")    # optional: what Orbit calls you in its head ("Lenny"); it learns your name in chat anyway
+CHAT_TEMPERATURE = 0.8      # higher than for commands: a friend should not repeat itself
+MAX_CHAT_TURNS = 8          # earlier chat messages Orbit remembers (kept small: Groq's free tier counts tokens per minute)
+MAX_CHAT_CHARS = 3500
 
 # --- LLM (local, via Ollama) ---
 MODEL = "qwen2.5:7b"

@@ -3,6 +3,7 @@
 The agent keeps its history in Ollama's message shape (tool results carry `tool_name`, tool calls carry no id and dict arguments).
 OpenAI-style APIs want ids and JSON-string arguments, so `to_openai_messages` translates on the way out.
 """
+import copy
 import json
 import os
 import time
@@ -50,13 +51,20 @@ def _error_text(resp: httpx.Response) -> str:
 class GroqLLM:
     def __init__(self, model: str = config.GROQ_MODEL, api_key: str | None = None, temperature: float = config.TEMPERATURE,
                  timeout: float = config.GROQ_TIMEOUT_S, base_url: str = config.GROQ_BASE_URL,
-                 client: httpx.Client | None = None):
+                 client: httpx.Client | None = None, fallback_model: str | None = None):
         key = api_key or config_key()
         if not key:
             raise LLMError("GROQ_API_KEY is not set. Put it in the .env file (see .env.example) and start Orbit again.")
         self.model, self.temperature = model, temperature
+        self.fallback_model = config.GROQ_FALLBACK_MODEL if fallback_model is None else fallback_model
         # One long-lived client: the TLS connection is reused, so each request skips the handshake.
         self._client = client or httpx.Client(base_url=base_url, timeout=timeout, headers={"Authorization": f"Bearer {key}"})
+
+    def with_temperature(self, temperature: float) -> "GroqLLM":
+        """The same model and connection with a different temperature (chat wants more variety than tool calls)."""
+        other = copy.copy(self)
+        other.temperature = temperature
+        return other
 
     def warm_up(self) -> float:
         """Open the connection now (there is no model to load in the cloud). Raises LLMError if Groq cannot be reached."""
@@ -71,12 +79,13 @@ class GroqLLM:
 
     def chat(self, messages: list[dict], tools: list[dict]) -> LLMResponse:
         body = {"model": self.model, "messages": to_openai_messages(messages), "temperature": self.temperature}
-        if self.model.startswith("openai/gpt-oss") and config.GROQ_REASONING:
-            body["reasoning_effort"] = config.GROQ_REASONING     # these models think first; "low" keeps answers fast
         if tools:
             body["tools"], body["tool_choice"] = tools, "auto"
         start = time.perf_counter()
-        resp = self._post(body)
+        can_fall_back = bool(self.fallback_model) and self.fallback_model != self.model
+        resp = self._post(body, wait_if_limited=not can_fall_back)
+        if resp.status_code == 429 and can_fall_back:
+            resp = self._post(dict(body, model=self.fallback_model))     # the big model is out of tokens this minute: ask the small one now
         if resp.status_code == 400 and tools:
             failed = _failed_generation(resp)
             if failed is not None:                # the model wrote a malformed tool call: hand the text to the agent's rescue parser
@@ -99,13 +108,15 @@ class GroqLLM:
             calls.append(ToolCall(name=fn.get("name", ""), arguments=dict(args)))
         return LLMResponse(content=message.get("content") or "", tool_calls=calls, elapsed_s=time.perf_counter() - start)
 
-    def _post(self, body: dict) -> httpx.Response:
+    def _post(self, body: dict, wait_if_limited: bool = True) -> httpx.Response:
+        if body["model"].startswith("openai/gpt-oss") and config.GROQ_REASONING:
+            body = dict(body, reasoning_effort=config.GROQ_REASONING)   # these models think first; "low" keeps answers fast
         for attempt in (1, 2):
             try:
                 resp = self._client.post("/chat/completions", json=body)
             except httpx.HTTPError as e:
                 raise LLMError(f"Cannot reach Groq ({e}). Check your internet connection.") from e
-            if resp.status_code == 429 and attempt == 1:      # rate limited: wait the (short) time Groq asks for, once
+            if resp.status_code == 429 and attempt == 1 and wait_if_limited:      # rate limited: wait the (short) time Groq asks for, once
                 wait = _retry_after(resp)
                 if wait is not None and wait <= 10:
                     time.sleep(wait)

@@ -49,6 +49,7 @@ def registry() -> Registry:
 def make_agent(registry, logs):
     def _make(llm=None, confirm=lambda q: False, **kw) -> Agent:
         log = lambda kind, msg: logs.append((kind, msg))  # noqa: E731
+        kw.setdefault("friend_mode", False)   # these tests script the command model's replies; friend mode has its own tests
         return Agent(llm, registry, Router(log), Safety(confirm=confirm), log, **kw)
 
     return _make

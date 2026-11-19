@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from .. import config
 from ..llm.base import LLM, LLMError
 from ..tools.base import Registry, ToolResult
-from . import context, rescue, rules
+from . import context, friend, rescue, rules
 from .router import Log, Router
 from .safety import Safety
 
@@ -71,8 +71,16 @@ class Agent:
         max_steps: int = config.MAX_STEPS,
         max_failures: int = config.MAX_CONSECUTIVE_FAILURES,
         facts_provider: context.FactsProvider | None = None,
+        chat_llm: LLM | None = None,
+        friend_mode: bool = config.FRIEND_MODE,
     ):
         self.llm = llm
+        self.chat_llm = chat_llm or llm       # the model for friend-mode conversation (a warmer temperature than the command model)
+        self.friend_mode = friend_mode
+        self.chat_turns: list[list[dict]] = []  # the friend conversation so far: [user, assistant] pairs
+        self.last_kind = "action"              # what the last reply was: "chat" (friend mode) or "action" (a PC command)
+        self.last_emotion = "neutral"          # how a chat reply should sound (the voice reads this)
+        self._in_chat = False                  # were we just chatting? then a vague follow-up ("and then?") is chat too
         self.registry = registry
         self.router = router
         self.safety = safety
@@ -96,6 +104,7 @@ class Agent:
     def handle(self, text: str) -> str:
         """Run one user request and return the final reply."""
         start = time.perf_counter()
+        self.last_kind, self.last_emotion = "action", "neutral"
         try:
             return self._handle(text)
         except LLMError as e:
@@ -107,6 +116,8 @@ class Agent:
     def forget(self) -> None:
         """Clear the conversation memory."""
         self.turns.clear()
+        self.chat_turns.clear()
+        self._in_chat = False
         self.last_request = ""
         self.last_subject = None
         self.last_closed = None
@@ -157,6 +168,7 @@ class Agent:
     def _handle_one(self, text: str, previous: str) -> str:
         """One request: a fast rule if one fits, otherwise the model."""
         user = [{"role": "user", "content": text}]
+        was_chatting, self._in_chat = self._in_chat, False
         m = self._rule_for(text)
         if m:
             self.log("rule", f"'{m.rule}' matched, no model call")
@@ -172,12 +184,49 @@ class Agent:
         if self.llm is None:
             self._part_failed = True
             return "No rule matches that, and the model is switched off (--no-llm)."
+        if not m and self.friend_mode and self._wants_chat(text, was_chatting):
+            return self._chat(text)
         self._ungrounded = False
         reply = self._llm_loop(text, previous)
         if failure and self._ungrounded:
             # The rule said what was wrong (nothing on the page is called that); the model only made something up.
             self.turns[-1][-1]["content"] = failure
             return failure
+        return reply
+
+    # ---- friend mode: conversation instead of PC commands ----
+    def _wants_chat(self, text: str, was_chatting: bool) -> bool:
+        """Is this talking rather than a command? Quick checks first; a tiny model call only when they cannot tell."""
+        guess = friend.looks_like(text)
+        if guess is None and _is_action_request(text):
+            guess = "action"
+        if guess is None and was_chatting:
+            guess = "chat"                       # "and then?", "really?", "why though" right after chatting
+        if guess is None:
+            guess = self._classify(text)
+        self.log("friend", f"{guess}: '{text[:50]}'")
+        return guess == "chat"
+
+    def _classify(self, text: str) -> str:
+        try:
+            resp = self.llm.chat([{"role": "system", "content": friend.CLASSIFIER_PROMPT}, {"role": "user", "content": text}], [])
+        except LLMError:
+            return "action"                      # if the model is unreachable the normal path reports it
+        return friend.parse_classification(resp.content)
+
+    def _chat(self, text: str) -> str:
+        history = [m for pair in self.chat_turns for m in pair]
+        messages = [{"role": "system", "content": friend.persona()}, *history, {"role": "user", "content": text}]
+        resp = self.chat_llm.chat(messages, [])
+        emotion, reply = friend.split_emotion(resp.content)
+        if not reply:
+            emotion, reply = "caring", "Sorry, I zoned out for a second. Say that again?"
+        self.log("friend", f"replied in {resp.elapsed_s:.1f}s, feeling {emotion}")
+        self.chat_turns.append([{"role": "user", "content": text}, {"role": "assistant", "content": f"[{emotion}] {reply}"}])
+        del self.chat_turns[: max(0, len(self.chat_turns) - config.MAX_CHAT_TURNS)]
+        while len(self.chat_turns) > 1 and sum(len(m["content"]) for p in self.chat_turns for m in p) > config.MAX_CHAT_CHARS:
+            self.chat_turns.pop(0)
+        self.last_kind, self.last_emotion, self._in_chat = "chat", emotion, True
         return reply
 
     def _rule_for(self, text: str) -> rules.RuleMatch | None:

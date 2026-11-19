@@ -93,6 +93,24 @@ FOLLOW_UP_QUESTION_S = 6.0                       # when Orbit asks YOU a questio
 BARGE_IN = True                                  # say the wake word while Orbit is talking: it stops and listens
 AEC = True                                       # echo cancellation for that (only engages when it measurably helps; headphones need none)
 
+# --- Friend mode: talking with Orbit (see agent/friend.py) ---
+CHAT_SPOKEN_MAX_SENTENCES = 5                    # a chat reply is spoken almost whole (command replies stay at 2 sentences)
+CHAT_SPOKEN_MAX_CHARS = 520
+FOLLOW_UP_CHAT_S = 8.0                           # after a chat reply, the conversation stays open this long without the wake word
+# How each emotion is spoken: (pace multiplier, expressiveness 0..1). Sarvam's bulbul:v3 exposes exactly these two knobs
+# (pace and temperature); the rest of the feeling comes from the words themselves. Piper only uses the pace.
+EMOTION_STYLE = {
+    "neutral": (1.00, None),                     # None = Sarvam's default
+    "happy": (1.05, 0.80),
+    "excited": (1.15, 0.95),
+    "proud": (1.00, 0.80),
+    "caring": (0.92, 0.65),
+    "sad": (0.88, 0.60),
+    "teasing": (1.06, 0.95),
+    "calm": (0.95, 0.55),
+    "serious": (0.95, 0.40),
+}
+
 # --- Not acting on background sound ---
 FOLLOW_UP_WHILE_MEDIA = False                    # False: while music / a video plays, the no-wake follow-up stays closed (lyrics are not commands)
 

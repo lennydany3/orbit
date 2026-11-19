@@ -206,3 +206,37 @@ def test_make_tts_puts_sarvam_first_only_when_a_key_exists(monkeypatch):
     assert tts.make_tts(provider="auto", log=lambda m: None).engines == []
     monkeypatch.setenv("SARVAM_API_KEY", "k")
     assert [e.name for e in tts.make_tts(provider="auto", log=lambda m: None).engines] == ["sarvam"]
+
+
+def test_emotion_shapes_the_sarvam_request_pace_and_expressiveness():
+    bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"audios": [wav_b64(np.ones(2205))]})
+
+    engine = make_tts_engine(handler)
+    engine.fetch("Okay.")                                           # no emotion: Sarvam's own defaults for expressiveness
+    engine.fetch("Wow!", "excited")
+    engine.fetch("I'm here.", "caring")
+    assert "temperature" not in bodies[0] and bodies[0]["pace"] == 1.0
+    assert bodies[1]["pace"] > 1.0 and bodies[1]["temperature"] > 0.9
+    assert bodies[2]["pace"] < 1.0 and 0 < bodies[2]["temperature"] <= 1
+
+
+def test_the_emotion_is_fixed_for_the_whole_reply_and_unknown_names_are_neutral():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content)["pace"])
+        return httpx.Response(200, json={"audios": [wav_b64(np.ones(2205))]})
+
+    engine = make_tts_engine(handler)
+    engine.set_emotion("excited")
+    chunks = engine.sentences("One. Two.")
+    next(chunks)
+    engine.set_emotion("sad")                                       # changed while the reply is already being fetched
+    list(chunks)
+    assert len(set(seen)) == 1 and seen[0] > 1.0
+    engine.set_emotion("not-a-feeling")
+    assert engine.emotion == "neutral"

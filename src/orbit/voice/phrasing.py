@@ -23,6 +23,11 @@ _RAW_TOOL_CALL = re.compile(r"^\s*(?:[a-z]+_[a-z_]+\s*[\{\(].*[\}\)]|\{.*\}|```.
 _BROWSER_SUFFIX = re.compile(r"\s+[-–|]\s+(Brave|Google Chrome|Chrome|Microsoft Edge|Mozilla Firefox)$", re.I)
 
 
+def strip_emoji(text: str) -> str:
+    """Emoji would be read out loud as their names (or skipped awkwardly): drop them from what is spoken."""
+    return re.sub(r"[ \t]+", " ", _EMOJI.sub(" ", text or "")).strip()
+
+
 def clean_title(title: str, limit: int = 60) -> str:
     """A window or page title as you would say it: no emoji, no "(204)" notification count, no browser name, not too long."""
     t = _EMOJI.sub(" ", title or "")

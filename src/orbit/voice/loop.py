@@ -26,7 +26,7 @@ import numpy as np
 
 from . import config
 from .aec import EchoCanceller, ReferenceAligner, ReferenceTimeline
-from .phrasing import Phraser
+from .phrasing import Phraser, strip_emoji
 from .state import State, TurnTimer, VoiceState
 from .summarize import spoken_summary
 from .wakeword import strip_wake_phrase
@@ -166,6 +166,7 @@ class VoiceLoop:
         self.keys, self.wake, self.segmenter, self.check_vad = keys, wake, segmenter, check_vad
         self.follow_up, self.use_ptt, self.wake_name, self.out, self.verbose, self.monitor = follow_up, use_ptt, wake_name, out, verbose, monitor
         self.confirm = VoiceConfirm()
+        self._chat_turn = False                    # was the reply being spoken a friend-mode chat? (it gets a longer follow-up window)
         self._flog = file_log or _file_logger().info
         self._clock = clock
         self.conversational, self.fillers, self.phraser = conversational, fillers, Phraser(rng)
@@ -461,6 +462,13 @@ class VoiceLoop:
         if self.monitor is not None and "text" in self.turn.marks:
             self.monitor.add_timing("agent", self.turn.marks["reply"] - self.turn.marks["text"])
         self.out(f"Orbit: {reply}")                       # the full reply stays in the CLI; a natural, short version is spoken
+        if getattr(self.agent, "last_kind", "action") == "chat":
+            # Friend mode: it is already written to be spoken, so it is not rewritten, and it is spoken (almost) whole, with feeling.
+            emotion = getattr(self.agent, "last_emotion", "neutral")
+            spoken = spoken_summary(strip_emoji(reply), config.CHAT_SPOKEN_MAX_SENTENCES, config.CHAT_SPOKEN_MAX_CHARS)
+            self.out(f"  [feeling] {emotion}")
+            self._speak(spoken, "reply ready", emotion=emotion, chat=True)
+            return
         said = self.phraser.say(reply, self.request_text) if self.conversational else reply
         spoken = spoken_summary(said)
         if spoken != reply:
@@ -478,6 +486,7 @@ class VoiceLoop:
         text = self.phraser.filler(self._fillers_said)
         self._fillers_said += 1
         self.out(f"  [says] {text}")
+        self._set_emotion("neutral")
         self._filler_future = spawn(self.tts.speak, text)
 
     def _finish_filler(self) -> None:
@@ -494,7 +503,14 @@ class VoiceLoop:
         return (self.barge_in_enabled and self.wake is not None and bool(getattr(self.tts, "supports_pause", False))
                 and "orbit" not in text.lower())
 
-    def _speak(self, text: str, reason: str) -> None:
+    def _set_emotion(self, emotion: str) -> None:
+        set_it = getattr(self.tts, "set_emotion", None)
+        if set_it is not None:
+            set_it(emotion)
+
+    def _speak(self, text: str, reason: str, emotion: str = "neutral", chat: bool = False) -> None:
+        self._chat_turn = chat
+        self._set_emotion(emotion)
         self._barge = self._can_barge_in(text)
         if self._barge:
             self._resume_mic()                         # stay open: you may interrupt with the wake word
@@ -542,6 +558,8 @@ class VoiceLoop:
             self.mode, self.heard = "followup", False
             asked = self._last_spoken.rstrip().endswith("?")          # Orbit asked a question: give a real chance to answer it
             self._follow_window = config.FOLLOW_UP_QUESTION_S if asked else config.FOLLOW_UP_S
+            if self._chat_turn:                                       # a conversation: stay open at least as long as for a question
+                self._follow_window = max(self._follow_window, config.FOLLOW_UP_CHAT_S)
             self.st.to(State.FOLLOW_UP, f"listening {self._follow_window:.0f}s for " + ("your answer" if asked else "a follow-up") + ", no wake word needed")
             if asked:
                 self.out("[listening] (Orbit asked a question: just answer, no wake word needed)")
@@ -574,6 +592,7 @@ class VoiceLoop:
         self._pause_mic()
         self.st.to(State.CONFIRMING, "risky action needs a yes")
         self._confirm_step = "ask"
+        self._set_emotion("neutral")
         self.future = spawn(self.tts.speak, spoken)
 
     def _tick_confirming(self, frame) -> None:

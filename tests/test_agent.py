@@ -338,6 +338,7 @@ def test_close_two_things_in_one_sentence(logs):
 def test_a_part_without_a_rule_is_handed_to_the_model_on_its_own(logs):
     """"open spotify and tell me what is playing": the first part is a rule, the second is a small request for the model."""
     agent, done = _chain_agent(logs)
+    agent.friend_mode = False              # (in friend mode "tell me a joke" is a chat, tested in test_friend.py)
     agent.llm = ScriptedLLM(LLMResponse(content="I can look that up once you ask for a specific song."))
     reply = agent.handle("open spotify and tell me a joke")
     assert done == [("open", "Spotify")] and len(agent.llm.calls) >= 1

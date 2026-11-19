@@ -1,4 +1,5 @@
 """Qwen2.5 7B (or any tool-calling model) through a local Ollama server."""
+import copy
 import json
 import time
 
@@ -24,6 +25,12 @@ class OllamaLLM:
         self.host = host
         self._options = {"num_ctx": num_ctx, "temperature": temperature}
         self._client = ollama.Client(host=host, timeout=timeout)
+
+    def with_temperature(self, temperature: float) -> "OllamaLLM":
+        """The same model and connection with a different temperature (chat wants more variety than tool calls)."""
+        other = copy.copy(self)
+        other._options = {**self._options, "temperature": temperature}
+        return other
 
     def warm_up(self) -> float:
         """Load the model into memory now (one token of output), so the first real request is not the one that pays ~20 s.
