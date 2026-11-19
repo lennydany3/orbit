@@ -68,3 +68,10 @@ SPOKEN_MAX_SENTENCES = 2                         # replies are spoken short; the
 SPOKEN_MAX_CHARS = 220
 LOG_TRANSCRIPTS = False                          # what you said is shown in the console, and only written to logs/voice.log if True
 VOICE_LOG = app_config.LOG_DIR / "voice.log"     # every state transition, with a timestamp (never the audio)
+
+# --- Conversational voice ---
+CONVERSATIONAL = True                            # speak natural sentences instead of reading tool reports aloud (the screen shows the original)
+FILLERS = True                                   # "One moment." while the agent is slow, so there is no long silence
+FILLER_AFTER_S = 2.5                             # first filler after this long without an answer...
+FILLER_AGAIN_S = 8.0                             # ...and one more ("Still working on it.") after this long
+FOLLOW_UP_QUESTION_S = 6.0                       # when Orbit asks YOU a question, wait this long for the answer (no wake word needed)

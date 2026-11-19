@@ -14,6 +14,7 @@ import argparse
 import ast
 import logging
 import queue
+import random
 import re
 import threading
 import time
@@ -24,6 +25,7 @@ from logging.handlers import RotatingFileHandler
 import numpy as np
 
 from . import config
+from .phrasing import Phraser
 from .state import State, TurnTimer, VoiceState
 from .summarize import spoken_summary
 from .wakeword import strip_wake_phrase
@@ -113,13 +115,20 @@ def _file_logger() -> logging.Logger:
 class VoiceLoop:
     def __init__(self, agent, mic, transcriber, tts, keys=None, wake=None, segmenter=None, check_vad=None, *,
                  follow_up: bool = config.FOLLOW_UP, use_ptt: bool = True, wake_name: str = config.WAKEWORD_MODEL,
-                 out=print, verbose: bool = False, monitor=None, file_log=None, clock=time.monotonic):
+                 out=print, verbose: bool = False, monitor=None, file_log=None, clock=time.monotonic,
+                 conversational: bool = config.CONVERSATIONAL, fillers: bool = config.FILLERS, rng: random.Random | None = None):
         self.agent, self.mic, self.transcriber, self.tts = agent, mic, transcriber, tts
         self.keys, self.wake, self.segmenter, self.check_vad = keys, wake, segmenter, check_vad
         self.follow_up, self.use_ptt, self.wake_name, self.out, self.verbose, self.monitor = follow_up, use_ptt, wake_name, out, verbose, monitor
         self.confirm = VoiceConfirm()
         self._flog = file_log or _file_logger().info
         self._clock = clock
+        self.conversational, self.fillers, self.phraser = conversational, fillers, Phraser(rng)
+        self.request_text = ""                      # what you said, kept so a failure can say what it heard
+        self._filler_future: Future | None = None
+        self._fillers_said = 0
+        self._last_spoken = ""
+        self._follow_window = config.FOLLOW_UP_S
         self.st = VoiceState(clock=clock, log=self._on_transition)
         self.turn = TurnTimer(clock=clock)
         self.turns = 0
@@ -323,7 +332,7 @@ class VoiceLoop:
                     return
         if self.heard:
             return
-        limit = config.FOLLOW_UP_S if self.st.is_(State.FOLLOW_UP) else config.WAKE_NO_SPEECH_S
+        limit = self._follow_window if self.st.is_(State.FOLLOW_UP) else config.WAKE_NO_SPEECH_S
         if self.st.timed_out(limit):
             if self.st.is_(State.LISTENING):
                 self.out(f"  (nothing heard for {limit:.1f}s after the wake word, going back to sleep)")
@@ -354,6 +363,7 @@ class VoiceLoop:
         self.out(f'You said: "{text}"   [speech-to-text {result.seconds:.1f}s]')
         if config.LOG_TRANSCRIPTS:
             self._flog(f"transcript: {text}")
+        self.request_text, self._fillers_said, self._filler_future = text, 0, None
         self.st.to(State.THINKING, "running the agent")
         self.out("[thinking]")
         self.agent_future = spawn(self.agent.handle, text)
@@ -361,10 +371,14 @@ class VoiceLoop:
     def _tick_thinking(self) -> None:
         request = self.confirm.poll()
         if request:
+            self._finish_filler()                  # never talk over a filler: the question must be heard clearly
             self._begin_confirm(*request)
             return
         if not self.agent_future.done():
+            self._maybe_filler()
             return
+        if self._filler_future is not None and not self._filler_future.done():
+            return                                 # the agent is done, but let "One moment." finish first
         reply, error = self._text_of(self.agent_future)
         if error is not None:
             self._flog(f"agent error: {type(error).__name__}")
@@ -372,8 +386,33 @@ class VoiceLoop:
         self.turn.mark("reply")
         if self.monitor is not None and "text" in self.turn.marks:
             self.monitor.add_timing("agent", self.turn.marks["reply"] - self.turn.marks["text"])
-        self.out(f"Orbit: {reply}")                       # the full reply stays in the CLI; only a short version is spoken
-        self._speak(spoken_summary(reply), "reply ready")
+        self.out(f"Orbit: {reply}")                       # the full reply stays in the CLI; a natural, short version is spoken
+        said = self.phraser.say(reply, self.request_text) if self.conversational else reply
+        spoken = spoken_summary(said)
+        if spoken != reply:
+            self.out(f"  [says] {spoken}")
+        self._speak(spoken, "reply ready")
+
+    def _maybe_filler(self) -> None:
+        """No dead air: after ~2.5 s say "One moment.", after ~8 s "Still working on it." (the mic is already off)."""
+        if not self.fillers or self._fillers_said >= 2:
+            return
+        if self.st.elapsed < (config.FILLER_AFTER_S if self._fillers_said == 0 else config.FILLER_AGAIN_S):
+            return
+        if self._filler_future is not None and not self._filler_future.done():
+            return
+        text = self.phraser.filler(self._fillers_said)
+        self._fillers_said += 1
+        self.out(f"  [says] {text}")
+        self._filler_future = spawn(self.tts.speak, text)
+
+    def _finish_filler(self) -> None:
+        if self._filler_future is not None:
+            try:
+                self._filler_future.result(timeout=4.0)
+            except Exception:  # noqa: BLE001
+                pass
+            self._filler_future = None
 
     # ---- speaking ----
     def _speak(self, text: str, reason: str) -> None:
@@ -381,6 +420,7 @@ class VoiceLoop:
         self.st.to(State.SPEAKING, reason)
         self.out("[speaking]")
         self._speak_started = self._clock()
+        self._last_spoken = text
         self.future = spawn(self.tts.speak, text)
 
     def _tick_speaking(self) -> None:
@@ -400,7 +440,11 @@ class VoiceLoop:
             self._resume_mic()
             self._reset_listeners()
             self.mode, self.heard = "followup", False
-            self.st.to(State.FOLLOW_UP, f"listening {config.FOLLOW_UP_S:.0f}s for a follow-up without the wake word")
+            asked = self._last_spoken.rstrip().endswith("?")          # Orbit asked a question: give a real chance to answer it
+            self._follow_window = config.FOLLOW_UP_QUESTION_S if asked else config.FOLLOW_UP_S
+            self.st.to(State.FOLLOW_UP, f"listening {self._follow_window:.0f}s for " + ("your answer" if asked else "a follow-up") + ", no wake word needed")
+            if asked:
+                self.out("[listening] (Orbit asked a question: just answer, no wake word needed)")
         else:
             self._idle("finished")
 

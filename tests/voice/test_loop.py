@@ -1,6 +1,7 @@
 """The voice loop end to end, in a simulated world: a fake user "speaks" into a fake microphone on a fake clock.
 Whisper, the voice and the agent are stand-ins, so every path (hold-to-talk, wake word, follow-up, confirmation, barge-in,
 kill switch, timeouts, errors) runs deterministically in about a second each, with no hardware and no models."""
+import random
 import threading
 import time
 
@@ -145,7 +146,7 @@ class FakeWake:
         pass
 
 
-def build(*texts, agent=None, tts_slow=False, with_wake=False, follow_up=True):
+def build(*texts, agent=None, tts_slow=False, with_wake=False, follow_up=True, **loop_kwargs):
     sim = Sim()
     mic, keys = SimMic(sim), FakeKeys()
     tts = FakeTTS(mic, slow=tts_slow)
@@ -153,7 +154,7 @@ def build(*texts, agent=None, tts_slow=False, with_wake=False, follow_up=True):
     wake = FakeWake(sim) if with_wake else None
     agent = agent or EchoAgent()
     loop = VoiceLoop(agent, mic, FakeTranscriber(*texts), tts, keys, wake, SpeechSegmenter(LoudnessVAD()), LoudnessVAD(),
-                     follow_up=follow_up, out=out.append, file_log=lambda line: None, clock=sim.clock)
+                     follow_up=follow_up, out=out.append, file_log=lambda line: None, clock=sim.clock, **loop_kwargs)
     agent.safety.confirm = loop.confirm
     # the user's habits: hold the key and talk when idle; stop talking and release when done
     return sim, loop, keys, tts, wake, out
@@ -177,7 +178,7 @@ def test_hold_to_talk_turn_runs_the_agent_and_speaks_a_short_reply():
     sim.stop_when = lambda: loop.turns == 1 and loop.st.is_(State.IDLE)
     assert loop.run() == "quit"
     assert loop.agent.calls == ["open spotify"]
-    assert tts.spoken == ["Okay, I would do this: open spotify"]
+    assert tts.spoken == ["Okay, I would do this: open spotify."]
     assert moves(loop) == [("idle", "listening"), ("listening", "transcribing"), ("transcribing", "thinking"), ("thinking", "speaking"),
                            ("speaking", "follow_up"), ("follow_up", "idle")]
     assert tts.mic_paused_while_speaking == [True]                  # half-duplex: the mic is off while Orbit talks
@@ -351,3 +352,113 @@ def test_the_real_agent_asks_by_voice_before_a_risky_tool_and_only_a_clear_yes_r
     shown = "\n".join(out)
     assert ("pretended to delete 'old files'" in shown) is ran
     assert ("declined" in shown) is (not ran)
+
+
+# ------------------------------------------------------------------ conversational voice
+class ScriptedAgent:
+    """Replies with a fixed text, optionally only once the test says so (to simulate a slow model)."""
+
+    def __init__(self, reply, wait_for=None):
+        self.reply, self.wait_for, self.safety = reply, wait_for, type("S", (), {"confirm": None})()
+
+    def handle(self, text):
+        if self.wait_for is not None:
+            self.wait_for.wait(5.0)
+        return self.reply
+
+
+def _slow_turn(release_after_s, reply="opened Spotify"):
+    from orbit.voice.phrasing import FILLERS_FIRST, FILLERS_LONG
+
+    release = threading.Event()
+    sim, loop, keys, tts, _, out = build("open spotify", agent=ScriptedAgent(reply, release), rng=random.Random(0))
+    user_holds_key_and_talks(sim, loop, keys)
+    sim.when(lambda: loop.st.is_(State.THINKING) and loop.st.elapsed >= release_after_s, release.set)
+    sim.stop_when = lambda: loop.turns == 1
+    loop.run()
+    return tts, out, FILLERS_FIRST, FILLERS_LONG
+
+
+def test_a_slow_answer_gets_a_one_moment_filler_instead_of_silence():
+    tts, out, first, long_ = _slow_turn(4.0)                    # the model needs 4 s: one filler (due at 2.5 s), no second one
+    assert len(tts.spoken) == 2 and tts.spoken[0] in first
+    assert tts.spoken[1].endswith("I opened Spotify.")          # the real answer comes after the filler has finished
+    assert any(line.strip() == f"[says] {tts.spoken[0]}" for line in out)
+
+
+def test_a_very_slow_answer_gets_a_second_still_working_filler():
+    tts, _, first, long_ = _slow_turn(9.5)
+    assert len(tts.spoken) == 3 and tts.spoken[0] in first and tts.spoken[1] in long_
+
+
+def test_a_quick_answer_gets_no_filler():
+    tts, _, _, _ = _slow_turn(1.0)
+    assert len(tts.spoken) == 1 and tts.spoken[0].endswith("I opened Spotify.")
+
+
+def test_fillers_can_be_turned_off():
+    release = threading.Event()
+    sim, loop, keys, tts, _, _ = build("open spotify", agent=ScriptedAgent("opened Spotify", release), fillers=False)
+    user_holds_key_and_talks(sim, loop, keys)
+    sim.when(lambda: loop.st.is_(State.THINKING) and loop.st.elapsed >= 4.0, release.set)
+    sim.stop_when = lambda: loop.turns == 1
+    loop.run()
+    assert len(tts.spoken) == 1
+
+
+def test_tool_reports_are_spoken_naturally_while_the_screen_keeps_the_original():
+    sim, loop, keys, tts, _, out = build("close notepad", agent=ScriptedAgent("asked 'Notepad' to close"))
+    user_holds_key_and_talks(sim, loop, keys)
+    sim.stop_when = lambda: loop.turns == 1
+    loop.run()
+    assert tts.spoken[0].lower().endswith("closing notepad.") and "asked" not in tts.spoken[0]      # "Okay, closing..." / "Done. Closing..."
+    assert any(line == "Orbit: asked 'Notepad' to close" for line in out)                      # the original, untouched
+    assert any(line.strip().startswith("[says]") and "closing notepad." in line.lower() for line in out)
+
+
+def test_natural_speech_can_be_switched_off():
+    sim, loop, keys, tts, _, out = build("close notepad", agent=ScriptedAgent("asked 'Notepad' to close"), conversational=False)
+    user_holds_key_and_talks(sim, loop, keys)
+    sim.stop_when = lambda: loop.turns == 1
+    loop.run()
+    assert tts.spoken == ["asked 'Notepad' to close"]
+
+
+def test_when_it_did_not_understand_it_says_what_it_heard():
+    reply = "Nothing was done: I did not run any tool for that, so I could not tell what to do. Try different words."
+    sim, loop, keys, tts, _, _ = build("hey everybody", agent=ScriptedAgent(reply))
+    user_holds_key_and_talks(sim, loop, keys)
+    sim.stop_when = lambda: loop.turns == 1
+    loop.run()
+    assert tts.spoken == ["Sorry, I didn't catch what to do with \"hey everybody\". Could you say that another way?"]
+    assert loop._follow_window == config.FOLLOW_UP_QUESTION_S                       # it asked you something: leave time to answer
+
+
+def test_when_orbit_asks_a_question_you_get_longer_to_answer_without_the_wake_word():
+    sim, loop, keys, tts, _, out = build("what is playing", agent=ScriptedAgent("Nothing is playing. Would you like to play something?"))
+    user_holds_key_and_talks(sim, loop, keys)
+    sim.stop_when = lambda: loop.turns == 1 and loop.st.is_(State.FOLLOW_UP)
+    loop.run()
+    assert loop._follow_window == config.FOLLOW_UP_QUESTION_S > config.FOLLOW_UP_S
+    assert any("Orbit asked a question" in line for line in out)
+
+
+def test_a_plain_statement_keeps_the_short_follow_up_window():
+    sim, loop, keys, tts, _, _ = build("open spotify", agent=ScriptedAgent("Opened Spotify."))
+    user_holds_key_and_talks(sim, loop, keys)
+    sim.stop_when = lambda: loop.turns == 1 and loop.st.is_(State.FOLLOW_UP)
+    loop.run()
+    assert loop._follow_window == config.FOLLOW_UP_S
+
+
+def test_the_answer_to_orbits_question_is_heard_after_a_pause_longer_than_the_normal_window():
+    sim, loop, keys, tts, _, _ = build("what is playing", "yes please", agent=ScriptedAgent("Nothing is playing. Want me to play something?"))
+    user_holds_key_and_talks(sim, loop, keys)
+    started = {}
+    sim.when(lambda: loop.st.is_(State.FOLLOW_UP), lambda: started.setdefault("t", sim.t))
+    # the user answers 4 s later: too late for the normal 2 s window, fine for the 6 s question window
+    sim.when(lambda: "t" in started and sim.t - started["t"] > 4.0 and loop.st.is_(State.FOLLOW_UP) and sim.talk == 0 and not loop.heard,
+             lambda: setattr(sim, "talk", 12))
+    sim.stop_when = lambda: loop.turns == 2
+    loop.run()
+    assert loop.agent.reply and len(tts.spoken) == 2

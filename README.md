@@ -57,7 +57,9 @@ Voice lives in `src/orbit/voice/` (test bench: `python -m orbit.voice.run --help
 
 Everything the text REPL does, by voice. Start a turn by **holding Right Ctrl** while you speak and releasing it, or by saying **"hey orbit"** (add `--no-wake` for hold-to-talk only; `--mic "<name>"` picks the microphone). Orbit transcribes what you said, runs the same `agent.handle(text)` as the text REPL (the agent is unchanged), and speaks a short reply.
 
-- **Short spoken replies.** One or two sentences, never URLs, code or lists; the full reply is always printed in the terminal ("The rest is on screen.").
+- **Short, natural spoken replies.** The agent's terse tool reports are rephrased for speech only ("asked 'Spotify Premium' to close" is spoken as "Okay, closing Spotify."; emoji, "(204)" counts and internal tool names are dropped; the opener varies). When it did not understand, it says what it heard and asks again. One or two sentences, never URLs, code or lists; the original reply is always printed in the terminal, with a `[says]` line when the spoken version differs. `CONVERSATIONAL = False` in `voice/config.py` reads the reports out as they are.
+- **No dead air.** If the agent takes longer than about 2.5 s, Orbit says "One moment." (and "Still working on it." after about 8 s). `FILLERS = False` turns that off.
+- **Questions get answers.** When Orbit asks you something ("Would you like to play something?"), it listens for 6 s without the wake word, so you can just reply.
 - **Risky actions ask by voice.** "Do you want me to close window Notepad? Say yes or no." Only a clear yes runs it; silence, "maybe" or anything unclear is a no.
 - **Follow-up window.** For 2 s after a reply you can say the next request without the wake word (`--no-follow-up` turns it off).
 - **Half-duplex.** The microphone is off while Orbit transcribes, thinks and speaks, so it never hears itself. Holding the key while it speaks **interrupts it immediately** and starts listening. (Headphones would allow wake-word interruption later; not built.)
