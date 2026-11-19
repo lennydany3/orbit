@@ -41,12 +41,13 @@ class WakeVerifier:
     def __init__(self, model: str = config.WAKE_VERIFY_MODEL, threads: int = 2):
         from .stt import Transcriber
 
-        # No vocabulary hint here on purpose: a hint containing the wake word would make Whisper "hear" it in anything.
-        self._engine = Transcriber(model, threads=threads, prompt="")
+        self._engine = Transcriber(model, threads=threads, prompt=config.WAKE_VERIFY_PROMPT)
         self.model = model
 
     def check(self, audio: np.ndarray) -> tuple[bool, str]:
-        heard = self._engine.transcribe(audio).text
+        peak = max(1, int(np.abs(audio).max()))        # a quiet mic (peaks near -23 dBFS) makes Whisper mishear: bring it to -3 dBFS
+        loud = np.clip(audio.astype(np.float32) * (0.708 * 32767 / peak), -32768, 32767).astype(np.int16)
+        heard = self._engine.transcribe(loud).text
         return sounds_like_orbit(heard), heard
 
 
@@ -118,8 +119,9 @@ class WakeWord:
         scores = self._model.predict(frame)
         return float(max(scores.values())) if scores else 0.0
 
-    def process(self, frame: np.ndarray) -> WakeResult:
-        """frame: int16, 1280 samples (80 ms)."""
+    def process(self, frame: np.ndarray, on_candidate=None) -> WakeResult:
+        """frame: int16, 1280 samples (80 ms). `on_candidate()` is called as soon as the model fires, before the (slower)
+        Whisper check, so a caller can e.g. mute Orbit's own voice at once and un-mute it if the check says "no"."""
         score = self.predict(frame)
         self._ring.append(frame)
         self._clock += len(frame) / config.SAMPLE_RATE
@@ -128,6 +130,8 @@ class WakeWord:
             return WakeResult(score, False)
         self._streak = 0
         heard = ""
+        if on_candidate is not None:
+            on_candidate()
         if self.verifier is not None:
             ok, heard = self.verifier.check(np.concatenate(self._ring))
             if not ok:

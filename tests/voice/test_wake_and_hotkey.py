@@ -93,3 +93,20 @@ def test_sounds_like_orbit():
         assert sounds_like_orbit(heard), heard
     for heard in ["Hey, are you there?", "a little bit", "Hey Robert", "the robot is here", "", "Hey Mycroft"]:
         assert not sounds_like_orbit(heard), heard
+
+
+def test_a_missed_key_release_is_recovered_when_windows_says_the_key_is_up():
+    k = _keys()
+    k._on_press(keyboard.Key.ctrl_r)
+    time.sleep(0.1)
+    k.physically_down = lambda: False          # the release event was dropped, but the OS knows the key is up
+    events = k.poll()
+    assert [e.kind for e in events] == ["down", "up"] and events[1].valid and events[1].held_s >= 0.1
+    assert k.poll() == []                      # and it is only reported once
+
+
+def test_a_key_that_is_really_still_down_is_left_alone():
+    k = _keys()
+    k._on_press(keyboard.Key.ctrl_r)
+    k.physically_down = lambda: True
+    assert [e.kind for e in k.poll()] == ["down"]

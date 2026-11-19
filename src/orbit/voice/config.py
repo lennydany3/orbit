@@ -15,19 +15,7 @@ SPEAKER_DEVICE = os.environ.get("ORBIT_SPEAKER")  # same for playback
 MODELS_DIR = app_config.PROJECT_ROOT / "models"
 SILERO_MODEL = MODELS_DIR / "silero_vad.onnx"
 
-# --- Which speech-to-text handles a turn ---
-# "auto" = Groq first, local Whisper if Groq is unavailable; "groq" = Groq only; "local" = local only (fully offline).
-# PRIVACY: with "groq" or "auto", the speech clip of a turn is sent to Groq, only after the wake word or hotkey fired.
-# Nothing is sent while idle. The API key is read only from the GROQ_API_KEY environment variable.
-STT_PROVIDER = os.environ.get("ORBIT_STT", "auto").lower()
-GROQ_MODEL = "whisper-large-v3-turbo"
-GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
-GROQ_KEY_ENV = "GROQ_API_KEY"
-GROQ_TIMEOUT_S = 8.0                             # waiting for Groq's answer; then fall back to local
-STT_MIN_CLIP_S = 0.15                            # a clip shorter than this (or pure digital silence) is "empty": nothing is sent or run
-STT_PRELOAD_LOCAL = True                         # load local Whisper in the background so a fallback is not delayed by the 4 s model load
-
-# --- Local speech-to-text (faster-whisper, CPU only: the GPU belongs to the LLM) ---
+# --- Speech-to-text (faster-whisper, local, CPU only: the GPU belongs to the LLM) ---
 WHISPER_DIR = MODELS_DIR / "whisper"             # one folder per model, e.g. models/whisper/base.en
 WHISPER_MODEL = "small.en"                       # chosen from the V2 benchmark: about 11% word error on real recordings vs 18-26% for base.en
 WHISPER_COMPUTE = "int8"
@@ -49,6 +37,9 @@ WAKE_THRESHOLD = 0.5                             # model score (0-1) that counts
 WAKE_HITS = 2                                    # consecutive 80 ms frames above the threshold before it counts as a wake
 WAKE_VERIFY = True                               # custom words only: confirm each candidate with a quick local Whisper pass
 WAKE_VERIFY_MODEL = "tiny.en"
+# The hint matters: without it Whisper (tiny) kept only 11 of 25 real "hey orbit" clips; with it, 25 of 25. It also makes Whisper
+# say "Hey Orbit" for some look-alike speech, so the check cuts false candidates by roughly 80%, not 100%.
+WAKE_VERIFY_PROMPT = "Hey Orbit."
 WAKE_REJECT_COOLDOWN_S = 1.0                     # after a rejected candidate, wait this long before checking again
 WAKE_REFRACTORY_S = 1.5                          # ignore further wakes for this long after one
 PTT_KEY = "ctrl_r"                               # hold to talk (pynput key name)
@@ -68,3 +59,30 @@ VAD_END_SILENCE_S = 0.9          # this much silence after speech ends the utter
 VAD_PREROLL_S = 0.3              # audio kept from before speech started, so the first word is not clipped
 VAD_KEEP_TAIL_S = 0.3            # trailing silence kept in the clip (the rest is trimmed: Whisper never sees silence)
 VAD_MAX_UTTERANCE_S = 20.0       # hard stop for one utterance (wake word); push-to-talk gets longer in V4
+
+# --- Voice loop (V5): `python -m orbit --voice` ---
+FOLLOW_UP = True                                 # after a reply, listen this long for a next request without the wake word
+FOLLOW_UP_S = 2.0
+CONFIRM_TIMEOUT_S = 6.0                          # how long to wait for yes / no after a spoken confirmation question
+SPOKEN_MAX_SENTENCES = 2                         # replies are spoken short; the full text stays in the CLI
+SPOKEN_MAX_CHARS = 220
+LOG_TRANSCRIPTS = False                          # what you said is shown in the console, and only written to logs/voice.log if True
+VOICE_LOG = app_config.LOG_DIR / "voice.log"     # every state transition, with a timestamp (never the audio)
+
+# --- Conversational voice ---
+CONVERSATIONAL = True                            # speak natural sentences instead of reading tool reports aloud (the screen shows the original)
+FILLERS = True                                   # "One moment." while the agent is slow, so there is no long silence
+FILLER_AFTER_S = 2.5                             # first filler after this long without an answer...
+FILLER_AGAIN_S = 8.0                             # ...and one more ("Still working on it.") after this long
+FOLLOW_UP_QUESTION_S = 6.0                       # when Orbit asks YOU a question, wait this long for the answer (no wake word needed)
+
+# --- Interrupting Orbit by voice ---
+BARGE_IN = True                                  # say the wake word while Orbit is talking: it stops and listens
+AEC = True                                       # echo cancellation for that (only engages when it measurably helps; headphones need none)
+
+# --- Not acting on background sound ---
+FOLLOW_UP_WHILE_MEDIA = False                    # False: while music / a video plays, the no-wake follow-up stays closed (lyrics are not commands)
+
+# --- Speculative speech-to-text ---
+SPECULATIVE_STT = True                           # start transcribing at a short pause; keep the result only if you really stopped
+SPECULATIVE_PAUSE_S = 0.55                       # silence after which the early transcription starts (the full end-of-speech wait is 0.9 s)

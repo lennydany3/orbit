@@ -17,11 +17,26 @@ class OllamaLLM:
         num_ctx: int = config.NUM_CTX,
         temperature: float = config.TEMPERATURE,
         timeout: float = config.LLM_TIMEOUT_S,
+        keep_alive: str = config.KEEP_ALIVE,
     ):
+        self.keep_alive = keep_alive
         self.model = model
         self.host = host
         self._options = {"num_ctx": num_ctx, "temperature": temperature}
         self._client = ollama.Client(host=host, timeout=timeout)
+
+    def warm_up(self) -> float:
+        """Load the model into memory now (one token of output), so the first real request is not the one that pays ~20 s.
+        Returns the seconds it took. Raises LLMError if Ollama cannot be reached."""
+        start = time.perf_counter()
+        try:
+            self._client.chat(model=self.model, messages=[{"role": "user", "content": "hi"}],
+                              options={**self._options, "num_predict": 1}, keep_alive=self.keep_alive)
+        except ollama.ResponseError as e:
+            raise LLMError(f"Ollama error {e.status_code}: {e.error}") from e
+        except (ConnectionError, httpx.HTTPError) as e:
+            raise LLMError(f"Cannot reach Ollama at {self.host} ({e}).") from e
+        return time.perf_counter() - start
 
     def chat(self, messages: list[dict], tools: list[dict]) -> LLMResponse:
         start = time.perf_counter()
@@ -31,7 +46,7 @@ class OllamaLLM:
                 messages=messages,
                 tools=tools or None,
                 options=self._options,
-                keep_alive="10m",
+                keep_alive=self.keep_alive,
             )
         except ollama.ResponseError as e:
             if e.status_code == 404:

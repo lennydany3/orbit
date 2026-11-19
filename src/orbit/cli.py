@@ -81,6 +81,10 @@ def _main(argv: list[str] | None) -> int:
     parser.add_argument("--browser-mode", choices=["mine", "orbit"], default=config.BROWSER_MODE,
                         help="mine = open sites in your own Brave profile; orbit = Orbit's separate automated window")
     parser.add_argument("--model", default=config.MODEL, help=f"Ollama model (default {config.MODEL})")
+    parser.add_argument("--voice", action="store_true", help="talk to Orbit: hold Right Ctrl or say the wake word (all local)")
+    parser.add_argument("--mic", default=None, help="with --voice: microphone index or part of its name (default: ORBIT_MIC / Windows default)")
+    parser.add_argument("--no-wake", action="store_true", help="with --voice: hold-to-talk only, no wake word")
+    parser.add_argument("--no-follow-up", action="store_true", help="with --voice: do not listen for a follow-up after a reply")
     args = parser.parse_args(argv)
 
     if len(args.request) == 2 and args.request[0].lower() == "auth":
@@ -97,6 +101,16 @@ def _main(argv: list[str] | None) -> int:
     mode = "rules only" if args.no_llm else f"model {args.model}"
     print(f"{config.APP_NAME} ready ({mode}). Type 'help' for hints, 'quit' to exit. Ctrl+C stops a running request.")
     print("  " + spotify_status(agent.registry))
+    if args.voice:
+        # Voice never replaces the REPL: if it cannot start, or the kill switch stops it, you carry on in text mode.
+        from .voice import config as voice_config
+        from .voice.loop import run_voice
+
+        result = run_voice(agent, device=args.mic or voice_config.MIC_DEVICE, wake_enabled=not args.no_wake,
+                           follow_up=False if args.no_follow_up else None)
+        if result in ("quit", "timeout"):
+            return 0
+        print("Voice is off. Text mode: type a request ('help' for hints, 'quit' to exit).")
     while True:
         try:
             text = input(f"{config.APP_NAME}> ").strip()

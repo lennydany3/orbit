@@ -256,22 +256,37 @@ def synthetic_streams(voice: str, n_pos: int, n_neg: int, rng: random.Random, np
     return [build_stream(items[i:i + per_stream], rng, voice) for i in range(0, len(items), per_stream)]
 
 
-def real_items() -> tuple[list, list]:
-    """Your own recordings: (wake clips as (audio, end), everything else you recorded as (audio, None))."""
+def real_items() -> tuple[list, list, int]:
+    """Your own recordings: (wake clips as (audio, end), everything else you recorded as (audio, None), pieces left out).
+
+    A "negative" recording is only useful if it really has no wake word in it. It is checked with local Whisper (nothing
+    leaves the PC) and any 8 s piece where "orbit" is heard is left out entirely: wrongly labelled negatives teach the model
+    to ignore the real wake word."""
+    from .wakeword import sounds_like_orbit
+
     base = config.FIXTURES_DIR.parent
     wake_dir = base / "fixtures_wake"
-    pos, neg = [], []
+    pos, neg, left_out, checker = [], [], 0, None
     if wake_dir.exists():
         for p in sorted(wake_dir.glob("hey_orbit_*.wav")):
             a = load_wav(p)
             pos.append((a, speech_end(a)))
         for p in sorted(wake_dir.glob("negative_*.wav")):             # long recordings of normal talking / TV: cut into 8 s pieces
             a = load_wav(p)
-            neg += [(a[i:i + 8 * SR], None) for i in range(0, len(a) - 8 * SR + 1, 8 * SR)]
+            for i in range(0, len(a) - 8 * SR + 1, 8 * SR):
+                piece = a[i:i + 8 * SR]
+                if checker is None:
+                    from .stt import Transcriber
+
+                    checker = Transcriber("small.en", threads=4, prompt="")
+                if sounds_like_orbit(checker.transcribe(piece).text):
+                    left_out += 1
+                else:
+                    neg.append((piece, None))
     for folder in sorted(base.glob("fixtures*")):
         if folder.name != "fixtures_wake":                             # your command clips: speech without the wake word
             neg += [(load_wav(p), None) for p in sorted(folder.glob("*.wav"))]
-    return pos, neg
+    return pos, neg, left_out
 
 
 def _streams_of(items: list, rng: random.Random, source: str, per_stream: int = 14) -> list[Stream]:
@@ -328,8 +343,9 @@ def train(n_pos: int = 60, n_neg: int = 170, seed: int = 1, folds: int = 5, fres
     pre, started, rng = extractor(), time.perf_counter(), random.Random(seed + 1)
     data = _synthetic_data(pre, voices, n_pos, n_neg, seed, fresh)
     all_synthetic = [item for v in voices for item in data[v]]
-    pos, neg = real_items()
-    print(f"  your recordings: {len(pos)} wake clips, {len(neg)} other clips")
+    pos, neg, left_out = real_items()
+    print(f"  your recordings: {len(pos)} wake clips, {len(neg)} other clips"
+          + (f"  ({left_out} pieces of your 'negative' talking were left out because Whisper heard \"orbit\" in them)" if left_out else ""))
     thresholds = [0.3, 0.5, 0.7, 0.85, 0.95, 0.99]
     cells = lambda res: "  ".join(f"{100 * res[t][0]:3.0f}%/{res[t][1]:5.1f}" for t in thresholds)
 

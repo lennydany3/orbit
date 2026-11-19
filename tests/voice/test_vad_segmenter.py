@@ -80,3 +80,33 @@ def test_frames_of_any_size_are_accepted():
     for i in range(0, len(signal), 1000):   # 1000 samples is not a multiple of the 512-sample window
         events += seg.feed(signal[i:i + 1000])
     assert [e.kind for e in events] == ["start", "end"]
+
+
+# ---------------------------------------------------------------- the early "pause" event (speculative transcription)
+def test_a_pause_event_comes_before_the_end_and_carries_the_same_clip():
+    events = run((1.0, False), (1.5, True), (2.0, False), pause_s=0.55)
+    assert [e.kind for e in events] == ["start", "pause", "end"]
+    pause, end = events[1], events[2]
+    assert np.array_equal(pause.clip, end.clip)                                  # you stopped: the early clip is exactly the final one
+    assert pause.t < end.t and end.t - pause.t == pytest.approx(0.9 - 0.55, abs=0.1)
+
+
+def test_if_you_carry_on_after_the_pause_the_early_clip_is_shorter_than_the_final_one():
+    events = run((1.0, False), (1.0, True), (0.7, False), (1.0, True), (2.0, False), pause_s=0.55)
+    assert [e.kind for e in events] == ["start", "pause", "pause", "end"]
+    first, second, end = events[1], events[2], events[3]
+    assert len(first.clip) < len(end.clip) and np.array_equal(second.clip, end.clip)
+
+
+def test_a_gap_shorter_than_the_pause_threshold_makes_no_pause_event():
+    events = run((1.0, False), (1.0, True), (0.3, False), (1.0, True), (2.0, False), pause_s=0.55)
+    assert [e.kind for e in events] == ["start", "pause", "end"]                 # only after the last words
+
+
+def test_noise_that_is_too_short_to_be_speech_never_causes_a_pause_event():
+    events = run((1.0, False), (0.15, True), (2.0, False), pause_s=0.55)
+    assert [e.kind for e in events] == ["start", "ignored"]
+
+
+def test_no_pause_events_unless_asked_for():
+    assert "pause" not in [e.kind for e in run((1.0, False), (1.5, True), (2.0, False))]

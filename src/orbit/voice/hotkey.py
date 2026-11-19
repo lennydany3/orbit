@@ -5,6 +5,7 @@ Hold-to-talk is Right Ctrl by default. Because Ctrl is also a shortcut key, a ho
 PTT_MIN_HOLD_S and no other key was pressed meanwhile (so Right Ctrl+C is never mistaken for talking).
 """
 import queue
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ class Hotkeys:
     def __init__(self, ptt_key: str = config.PTT_KEY, kill_combo: str = config.KILL_COMBO,
                  min_hold_s: float = config.PTT_MIN_HOLD_S):
         self.ptt_key = parse_key(ptt_key)
+        self._vk = getattr(getattr(self.ptt_key, "value", self.ptt_key), "vk", None)   # Windows virtual-key code, for the safety check
         self.kill_combo = kill_combo
         self.min_hold_s = min_hold_s
         self.killed = threading.Event()
@@ -54,7 +56,19 @@ class Hotkeys:
             if listener is not None:
                 listener.stop()
 
+    def physically_down(self) -> bool | None:
+        """Does Windows say the hold-to-talk key is down right now? None if it cannot tell."""
+        if sys.platform != "win32" or self._vk is None:
+            return None
+        import ctypes
+
+        return bool(ctypes.windll.user32.GetAsyncKeyState(self._vk) & 0x8000)
+
     def poll(self) -> list[KeyEvent]:
+        # A busy PC can drop a key-release event, which would leave Orbit listening until the time limit.
+        # If we think the key is down but Windows says it is up, the release was missed: synthesize it.
+        if self._down_at is not None and self.physically_down() is False:
+            self._on_release(self.ptt_key)
         events = []
         try:
             while True:

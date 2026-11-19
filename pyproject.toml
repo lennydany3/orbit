@@ -13,6 +13,7 @@ dependencies = [
     "pydantic>=2",
     "playwright",
     "pycaw",
+    "psutil",
     "winrt-runtime",
     "winrt-Windows.Media.Control",
     "winrt-Windows.Foundation",

@@ -124,7 +124,7 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
     # --- Spotify (API layer; only used if connected) ---
     ("spotify-liked", re.compile(r"^play (?:my )?(?:favou?rites?|favs?|liked|saved)(?: (?:music|songs?|tracks?|stuff))?(?: on spotify)?$", re.I),
      lambda m: ("api_spotify_play", {"query": "liked songs"})),
-    ("spotify-play", re.compile(r"^(?:play|put on)\s+(?P<q>.+?)\s+on spotify$", re.I),
+    ("spotify-play", re.compile(r"^(?:play|put on)\s+(?:me\s+)?(?:(?:a|an|some|the|any)\s+)?(?!(?:it|that|this|them)\s+(?:on|from|in)\b)(?P<q>.+?)\s+(?:on|from|in|using|via|through|with)\s+spotify$", re.I),
      lambda m: ("api_spotify_play", {"query": m["q"]})),
     ("spotify-transfer", re.compile(r"^(?:move|transfer|switch|send)\s+(?:the )?(?:playback|music|spotify)\s+to\s+(?:this|my)\s+(?:device|pc|computer|laptop)$", re.I),
      lambda m: ("api_spotify_transfer", {"device": "this"})),
@@ -192,6 +192,11 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
     ("arrange-state", re.compile(r"^(?P<act>maximi[sz]e|minimi[sz]e|restore)\s+(?:the\s+|my\s+)?(?!(?:it|that|this|them|window|app)$)(?P<t>[\w .+&'-]+?)(?: (?:app|window))?$", re.I),
      lambda m: ("os_arrange_window", {"title": m["t"].strip().title(), "action": _ACTIONS[m["act"][:3].lower()]})),
     ("arrange-snap", _SNAP, lambda m: ("os_arrange_window", {"title": m["t"].strip().title(), "action": m["side"].lower()})),
+    # Quitting an app completely (tray apps keep running after their window closes). Asks first: it can lose unsaved work.
+    ("quit-app", re.compile(r"^(?:please )?(?:quit|exit|kill|terminate|force quit|force close|shut ?down)\s+(?:the )?(?!(?:it|that|this|them|window|app|tab|both|all|everything|orbit|full ?screen)$)(?P<t>[\w .+&'-]+?)(?: (?:app|completely|fully|for good|process))?$", re.I),
+     lambda m: ("os_quit_app", {"name": m["t"].strip()})),
+    ("quit-app-completely", re.compile(r"^(?:please )?close\s+(?:the )?(?P<t>[\w .+&'-]+?)\s+(?:completely|fully|entirely|totally|for good)$", re.I),
+     lambda m: ("os_quit_app", {"name": m["t"].strip()})),
     ("close-window", re.compile(r"^(?:please )?close\s+(?:the )?(?!(?:it|that|this|them|window|app|tab|both|all|everything|everything i opened|them all|all of them|both of them)$)(?P<t>[\w .+&'-]+?)(?: (?:app|window))?$", re.I),
      lambda m: ("os_close_window", {"title": m["t"].strip().title()})),
     ("mute", re.compile(r"^(?P<un>un)?mute(?: the (?:sound|volume|audio))?$", re.I),

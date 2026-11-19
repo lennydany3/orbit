@@ -7,6 +7,7 @@ The mic callback does the bare minimum (copy the block into a queue) so it never
 """
 import queue
 import threading
+import time
 
 import numpy as np
 import sounddevice as sd
@@ -60,7 +61,7 @@ class MicStream:
 
     def __init__(self, device: str | int | None = config.MIC_DEVICE):
         self.device = resolve_device(device, "input")
-        self._queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=config.MIC_QUEUE_FRAMES)
+        self._queue: queue.Queue[tuple[np.ndarray, float]] = queue.Queue(maxsize=config.MIC_QUEUE_FRAMES)
         self._paused = threading.Event()
         self._stream: sd.InputStream | None = None
         self.overflows = 0
@@ -78,19 +79,30 @@ class MicStream:
             self.overflows += 1
         if self._paused.is_set():
             return
+        # When this block started being captured, on the time.perf_counter clock: PortAudio's own timestamps are exact,
+        # unlike "now" (the callback may run a little late). Echo cancellation lines the microphone up with what was played.
         try:
-            self._queue.put_nowait(indata[:, 0].copy())
+            t_start = time.perf_counter() - (time_info.currentTime - time_info.inputBufferAdcTime)
+        except Exception:  # noqa: BLE001 - some drivers report no timestamps
+            t_start = time.perf_counter() - config.FRAME_MS / 1000
+        try:
+            self._queue.put_nowait((indata[:, 0].copy(), t_start))
         except queue.Full:
             self.dropped += 1
 
     def read(self, timeout: float = 1.0) -> np.ndarray | None:
         """Next 80 ms frame (int16, 1280 samples), or None if nothing arrived within `timeout`."""
+        timed = self.read_timed(timeout)
+        return None if timed is None else timed[0]
+
+    def read_timed(self, timeout: float = 1.0) -> tuple[np.ndarray, float] | None:
+        """Like read(), plus when the frame started being captured (time.perf_counter seconds)."""
         try:
-            frame = self._queue.get(timeout=timeout)
+            frame, t_start = self._queue.get(timeout=timeout)
         except queue.Empty:
             return None
         self.frames += 1
-        return frame
+        return frame, t_start
 
     def pause(self) -> None:
         """Half-duplex: stop collecting audio (e.g. while Orbit speaks) without closing the mic."""
@@ -152,6 +164,10 @@ class FileMic:
         self._pos += config.FRAME_SAMPLES
         self.frames += 1
         return frame
+
+    def read_timed(self, timeout: float = 1.0):
+        frame = self.read(timeout)
+        return None if frame is None else (frame, time.perf_counter() - config.FRAME_MS / 1000)
 
     def pause(self) -> None:
         pass

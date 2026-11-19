@@ -5,7 +5,7 @@ from typing import Callable, Literal
 from pydantic import BaseModel, Field
 
 from ..base import Registry, Tool, ToolResult, VerifyResult, read_only_verify
-from . import apps, media, monitors, uiclick, volume, windows
+from . import apps, media, monitors, processes, uiclick, volume, windows
 
 APP_START_TIMEOUT_S = 12.0
 SETTLE_TIMEOUT_S = 3.0
@@ -110,6 +110,15 @@ class CloseParams(BaseModel):
     title: str = Field(description="part of the window title or app name to close, e.g. Clock")
 
 
+def _admin_block(win: windows.Window, doing: str) -> ToolResult | None:
+    """Windows will not let a normal program close, minimize or move an administrator window. Say so, instead of pretending."""
+    if windows.needs_admin(win.hwnd):
+        return ToolResult.failure(
+            f"'{win.title[:40]}' runs as administrator, so Windows does not let Orbit {doing} it. {processes.ADMIN_HINT}",
+            retryable=False)
+    return None
+
+
 def _closable(query: str) -> list[windows.Window]:
     own = windows.console_hwnd()
     return [w for w in windows.match_windows(windows.list_windows(), [query]) if w.hwnd != own]
@@ -123,8 +132,18 @@ def close_window(p: CloseParams) -> ToolResult:
             f"no open window matches '{p.title}'. Open windows include: {open_now}. "
             "If one of these is what the user meant, call again with that title.", retryable=False, not_found=True)
     target = matches[0]
-    windows.close(target.hwnd)
-    result = ToolResult.success(f"asked '{target.title}' to close")
+    blocked = _admin_block(target, "close")
+    if blocked:
+        return blocked
+    exe_path = processes.window_exe_path(target.hwnd)          # read before closing: the process may be gone afterwards
+    error = windows.close(target.hwnd)
+    if error not in (None, 0):
+        return ToolResult.failure(f"Windows refused the request to close '{target.title[:40]}' (error {error}). "
+                                  + (processes.ADMIN_HINT if error == 5 else ""), retryable=False)
+    summary = f"asked '{target.title}' to close"
+    if _wait_for(lambda: all(w.hwnd != target.hwnd for w in windows.list_windows()), 1.0, interval=0.1):
+        summary += processes.background_note(target, exe_path)   # e.g. ChatGPT: the window is gone but the app lives in the tray
+    result = ToolResult.success(summary)
     result.context["hwnd"] = target.hwnd
     return result
 
@@ -134,6 +153,36 @@ def verify_close_window(p: CloseParams, r: ToolResult) -> VerifyResult:
     if gone:
         return VerifyResult(True, "the window is gone")
     return VerifyResult(False, "the window is still open (the app may be asking to save or confirm something)")
+
+
+class QuitParams(BaseModel):
+    name: str = Field(description="the app to quit completely, e.g. ChatGPT (also when it only lives in the system tray)")
+
+
+def quit_app(p: QuitParams) -> ToolResult:
+    found = processes.find_app(p.name, windows.list_windows())
+    if isinstance(found, str):
+        return ToolResult.failure(found, retryable=False, not_found=True)
+    refusal = processes.refusal_for(found)
+    if refusal:
+        return ToolResult.failure(refusal, retryable=False)
+    if not windows.orbit_is_admin() and any(windows.is_elevated(h) for h in found.hwnds):
+        return ToolResult.failure(f"'{p.name}' runs as administrator, so Windows does not let Orbit quit it. {processes.ADMIN_HINT}",
+                                  retryable=False)
+    ended, error = processes.quit_all(found)
+    if error == "access denied":
+        return ToolResult.failure(f"'{p.name}' runs as administrator, so Windows does not let Orbit quit it. {processes.ADMIN_HINT}",
+                                  retryable=False)
+    if error:
+        return ToolResult.failure(f"could not quit {p.name}: {error}", retryable=False)
+    result = ToolResult.success(f"quit {p.name} completely ({ended} process(es) ended)")
+    result.context["exe_path"] = found.exe_path
+    return result
+
+
+def verify_quit_app(p: QuitParams, r: ToolResult) -> VerifyResult:
+    left = processes.wait_until_gone(r.context["exe_path"], SETTLE_TIMEOUT_S)
+    return VerifyResult(not left, "no process of that app is running any more" if not left else f"{len(left)} process(es) still running")
 
 
 def _close_needs_confirm(p: CloseParams) -> bool:
@@ -175,6 +224,9 @@ def move_window(p: MoveParams) -> ToolResult:
     if not matches:
         return _no_window(p.title)
     win = matches[0]
+    blocked = _admin_block(win, "move")
+    if blocked:
+        return blocked
     found = monitors.list_monitors()
     src = monitors.monitor_of(win.hwnd, found)
     try:
@@ -222,6 +274,9 @@ def arrange_window(p: ArrangeParams) -> ToolResult:
     if not matches:
         return _no_window(p.title)
     win = matches[0]
+    blocked = _admin_block(win, p.action if p.action in ("maximize", "minimize", "restore") else "move")
+    if blocked:
+        return blocked
     result = ToolResult.success(f"{p.action}: '{win.title[:40]}'")
     result.context.update(hwnd=win.hwnd, action=p.action)
     if p.action == "maximize":
@@ -400,6 +455,11 @@ def register_os_tools(registry: Registry) -> None:
         name="os_close_window", description="Close an open window or app by part of its title or name.",
         params=CloseParams, layer="os", risk="low", run=close_window, verify=verify_close_window,
         idempotent=False, needs_confirm=_close_needs_confirm))
+    registry.register(Tool(
+        name="os_quit_app",
+        description="Quit an app completely (all its processes), also when it keeps running in the system tray after its window closed. "
+                    "Use only when the user says quit, exit, kill or force close; to just close a window use os_close_window.",
+        params=QuitParams, layer="os", risk="confirm", run=quit_app, verify=verify_quit_app, idempotent=False))
     registry.register(Tool(
         name="os_move_window", description="Move a window to another monitor (primary, secondary, left, right, other).",
         params=MoveParams, layer="os", risk="low", run=move_window, verify=verify_move_window, idempotent=False))
