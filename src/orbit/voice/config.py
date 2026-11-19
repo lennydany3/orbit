@@ -30,6 +30,19 @@ PIPER_DIR = MODELS_DIR / "piper"                 # <voice>.onnx + <voice>.onnx.j
 PIPER_VOICE = "en_US-hfc_female-medium"          # a female voice, chosen in V3 (amy and lessac are also downloaded)
 PIPER_LENGTH_SCALE = 1.0                         # below 1.0 = faster speech, above = slower
 
+# --- Cloud speech (Sarvam AI). "auto" = use Sarvam when SARVAM_API_KEY is set, with the local engines above as the fallback ---
+STT_PROVIDER = os.environ.get("ORBIT_STT", "auto").lower()       # auto | sarvam | local
+TTS_PROVIDER = os.environ.get("ORBIT_TTS", "auto").lower()       # auto | sarvam | local
+SARVAM_BASE_URL = "https://api.sarvam.ai"
+SARVAM_TIMEOUT_S = 10.0                          # a slow or missing network must not freeze a voice turn: give up and use the local engine
+SARVAM_COOLDOWN_S = 60.0                         # after a failure, use the local engine for this long before trying the cloud again
+SARVAM_STT_MODEL = os.environ.get("ORBIT_SARVAM_STT_MODEL", "saarika:v2.5")
+SARVAM_LANGUAGE = os.environ.get("ORBIT_LANGUAGE", "en-IN")      # what you speak: en-IN, hi-IN, ta-IN ... or "unknown" to auto-detect
+SARVAM_TTS_MODEL = os.environ.get("ORBIT_SARVAM_TTS_MODEL", "bulbul:v3")
+SARVAM_SPEAKER = os.environ.get("ORBIT_SARVAM_SPEAKER", "ritu")   # the voice Orbit speaks with (bulbul:v3: ritu, priya, neha, kavya, shubh, aditya, rahul, ...)
+SARVAM_TTS_RATE = 22_050                         # Hz of the audio Sarvam returns (it is resampled to 16 kHz for echo cancellation)
+SARVAM_TTS_PACE = 1.0                            # 1.0 = normal speed
+
 # --- Wake word (openWakeWord, CPU, ONNX) and push-to-talk ---
 WAKEWORD_DIR = MODELS_DIR / "openwakeword"
 WAKEWORD_MODEL = "hey_orbit"                     # trained here: python -m orbit.voice.run train-wake  (pre-trained stand-ins: hey_mycroft, alexa)

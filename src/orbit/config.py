@@ -2,7 +2,18 @@
 import os
 from pathlib import Path
 
+from .env import load_env
+
+load_env(Path(__file__).resolve().parents[2] / ".env")   # API keys (GROQ_API_KEY, SARVAM_API_KEY) come from this git-ignored file
+
 APP_NAME = "Orbit"  # the only place the product name lives: rename here.
+
+# --- Which language model answers: "auto" = Groq (cloud, fast) when GROQ_API_KEY is set, otherwise Ollama (local) ---
+LLM_PROVIDER = os.environ.get("ORBIT_LLM", "auto").lower()        # auto | groq | ollama
+GROQ_MODEL = os.environ.get("ORBIT_GROQ_MODEL", "openai/gpt-oss-120b")   # any Groq model that supports tool calling (list: console.groq.com/docs/models)
+GROQ_REASONING = os.environ.get("ORBIT_GROQ_REASONING", "low")           # gpt-oss models think before answering: low = fastest (low | medium | high)
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+GROQ_TIMEOUT_S = 30
 
 # --- LLM (local, via Ollama) ---
 MODEL = "qwen2.5:7b"

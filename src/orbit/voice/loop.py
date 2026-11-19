@@ -633,6 +633,21 @@ class EchoAgent:
         return f"Okay, I would do this: {text}"
 
 
+def privacy_note(transcriber, tts, llm_description: str = "") -> str:
+    """One honest line about what leaves this PC. The wake word, voice-activity detection and echo cancellation always stay local."""
+    sends = []
+    if getattr(transcriber, "name", "") == "sarvam":
+        sends.append("what you say after the wake word goes to Sarvam (speech-to-text)")
+    if any(getattr(e, "name", "") == "sarvam" for e in getattr(tts, "engines", [])):
+        sends.append("Orbit's replies go to Sarvam (text-to-speech)")
+    if "cloud" in llm_description:
+        sends.append("your requests go to Groq (language model)")
+    if not sends:
+        return "Speech-to-text, the wake word and the voice all run on this PC. Nothing is recorded or sent anywhere."
+    return ("Cloud mode: " + "; ".join(sends) + ". The wake word, silence detection and echo cancellation stay on this PC, "
+            "and audio is never saved by Orbit.")
+
+
 def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bool = True, follow_up: bool | None = None,
               seconds: float | None = None, wav: str | None = None, verbose: bool = False, out=print) -> str:
     """Builds everything and runs the loop. Returns "killed" | "quit" | "timeout", or "failed" if voice cannot start
@@ -640,14 +655,14 @@ def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bo
     from .audio_io import FileMic, MicStream, device_label
     from .hotkey import Hotkeys
     from .monitor import Monitor, lower_priority
-    from .stt import Transcriber
+    from .cloud import build_transcriber
     from .tts import make_tts
     from .vad import SileroVAD, SpeechSegmenter
 
     try:
         lower_priority()
         out("Loading voice (speech-to-text, wake word, voice) ...")
-        transcriber = Transcriber()
+        transcriber = build_transcriber(log=out)
         segmenter = SpeechSegmenter(SileroVAD(), pause_s=config.SPECULATIVE_PAUSE_S if config.SPECULATIVE_STT else None)
         check_vad = SileroVAD()
         wake = None
@@ -677,7 +692,7 @@ def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bo
     triggers = [f"hold {config.PTT_KEY}"] + ([f'say "{config.WAKEWORD_MODEL.replace("_", " ")}"'] if wake else [])
     out(f"Mic: {getattr(mic, 'label', None) or device_label(mic.device)}")
     out(f"Voice is on. Start a turn: {' or '.join(triggers)}.  Kill switch: {config.KILL_COMBO}.  Ctrl+C quits.")
-    out("Speech-to-text, the wake word and the voice all run on this PC. Nothing is recorded or sent anywhere.")
+    out(privacy_note(transcriber, tts, getattr(agent, "llm_description", "")))
     if loop._can_barge_in("ok"):
         out(f'You can interrupt Orbit by saying "{config.WAKEWORD_MODEL.replace("_", " ")}" while it talks, or by holding {config.PTT_KEY}.\n')
     else:

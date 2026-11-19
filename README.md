@@ -49,9 +49,22 @@ Two ways to use a browser, chosen with `--browser-mode` (or `ORBIT_BROWSER_MODE`
 
 Voice lives in `src/orbit/voice/` (test bench: `python -m orbit.voice.run --help`).
 
-- **Everything is local.** Microphone capture, wake word, voice-activity detection, hotkeys, speech-to-text (Whisper `small.en` on the CPU) and the spoken reply (Piper) all run on this PC. No audio ever leaves it, and the voice code makes no network calls.
+- **Local by default, cloud when you add keys.** Microphone capture, wake word, voice-activity detection, echo cancellation and hotkeys always run on this PC. With no API keys, speech-to-text (Whisper `small.en` on the CPU), the spoken reply (Piper) and the language model (Ollama) are local too, and nothing leaves the PC. With keys (next section), the speech clip, the reply text and your requests go to Sarvam and Groq. Orbit prints which mode it is in when voice starts.
 - **Nothing is recorded while idle.** Audio is only kept in memory for the turn being processed. No audio is saved by default: the only recordings are the test clips you make yourself with `python -m orbit.voice.run record` / `record-wake` (git-ignored, local only).
 - **Models:** `python -m orbit.voice.fetch_models ...` is the only thing that downloads voice models, and only when you run it.
+
+### Cloud mode: Groq (language model) + Sarvam AI (speech-to-text and voice), for lower latency
+
+1. Get keys: Groq at <https://console.groq.com/keys>, Sarvam at <https://dashboard.sarvam.ai>.
+2. Copy `.env.example` to `.env` in the project folder and paste them in (`.env` is git-ignored; a variable set in your terminal overrides the file):
+   ```
+   GROQ_API_KEY=gsk_...
+   SARVAM_API_KEY=...
+   ```
+3. Check them: `python -m orbit.cloud_check` (one tiny request each, prints the seconds each took).
+4. Run as usual: `python -m orbit --voice`. Each part switches to the cloud on its own when its key exists (`ORBIT_LLM`, `ORBIT_STT`, `ORBIT_TTS` = `auto` | cloud name | local force one side; `--llm ollama` forces the local model for one run).
+
+What goes where: only the speech clip trimmed by the local silence detector is uploaded (never the always-on microphone stream), the wake word and echo cancellation stay local, and Orbit saves no audio. If the internet or a service fails, Orbit falls back to Whisper / Piper / Windows voice for the next minute instead of waiting on timeouts; the language model has no automatic fallback (use `--llm ollama`). The Sarvam voice plays through the same output path as Piper and records what it plays for echo cancellation, so interrupting it by voice works the same. Model and voice names (`ORBIT_GROQ_MODEL`, `ORBIT_SARVAM_*`) are settings because providers rename them; `ORBIT_LANGUAGE` picks the language you speak (`en-IN`, `hi-IN`, ...).
 
 ### Talking to Orbit: `python -m orbit --voice`
 

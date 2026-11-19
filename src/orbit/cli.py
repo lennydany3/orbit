@@ -6,7 +6,8 @@ from . import config
 from .agent.loop import Agent
 from .agent.router import Router
 from .agent.safety import Safety
-from .llm.ollama_llm import OllamaLLM
+from .llm.base import LLMError
+from .llm.factory import make_llm
 from .logging_setup import ActionLog, setup_logging
 from .tools.api_layer import register_api_tools, spotify_auth
 from .tools.base import Registry
@@ -49,7 +50,7 @@ def spotify_status(registry: Registry) -> str:
     return f"Spotify: OFF ({spotify_auth.CLIENT_ID_ENV} is not set), so Spotify requests will not work."
 
 
-def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: bool = False) -> Agent:
+def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: bool = False, llm_provider: str | None = None) -> Agent:
     logger = setup_logging()
     log = ActionLog(logger=logger)
     registry = Registry()
@@ -58,8 +59,10 @@ def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: boo
     register_browser_tools(registry)
     if fake_tools:
         register_fake_tools(registry)  # test tools from Step 1; off by default so the model isn't tempted to use them
-    llm = OllamaLLM(model=model) if use_llm else None
-    return Agent(llm, registry, Router(log), Safety(), log)
+    llm, description = make_llm(llm_provider, ollama_model=model) if use_llm else (None, "rules only")
+    agent = Agent(llm, registry, Router(log), Safety(), log)
+    agent.llm_description = description   # shown in the start-up banner
+    return agent
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -80,7 +83,9 @@ def _main(argv: list[str] | None) -> int:
                         help=f"browser Orbit opens for websites (default {config.BROWSER})")
     parser.add_argument("--browser-mode", choices=["mine", "orbit"], default=config.BROWSER_MODE,
                         help="mine = open sites in your own Brave profile; orbit = Orbit's separate automated window")
-    parser.add_argument("--model", default=config.MODEL, help=f"Ollama model (default {config.MODEL})")
+    parser.add_argument("--model", default=config.MODEL, help=f"Ollama model, when the local model is used (default {config.MODEL})")
+    parser.add_argument("--llm", choices=["auto", "groq", "ollama"], default=None,
+                        help="language model: groq = cloud (needs GROQ_API_KEY), ollama = local, auto = groq if a key is set (default)")
     parser.add_argument("--voice", action="store_true", help="talk to Orbit: hold Right Ctrl or say the wake word (all local)")
     parser.add_argument("--mic", default=None, help="with --voice: microphone index or part of its name (default: ORBIT_MIC / Windows default)")
     parser.add_argument("--no-wake", action="store_true", help="with --voice: hold-to-talk only, no wake word")
@@ -92,13 +97,17 @@ def _main(argv: list[str] | None) -> int:
 
     browser_session.use(args.browser)
     config.BROWSER_MODE = args.browser_mode
-    agent = build_agent(use_llm=not args.no_llm, model=args.model, fake_tools=args.fake_tools)
+    try:
+        agent = build_agent(use_llm=not args.no_llm, model=args.model, fake_tools=args.fake_tools, llm_provider=args.llm)
+    except LLMError as e:
+        print(f"Cannot start the language model: {e}")
+        return 2
 
     if args.request:
         print(agent.handle(" ".join(args.request)))
         return 0
 
-    mode = "rules only" if args.no_llm else f"model {args.model}"
+    mode = "rules only" if args.no_llm else f"model {agent.llm_description}"
     print(f"{config.APP_NAME} ready ({mode}). Type 'help' for hints, 'quit' to exit. Ctrl+C stops a running request.")
     print("  " + spotify_status(agent.registry))
     if args.voice:

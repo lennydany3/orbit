@@ -4,6 +4,7 @@
     python tests/eval_llm.py --file cases_fuzzy.yaml           # loose requests, WITH real names given to the model
     python tests/eval_llm.py --file cases_fuzzy.yaml --no-facts  # same, without them (to see what the facts buy)
     python tests/eval_llm.py --model llama3.1:8b
+    python tests/eval_llm.py --llm groq --model openai/gpt-oss-20b   # the cloud model (needs GROQ_API_KEY)
 
 Only cases with step <= --step and via: llm are run. Use it to compare models/prompts on the same set.
 The facts are fixed here (not read from your PC) so runs are comparable.
@@ -54,13 +55,23 @@ def arg_matches(got_args: dict, key: str, want) -> bool:
     return norm(got_args.get(key)) == norm(want)
 
 
+def make_model(args):
+    if args.llm == "groq":
+        from orbit.llm.groq_llm import GroqLLM
+
+        return GroqLLM(model=args.model)
+    return OllamaLLM(model=args.model)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default=config.MODEL)
+    ap.add_argument("--llm", choices=["ollama", "groq"], default="ollama")
+    ap.add_argument("--model", default=None, help="default: the Ollama model, or the Groq model with --llm groq")
     ap.add_argument("--step", type=int, default=CURRENT_STEP)
     ap.add_argument("--file", default="cases.yaml")
     ap.add_argument("--no-facts", action="store_true", help="do not give the model the real names")
     args = ap.parse_args()
+    args.model = args.model or (config.GROQ_MODEL if args.llm == "groq" else config.MODEL)
 
     registry = Registry()
     register_fake_tools(registry)
@@ -75,7 +86,7 @@ def main() -> int:
         return context.format_facts({label: STATIC_FACTS[label] for label, _ in context.wanted_sources(text, previous)})
 
     quiet = lambda kind, message: None  # noqa: E731
-    agent = Agent(OllamaLLM(model=args.model), registry, Router(quiet), Safety(), quiet, facts_provider=facts)
+    agent = Agent(make_model(args), registry, Router(quiet), Safety(), quiet, facts_provider=facts)
 
     cases = load_cases() if args.file == "cases.yaml" else yaml.safe_load((Path(__file__).parent / args.file).read_text(encoding="utf-8"))
     passed = total = 0
