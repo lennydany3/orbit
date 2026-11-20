@@ -10,6 +10,7 @@ use rune::{Align, AppHandle, Color, Cx, El, col, effect, el, row, text};
 
 use crate::app::{App, Ask};
 use crate::orbit::{HasOrbit, Orbit};
+use crate::settings;
 use crate::view::{Ink, OVERLAY, OVERLAY_MARK, hex};
 
 /// The orb's diameter in points.
@@ -24,8 +25,11 @@ pub const ASK_EXTRA: f32 = 164.0;
 pub struct Face {
     pub orbit: Orbit,
     pub ask: Option<Ask>,
-    /// Whether Ctrl+Alt+Y and Ctrl+Alt+N are listening for the answer (they only are while a question is open).
+    /// Whether the yes and no chords are listening for the answer (they only are while a question is open).
     pub keys: bool,
+    /// Those two chords, as written in the settings file.
+    pub yes: String,
+    pub no: String,
     /// How the buttons reach the hub.
     pub hub: Option<AppHandle<App>>,
 }
@@ -38,7 +42,7 @@ impl HasOrbit for Face {
 
 impl Face {
     pub fn new(hub: Option<AppHandle<App>>) -> Face {
-        Face { orbit: Orbit::new(), ask: None, keys: false, hub }
+        Face { orbit: Orbit::new(), ask: None, keys: false, yes: settings::DEFAULT_YES.into(), no: settings::DEFAULT_NO.into(), hub }
     }
 
     /// The overlay's size for what it shows now.
@@ -54,6 +58,7 @@ impl Face {
             level: (self.orbit.level * 50.0).round() as i32,
             ask: self.ask.as_ref().map(|a| (a.id, a.sent)),
             keys: self.keys,
+            chords: (self.yes.clone(), self.no.clone()),
         }
     }
 
@@ -69,6 +74,7 @@ pub struct FaceKey {
     level: i32,
     ask: Option<(i64, Option<bool>)>,
     keys: bool,
+    chords: (String, String),
 }
 
 fn t(size: f32, weight: f32) -> TextStyle {
@@ -92,13 +98,13 @@ pub fn view(f: &Face, cx: &mut Cx<Face>) -> El {
 
     let mut root = col().key("face").w_full().h_full().justify_end().items_end().gap(14.0);
     if let Some(ask) = &f.ask {
-        root = root.child(ask_card(ask, f.keys, &ink));
+        root = root.child(ask_card(ask, f.keys.then(|| format!("{} yes \u{b7} {} no", settings::compact(&f.yes), settings::compact(&f.no))), &ink));
     }
     root.child(line)
 }
 
 /// Orbit is asking before it does something risky. The card and its two buttons are the only parts that take clicks.
-fn ask_card(ask: &Ask, keys: bool, ink: &Ink) -> El {
+fn ask_card(ask: &Ask, keys: Option<String>, ink: &Ink) -> El {
     let waiting = ask.sent.is_some();
     let answers = if waiting {
         text("Sent. Waiting for Orbit\u{2026}").font(t(12.0, 400.0)).color(ink.muted)
@@ -127,7 +133,7 @@ fn ask_card(ask: &Ask, keys: bool, ink: &Ink) -> El {
                 .max_w(WIDTH - 80.0),
         )
         .child(answers)
-        .child(text(if keys { "Ctrl+Alt+Y yes \u{b7} Ctrl+Alt+N no" } else { "" }).font(t(11.0, 400.0)).color(ink.muted))
+        .child(text(keys.unwrap_or_default()).font(t(11.0, 400.0)).color(ink.muted))
 }
 
 fn answer(key: &str, label: &str, yes: bool, ink: &Ink) -> El {

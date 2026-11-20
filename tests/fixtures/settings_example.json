@@ -1,0 +1,52 @@
+{
+  "commands": [
+    {
+      "enabled": true,
+      "id": "work-mode",
+      "name": "Work mode",
+      "phrases": [
+        "work mode",
+        "start working"
+      ],
+      "steps": [
+        {
+          "kind": "open",
+          "target": "Spotify"
+        },
+        {
+          "kind": "open",
+          "target": "https://github.com"
+        },
+        {
+          "kind": "wait",
+          "seconds": 1.5
+        },
+        {
+          "keys": "ctrl+shift+s",
+          "kind": "keys"
+        }
+      ]
+    },
+    {
+      "enabled": false,
+      "id": "greet",
+      "name": "Say hello",
+      "phrases": [
+        "say hello"
+      ],
+      "steps": [
+        {
+          "kind": "type",
+          "text": "Hello there!"
+        }
+      ]
+    }
+  ],
+  "hotkeys": {
+    "no": "ctrl+alt+n",
+    "orb": "ctrl+alt+o",
+    "talk": "f9",
+    "yes": "ctrl+alt+y"
+  },
+  "version": 1
+}

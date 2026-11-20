@@ -6,7 +6,8 @@
 use rune::tok::TextStyle;
 use rune::{Align, Color, Cx, El, col, effect, el, row, text};
 
-use crate::app::{App, Ask};
+use crate::app::{App, Ask, Page};
+use crate::editor::Section;
 use crate::orbit::SphereConfig;
 
 /// Marks that tell the compositor which sphere a slot is.
@@ -26,12 +27,13 @@ pub(crate) fn hex(s: &str) -> Color {
 pub(crate) struct Ink {
     pub fg: Color,
     pub muted: Color,
+    pub hair: Color,
     pub hair_strong: Color,
 }
 
 impl Ink {
     pub(crate) fn new() -> Ink {
-        Ink { fg: hex("#F2F3F5"), muted: hex("#8A8F98"), hair_strong: Color::WHITE.alpha(0.22) }
+        Ink { fg: hex("#F2F3F5"), muted: hex("#8A8F98"), hair: Color::WHITE.alpha(0.08), hair_strong: Color::WHITE.alpha(0.22) }
     }
 }
 
@@ -42,7 +44,11 @@ fn t(size: f32, weight: f32) -> TextStyle {
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     cx.reduced_motion(s.orbit.reduced());
     let ink = Ink::new();
-    row().key("window").w_full().h_full().fill(Color::BLACK).child(stage(s, &ink))
+    let body = match s.page {
+        Page::Stage => stage(s, &ink),
+        Page::Settings => crate::settings_view::page(s, &ink),
+    };
+    row().key("window").w_full().h_full().fill(Color::BLACK).child(body)
 }
 
 // ---- the stage ----------------------------------------------------------------------------
@@ -88,6 +94,30 @@ fn stage(s: &App, ink: &Ink) -> El {
             ),
     );
 
+    // A way in to the settings, top right.
+    let settings_button = row()
+        .key("top-right")
+        .absolute(0.0, 18.0)
+        .w_full()
+        .px(24.0)
+        .justify_end()
+        .child(
+            row()
+                .key("open-settings")
+                .role("button")
+                .label("Settings")
+                .focusable(true)
+                .h(32.0)
+                .px(14.0)
+                .center()
+                .radius(8.0)
+                .fill(Color::WHITE.alpha(0.06))
+                .border(1.0, Color::WHITE.alpha(0.12))
+                .hover(Color::WHITE.alpha(0.05))
+                .on_press(|s: &mut App| s.open_settings(Section::Hotkeys))
+                .child(text("Settings").font(t(12.0, 400.0)).color(ink.fg).a11y_hidden()),
+        );
+
     col()
         .key("stage")
         .grow(1.0)
@@ -98,6 +128,7 @@ fn stage(s: &App, ink: &Ink) -> El {
         .child(col().key("sphere-area").grow(1.0).min_h(0.0).child(sphere))
         .child(el().key("strip").h(72.0))
         .child(header)
+        .child(settings_button)
         .child(
             col()
                 .key("overlay")

@@ -16,12 +16,14 @@
 
 use std::time::Duration;
 
-use orbit_ui::app::App;
+use orbit_ui::app::{App, Page};
 use orbit_ui::autostart;
 use orbit_ui::clock;
+use orbit_ui::editor::{Section, SettingsState};
 use orbit_ui::face::{self, Face};
 use orbit_ui::link::{Event, Status};
 use orbit_ui::orbit::{OrbState, SphereCompositor};
+use orbit_ui::settings;
 use orbit_ui::shell::{self, Shell};
 use orbit_ui::spawn::Kind;
 use orbit_ui::view;
@@ -40,6 +42,7 @@ fn setup(s: &mut App, waker: Waker) {
     if rune::is_headless() {
         return;                                    // a snapshot starts nothing and connects to nothing
     }
+    s.sync_shell(clock::now(0.0));                 // the orb's hotkey, from the settings, from the very start
     let mut args = rune::extra_args().iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -72,8 +75,20 @@ fn poll(s: &mut App, t: f64, tx: &mut rune::Tx) -> bool {
     changed
 }
 
-/// Keys 1 to 9, 0 and M put the sphere in a state, to try them. Esc answers a question with no.
+/// While a hotkey is being recorded every key is for it. Otherwise: on the Settings page Esc goes back; on the big sphere keys
+/// 1 to 9, 0 and M put it in a state, to try them, and Esc answers a question with no.
 fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut rune::Tx) -> bool {
+    if s.record_key(ev, tx.key_base()) {
+        s.sync_shell(clock::now(tx.clock()));
+        return true;
+    }
+    if s.page == Page::Settings {
+        if ev.key == Key::Escape && s.prefs.draft.is_none() {
+            s.close_settings();
+            return true;
+        }
+        return false;
+    }
     if ev.mods.cmd || ev.mods.alt || ev.mods.ctrl || ev.mods.logo {
         return false;
     }
@@ -97,6 +112,12 @@ fn live(s: &mut App, state: &str, messages: &[&str]) {
     for m in messages {
         s.on_event(Event::Message((*m).to_owned()), 0.0);
     }
+}
+
+/// The Settings page showing the example settings file, saved nowhere.
+fn settings_scene(s: &mut App, section: Section) {
+    s.prefs = SettingsState::from_json(include_str!("../../tests/fixtures/settings_example.json"));
+    s.open_settings(section);
 }
 
 fn spec() -> AppSpec<App> {
@@ -130,6 +151,41 @@ fn spec() -> AppSpec<App> {
                     r#"{"type":"transcript","who":"you","text":"Close Notepad."}"#,
                     r#"{"type":"confirm","id":1,"question":"os_close_window(...) is a risky action. Allow?","action":"close window Notepad"}"#,
                 ])
+            }),
+            ("settings-hotkeys", |s| settings_scene(s, Section::Hotkeys)),
+            ("settings-recording", |s| {
+                settings_scene(s, Section::Hotkeys);
+                s.prefs.begin_record(orbit_ui::editor::Field::Yes);
+            }),
+            ("settings-orb-taken", |s| {
+                settings_scene(s, Section::Hotkeys);
+                s.prefs.orb_error = Some("Ctrl + Alt + O is already in use by another program, so Orbit cannot have it.".into());
+                s.prefs.fail("Ctrl + Alt + Y is already used for \"Answer yes\".");
+            }),
+            ("settings-commands", |s| settings_scene(s, Section::Commands)),
+            ("settings-commands-empty", |s| {
+                settings_scene(s, Section::Commands);
+                s.prefs = SettingsState::default();
+                s.open_settings(Section::Commands);
+            }),
+            ("settings-problems", |s| {
+                settings_scene(s, Section::Commands);
+                s.prefs = SettingsState::from_json(r#"{"commands":[{"name":"Broken","phrases":["x"],"steps":[{"kind":"run","program":"calc.exe"}]}]}"#);
+                s.open_settings(Section::Commands);
+            }),
+            ("settings-editor", |s| {
+                settings_scene(s, Section::Commands);
+                s.prefs.edit_command(0);
+            }),
+            ("settings-editor-new", |s| {
+                settings_scene(s, Section::Commands);
+                s.prefs.new_command();
+                s.prefs.add_step(orbit_ui::editor::StepKind::Keys);
+                let _ = s.prefs.save_draft();
+            }),
+            ("settings-delete", |s| {
+                settings_scene(s, Section::Commands);
+                s.prefs.ask_delete(1);
             }),
             ("live-retrying", |s| s.on_event(Event::Status(Status::Closed), 0.0)),
             ("live-refused", |s| s.connect("ws://example.com:8765/?token=x", 0.0)),
@@ -206,9 +262,10 @@ fn main() {
     let orb = app.overlay(orb_overlay(), Face::new(Some(hub.clone())));
     let tray = shell::make_tray(hub.clone());
     let hub_in_state = hub.clone();
-    let app = app
-        .global_shortcut("ctrl+alt+o", |s, tx| s.toggle_pin(clock::now(tx.clock())))
-        .init(move || App::default().with_shell(Shell::new(orb, hub_in_state, tray)));
+    let prefs_file = settings::path();
+    let app = app.init(move || {
+        App::default().with_shell(Shell::new(orb, hub_in_state, tray)).with_settings(SettingsState::open(prefs_file.clone()))
+    });
     if open_window {
         hub.open();
     }

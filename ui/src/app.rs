@@ -7,14 +7,16 @@
 
 use std::sync::Arc;
 
-use rune::{TextEdit, Waker};
+use rune::{KeyEvent, TextEdit, Waker};
 
+use crate::editor::{self, Field, Recorded, Section, SettingsState};
 use crate::face::Face;
 use crate::link::message::{self, Incoming};
 use crate::link::{Event, Link, Status};
 use crate::orbit::{HasOrbit, OrbState, Orbit};
 use crate::pacer::Pacer;
 use crate::presence::Presence;
+use crate::settings;
 use crate::shell::Shell;
 use crate::spawn::{Kind, Spawned};
 
@@ -140,6 +142,15 @@ impl Default for Live {
     }
 }
 
+/// What the window shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Page {
+    /// The big sphere.
+    #[default]
+    Stage,
+    Settings,
+}
+
 pub struct App {
     pub orbit: Orbit,
     /// The slider's own value, used when nothing is simulating the level.
@@ -154,11 +165,14 @@ pub struct App {
     pub presence: Presence,
     /// The orb's window and the tray icon (empty until the app has made them).
     pub shell: Shell,
+    pub page: Page,
+    /// The Settings page: the hotkeys and the user's own commands.
+    pub prefs: SettingsState,
 }
 
 impl Default for App {
     fn default() -> Self {
-        App { orbit: Orbit::new(), manual: 0.35, voice: false, demo: None, shown_level: 0.35, last_push: -1.0, live: Live::default(), presence: Presence::new(), shell: Shell::default() }
+        App { orbit: Orbit::new(), manual: 0.35, voice: false, demo: None, shown_level: 0.35, last_push: -1.0, live: Live::default(), presence: Presence::new(), shell: Shell::default(), page: Page::Stage, prefs: SettingsState::default() }
     }
 }
 
@@ -173,6 +187,71 @@ impl App {
     pub fn with_shell(mut self, shell: Shell) -> App {
         self.shell = shell;
         self
+    }
+
+    /// The app with its settings read from (and saved to) a file.
+    pub fn with_settings(mut self, prefs: SettingsState) -> App {
+        self.prefs = prefs;
+        self
+    }
+
+    // ---- the settings page ------------------------------------------------------------------------------------------
+
+    pub fn open_settings(&mut self, section: Section) {
+        self.page = Page::Settings;
+        self.prefs.select(section);
+    }
+
+    pub fn close_settings(&mut self) {
+        self.page = Page::Stage;
+        self.prefs.cancel_record();
+        self.prefs.cancel_draft();
+    }
+
+    /// While a hotkey is being recorded every key is for it. True if this key was used.
+    pub fn record_key(&mut self, ev: &KeyEvent, base: Option<char>) -> bool {
+        let Some(field) = self.prefs.recording else { return false };
+        match editor::chord_from_event(ev, base) {
+            Recorded::Ignore => {}
+            Recorded::Cancel => self.prefs.cancel_record(),
+            Recorded::Refused(why) => self.prefs.fail(why),
+            Recorded::Chord(chord) => {
+                // A chord that does not work (taken, or the same as another) leaves recording on, to try another.
+                if self.change_hotkey(field, &chord) {
+                    self.prefs.cancel_record();
+                }
+            }
+        }
+        true
+    }
+
+    /// Makes `text` the hotkey for `field`, if it is a good one and Windows will give it to Orbit.
+    pub fn change_hotkey(&mut self, field: Field, text: &str) -> bool {
+        let chord = match self.prefs.check_hotkey(field, text) {
+            Ok(chord) => chord,
+            Err(why) => {
+                self.prefs.fail(why);
+                return false;
+            }
+        };
+        if chord != self.prefs.hotkey(field) {
+            if let Err(why) = self.shell.probe(&chord) {
+                self.prefs.fail(why);
+                return false;
+            }
+        }
+        self.prefs.apply_hotkey(field, chord)
+    }
+
+    /// All the hotkeys back to the defaults (the orb's one only if Windows will give it back).
+    pub fn reset_hotkeys(&mut self) {
+        let orb = settings::DEFAULT_ORB;
+        if self.prefs.hotkey(Field::Orb) != orb {
+            if let Err(why) = self.shell.probe(orb) {
+                return self.prefs.fail(why);
+            }
+        }
+        self.prefs.reset_hotkeys();
     }
 
     // ---- by hand ----------------------------------------------------------------------------------------------------
@@ -405,11 +484,18 @@ impl App {
 
     /// What the orb's window shows now.
     pub fn face(&self) -> Face {
-        Face { orbit: self.orbit.clone(), ask: self.live.confirm.clone(), keys: false, hub: self.shell.hub.clone() }
+        let keys = self.prefs.hotkeys();
+        Face { orbit: self.orbit.clone(), ask: self.live.confirm.clone(), keys: false, yes: keys.yes.clone(), no: keys.no.clone(), hub: self.shell.hub.clone() }
     }
 
     /// Brings the orb's window up to date: its content, whether it is showing, and its size.
     pub fn sync_shell(&mut self, t: f64) {
+        // The orb's chord is let go while a new one is being recorded, so pressing it reaches the page instead of toggling the orb.
+        let wanted = self.prefs.recording.is_none().then(|| self.prefs.hotkeys().orb.clone());
+        self.prefs.orb_error = self.shell.sync_orb_chord(wanted.as_deref()).err();
+        if let (Some(why), true) = (&self.prefs.orb_error, std::env::var_os("ORBIT_UI_DEBUG").is_some()) {
+            eprintln!("[hub] orb chord: {why}");
+        }
         let visible = self.presence.visible(self.active(), t);
         let face = self.face();
         self.shell.apply(face, visible);

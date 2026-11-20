@@ -3,11 +3,14 @@
 pub mod app;
 pub mod autostart;
 pub mod clock;
+pub mod editor;
 pub mod face;
 pub mod link;
 pub mod orbit;
 pub mod pacer;
 pub mod presence;
+pub mod settings;
+pub mod settings_view;
 pub mod shell;
 pub mod spawn;
 pub mod view;

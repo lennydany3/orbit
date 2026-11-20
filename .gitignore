@@ -11,3 +11,4 @@ tests/voice/fixtures_*/
 
 # Rust GUI build output
 ui/target/
+settings.json

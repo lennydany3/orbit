@@ -84,6 +84,7 @@ impl Spawned {
             .args(&plan.args)
             .current_dir(&plan.cwd)
             .env("ORBIT_IPC_TOKEN", &plan.token)
+            .env("ORBIT_SETTINGS", crate::settings::path())
             .env("PYTHONIOENCODING", "utf-8")
             .stdin(Stdio::piped())
             .spawn()

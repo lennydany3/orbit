@@ -1,0 +1,164 @@
+"""The settings file: what Orbit accepts, and what it quietly leaves out so a bad entry never stops it."""
+import json
+from pathlib import Path
+
+import pytest
+
+from orbit import settings
+
+FIXTURE = Path(__file__).parent / "fixtures" / "settings_example.json"
+
+
+def parsed(data) -> settings.Settings:
+    return settings.parse(data)
+
+
+def command(**kw) -> dict:
+    return {"name": "Work", "phrases": ["work mode"], "steps": [{"kind": "open", "target": "Spotify"}]} | kw
+
+
+def test_no_file_means_the_defaults(tmp_path):
+    s = settings.load(tmp_path / "nope.json")
+    assert s.hotkeys == settings.DEFAULT_HOTKEYS and s.commands == [] and s.problems == []
+
+
+def test_the_example_file_the_window_writes_is_read_as_written():
+    s = settings.load(FIXTURE)
+    assert s.problems == []
+    assert s.hotkeys == {"orb": "ctrl+alt+o", "yes": "ctrl+alt+y", "no": "ctrl+alt+n", "talk": "f9"}
+    work, hello = s.commands
+    assert (work.id, work.name, work.enabled, work.phrases) == ("work-mode", "Work mode", True, ("work mode", "start working"))
+    assert [(x.kind, x.value, x.seconds) for x in work.steps] == [
+        ("open", "Spotify", 0.0), ("open", "https://github.com", 0.0), ("wait", "", 1.5), ("keys", "ctrl+shift+s", 0.0)]
+    assert not hello.enabled and hello.steps[0].value == "Hello there!"
+    assert work.sends_keys and hello.sends_keys
+
+
+def test_broken_json_falls_back_to_the_defaults_and_says_so(tmp_path):
+    f = tmp_path / "s.json"
+    f.write_text("{not json", encoding="utf-8")
+    s = settings.load(f)
+    assert s.hotkeys == settings.DEFAULT_HOTKEYS and "not valid JSON" in s.problems[0]
+
+
+def test_a_file_saved_with_a_byte_order_mark_still_reads(tmp_path):
+    f = tmp_path / "s.json"
+    f.write_text(json.dumps({"hotkeys": {"talk": "f8"}}), encoding="utf-8-sig")
+    assert settings.load(f).talk_key == "f8"
+
+
+def test_something_that_is_not_an_object_is_ignored():
+    for data in ([], "x", 3, None):
+        assert "not a JSON object" in parsed(data).problems[0]
+
+
+@pytest.mark.parametrize("key", ["ctrl_r", "f9", "caps_lock", "alt_gr", "z", "5"])
+def test_these_hold_to_talk_keys_are_accepted(key):
+    assert parsed({"hotkeys": {"talk": key}}).talk_key == key
+
+
+@pytest.mark.parametrize("key", ["banana", "", "ctrl", "ctrl+r", 5, None, " ", "ab", ["f9"]])
+def test_a_bad_talk_key_keeps_the_default(key):
+    s = parsed({"hotkeys": {"talk": key}})
+    assert s.talk_key == "ctrl_r"
+    if key is not None:
+        assert "talk key" in s.problems[0]
+
+
+def test_every_talk_key_name_exists_in_pynput():
+    from pynput import keyboard
+    missing = [k for k in settings.TALK_KEYS if not hasattr(keyboard.Key, k)]
+    assert missing == []
+
+
+def test_the_window_checks_the_other_chords_so_here_they_only_need_to_be_text():
+    s = parsed({"hotkeys": {"orb": " Ctrl+Alt+P ", "yes": 5, "no": ""}})
+    assert s.hotkeys["orb"] == "ctrl+alt+p" and s.hotkeys["yes"] == "ctrl+alt+y" and s.hotkeys["no"] == "ctrl+alt+n"
+
+
+def test_a_command_is_phrases_plus_steps_and_phrases_are_made_comparable():
+    c = parsed({"commands": [command(phrases=["  Work   MODE!  ", "Let's work", "work mode"])]}).commands[0]
+    assert c.phrases == ("work mode", "lets work"), "lowercase, no punctuation, no repeats"
+    assert c.id == "work" and c.enabled
+
+
+def test_a_command_missing_a_name_steps_or_phrases_is_dropped_with_a_reason():
+    s = parsed({"commands": [command(name=""), command(steps=[]), command(phrases=[]), command(phrases=["!!!"]), "x", 4]})
+    assert s.commands == []
+    assert len(s.problems) == 6 and any("no steps" in p for p in s.problems) and any("nothing to say" in p for p in s.problems)
+
+
+@pytest.mark.parametrize("step, why", [
+    ({"kind": "open"}, "nothing to open"), ({"kind": "open", "target": "  "}, "nothing to open"),
+    ({"kind": "keys", "keys": "ctrl+banana"}, "unknown key"), ({"kind": "keys"}, "no keys"),
+    ({"kind": "type", "text": ""}, "no text"), ({"kind": "type", "text": "x" * 501}, "longer than"),
+    ({"kind": "wait", "seconds": 0}, "wait must be"), ({"kind": "wait", "seconds": 31}, "wait must be"),
+    ({"kind": "wait", "seconds": True}, "wait must be"), ({"kind": "wait", "seconds": "2"}, "wait must be"),
+    ({"kind": "run", "program": "calc.exe"}, "unknown step 'run'"), ("open Spotify", "not an object"),
+])
+def test_a_command_with_one_bad_step_is_dropped_whole_rather_than_run_half(step, why):
+    s = parsed({"commands": [command(steps=[{"kind": "open", "target": "Spotify"}, step])]})
+    assert s.commands == [] and why in s.problems[0]
+
+
+def test_a_keys_step_is_stored_in_its_one_canonical_form():
+    c = parsed({"commands": [command(steps=[{"kind": "keys", "keys": "Win+Shift+S"}])]}).commands[0]
+    assert c.steps[0].value == "shift+win+s"
+
+
+def test_two_commands_cannot_share_a_phrase_the_first_one_keeps_it():
+    s = parsed({"commands": [command(name="A", phrases=["go"]), command(name="B", phrases=["go", "other"])]})
+    assert [c.phrases for c in s.commands] == [("go",), ("other",)]
+    assert "'go' already belongs to 'A'" in s.problems[0]
+
+
+def test_a_switched_off_command_does_not_hold_on_to_its_phrase():
+    s = parsed({"commands": [command(name="A", phrases=["go"], enabled=False), command(name="B", phrases=["go"])]})
+    assert s.commands[1].phrases == ("go",) and s.problems == []
+
+
+def test_limits_keep_the_file_small():
+    many = [command(name=f"C{i}", phrases=[f"p{i}"]) for i in range(settings.MAX_COMMANDS + 5)]
+    s = parsed({"commands": many})
+    assert len(s.commands) == settings.MAX_COMMANDS and "only the first" in s.problems[-1]
+    c = parsed({"commands": [command(phrases=[f"phrase {i}" for i in range(20)])]}).commands[0]
+    assert len(c.phrases) == settings.MAX_PHRASES
+    assert parsed({"commands": [command(steps=[{"kind": "wait", "seconds": 1}] * (settings.MAX_STEPS + 1))]}).commands == []
+
+
+def test_a_command_says_what_it_will_do_in_plain_words():
+    s = settings.load(FIXTURE)
+    assert s.commands[0].describe() == "open Spotify, then open https://github.com, then wait 1.5 seconds, then press ctrl+shift+s"
+    assert s.commands[1].describe() == 'type "Hello there!"'
+
+
+def test_the_settings_path_can_be_moved_with_an_environment_variable(monkeypatch, tmp_path):
+    monkeypatch.setenv("ORBIT_SETTINGS", str(tmp_path / "mine.json"))
+    assert settings.path() == tmp_path / "mine.json"
+    monkeypatch.delenv("ORBIT_SETTINGS")
+    assert settings.path().name == "settings.json"
+
+
+# ---------------------------------------------------------------- rules shared with the window (the Rust side reads the same files)
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_key_combinations_are_read_the_way_the_window_reads_them():
+    from orbit.tools.os_layer import keyboard
+    for case in json.loads((FIXTURES / "key_combos.json").read_text(encoding="utf-8")):
+        if case.get("error"):
+            with pytest.raises(keyboard.KeyError_):
+                keyboard.parse_chord(case["in"])
+        else:
+            assert str(keyboard.parse_chord(case["in"])) == case["out"], case["in"]
+
+
+def test_phrases_are_compared_the_way_the_window_compares_them():
+    for said, expected in json.loads((FIXTURES / "phrases.json").read_text(encoding="utf-8")):
+        assert settings.normalize_phrase(said) == expected, said
+
+
+def test_the_talk_keys_the_window_offers_are_the_ones_orbit_accepts():
+    keys = json.loads((FIXTURES / "talk_keys.json").read_text(encoding="utf-8"))
+    assert all(settings.valid_talk_key(k) for k in keys["valid"]), [k for k in keys["valid"] if not settings.valid_talk_key(k)]
+    assert not any(settings.valid_talk_key(k) for k in keys["invalid"]), [k for k in keys["invalid"] if settings.valid_talk_key(k)]

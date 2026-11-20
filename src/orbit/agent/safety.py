@@ -35,6 +35,12 @@ class Safety:
             return True, ""
         return False, f"the user declined '{name}', so it was not run. Do not retry it."
 
+    def approve_command(self, name: str, steps: str) -> tuple[bool, str]:
+        """One yes for a whole custom command that presses keys or types: the question lists everything it will do."""
+        if self.confirm(f"custom_command({ {'name': name, 'steps': steps} }) is a risky action. Allow?"):
+            return True, ""
+        return False, f"the user declined '{name}', so it was not run."
+
     def is_path_allowed(self, path: str | Path) -> bool:
         """For file tools: only paths inside the allow-listed folders may be touched."""
         resolved = Path(path).expanduser().resolve()

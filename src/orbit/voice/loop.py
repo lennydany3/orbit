@@ -63,6 +63,8 @@ def describe_action(question: str) -> str:
         params = ast.literal_eval(m.group(2))
     except (ValueError, SyntaxError):
         params = {}
+    if words == ["custom", "command"] and params.get("name"):
+        return f"run your {params['name']} command: {params.get('steps', '')}"[:240]
     if words == ["quit", "app"] and params.get("name"):
         return f"quit {params['name']} completely"
     detail = " ".join(str(v) for v in params.values() if isinstance(v, (str, int, float)) and not isinstance(v, bool) and str(v).strip())
@@ -743,12 +745,12 @@ def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bo
     llm = getattr(agent, "llm", None)
     if llm is not None and hasattr(llm, "warm_up"):
         threading.Thread(target=_keep_model_warm, args=(llm, out), daemon=True, name="llm-warm").start()
-    triggers = [f"hold {config.PTT_KEY}"] + ([f'say "{config.WAKEWORD_MODEL.replace("_", " ")}"'] if wake else [])
+    triggers = [f"hold {keys.ptt_name}"] + ([f'say "{config.WAKEWORD_MODEL.replace("_", " ")}"'] if wake else [])
     out(f"Mic: {getattr(mic, 'label', None) or device_label(mic.device)}")
     out(f"Voice is on. Start a turn: {' or '.join(triggers)}.  Kill switch: {config.KILL_COMBO}.  Ctrl+C quits.")
     out(privacy_note(transcriber, tts, getattr(agent, "llm_description", "")))
     if loop._can_barge_in("ok"):
-        out(f'You can interrupt Orbit by saying "{config.WAKEWORD_MODEL.replace("_", " ")}" while it talks, or by holding {config.PTT_KEY}.\n')
+        out(f'You can interrupt Orbit by saying "{config.WAKEWORD_MODEL.replace("_", " ")}" while it talks, or by holding {keys.ptt_name}.\n')
     else:
         out("")
     try:

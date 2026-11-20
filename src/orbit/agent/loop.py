@@ -9,6 +9,7 @@ from .. import config
 from ..llm.base import LLM, LLMError
 from ..tools.base import Registry, ToolResult
 from . import context, friend, rescue, rules
+from . import custom as custom_commands
 from .router import Log, Router
 from .safety import Safety
 
@@ -78,7 +79,9 @@ class Agent:
         facts_provider: context.FactsProvider | None = None,
         chat_llm: LLM | None = None,
         friend_mode: bool = config.FRIEND_MODE,
+        custom: custom_commands.CustomCommands | None = None,
     ):
+        self.custom = custom                  # the user's own commands from the Settings page (None = none)
         self.llm = llm
         self.chat_llm = chat_llm or llm       # the model for friend-mode conversation (a warmer temperature than the command model)
         self.friend_mode = friend_mode
@@ -153,7 +156,19 @@ class Agent:
         return reply
 
     # ---- internals ----
+    def _run_custom(self, command, text: str) -> str:
+        """One of the user's own commands (Settings page): its steps run in order; the model is not involved."""
+        self.log("custom", f"'{command.name}' matched, {len(command.steps)} step(s), no model call")
+        self.last_request = text
+        ok, reply = custom_commands.run(command, self)
+        self._part_failed = not ok
+        return self._finish([{"role": "user", "content": text}], reply)
+
     def _handle(self, text: str) -> str:
+        if self.custom is not None:
+            command = self.custom.match(text)
+            if command is not None:
+                return self._run_custom(command, text)
         # Several requests in one sentence ("open spotify and then tell me what is playing"): handle them one at a
         # time, each as its own small request (a rule if one fits, otherwise the model). A small model is far
         # more reliable on one thing at a time. Only done when every part starts like a request.

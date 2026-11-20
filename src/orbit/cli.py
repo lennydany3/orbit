@@ -3,6 +3,7 @@ import argparse
 import sys
 
 from . import config
+from .agent.custom import CustomCommands
 from .agent.loop import Agent
 from .agent.router import Router
 from .agent.safety import Safety
@@ -80,8 +81,11 @@ def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: boo
         register_fake_tools(registry)  # test tools from Step 1; off by default so the model isn't tempted to use them
     llm, description = make_llm(llm_provider, ollama_model=model) if use_llm else (None, "rules only")
     chat_llm = llm.with_temperature(config.CHAT_TEMPERATURE) if hasattr(llm, "with_temperature") else llm
-    agent = Agent(llm, registry, Router(log), Safety(), log, chat_llm=chat_llm, friend_mode=friend and config.FRIEND_MODE)
+    agent = Agent(llm, registry, Router(log), Safety(), log, chat_llm=chat_llm, friend_mode=friend and config.FRIEND_MODE,
+                  custom=CustomCommands())
     agent.llm_description = description   # shown in the start-up banner
+    for problem in agent.custom.problems if agent.custom else []:
+        log("settings", problem)            # a command or key in settings.json that Orbit had to leave out
     return agent
 
 

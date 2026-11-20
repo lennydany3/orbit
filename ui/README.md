@@ -15,7 +15,8 @@ cargo test                                 # the logic, and the link against Orb
 ```
 
 - **Ctrl+Alt+O**, or a click on the tray icon, pins the orb on screen (again to let it go).
-- **Tray menu** (right-click): show or hide the orb, open the Orbit window, quit. Quitting also stops the Orbit it started.
+- **Settings** (the button top right of the window, or Settings... in the tray menu): see below.
+- **Tray menu** (right-click): show or hide the orb, open the Orbit window, Settings, quit. Quitting also stops the Orbit it started.
 - **The orb never takes focus**, and clicks pass straight through it. Only the Yes and No buttons of a question take clicks.
   You can answer a question by clicking, by voice, or with **Ctrl+Alt+Y** (yes) and **Ctrl+Alt+N** (no): those two chords are
   held only while a question is open, so they never take those keys from another program the rest of the time. Closing the
@@ -29,6 +30,26 @@ cargo test                                 # the logic, and the link against Orb
 - **Cost at rest:** with the orb hidden, about 0% of one core and about 100 MB (the orb's window and GPU surface are made at
   startup so it appears the moment Orbit wakes: about 0.2 s, against about 1 s if made on first use). While the orb animates,
   about 10% of one core.
+
+## Settings
+
+The Settings page (a Settings button on the window, and Settings... in the tray menu) controls Orbit from one place. Every
+change is saved the moment it is made, to `settings.json` in the project folder (`ORBIT_SETTINGS` moves it; it is git-ignored).
+The window writes it and Orbit reads it; they share the rules in `tests/fixtures`, which both sides are tested against.
+
+- **Hotkeys.** Click a chord, press the new keys (Esc cancels). The chord for showing the orb, and the yes and no answers, take
+  effect at once; one Windows will not give Orbit (another program has it) is refused with a reason and nothing changes. The
+  hold-to-talk key is picked from a list, and Orbit follows it within a second, with no restart. Reset puts all four back.
+- **Commands.** Say a phrase and Orbit runs a list of steps in order: open an app, a website or a folder; press a key combination
+  (`win+shift+s`); type text; wait a moment. Switch a command off without deleting it. A command that presses keys or types
+  asks "yes or no?" first, once for the whole command, listing exactly what it will do (so it can be answered by voice, by
+  clicking, or with the answer chords). Steps that open a folder only open it: nothing is ever run, and the language model
+  never sees these commands and cannot press keys or type. Orbit picks up a saved command at once.
+- A hand-edited file Orbit cannot fully read does not stop anything: the bad entry is left out, the page lists what, and the
+  first save keeps the old file as `settings.json.bak`.
+
+More groups (the model and its keys, the voice, the orb) slot in as another `Section` in `src/editor.rs`, another nav entry
+and function in `src/settings_view.rs`.
 
 An Orbit that is already running is started with `python -m orbit --voice --ipc`, which prints the link to pass with
 `--url`. Or let the app start one itself with `--spawn` (or `--spawn-demo`). Close the window, or have it crash, and the Orbit
