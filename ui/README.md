@@ -1,23 +1,55 @@
 # orbit-ui
 
-Orbit's face: the particle sphere from the design, drawn on the GPU with [Rune](https://github.com/anomalyco/rune).
-Step 1 of the GUI: the sphere, its eleven states, and a design-review window. No backend link yet.
+Orbit's face: the particle sphere from the design, drawn on the GPU with [Rune](https://github.com/anomalyco/rune), and its
+link to Orbit. It shows what Orbit is doing (listening, thinking, speaking, your voice level, what was said) and asks you
+"are you sure?" in a dialog when Orbit wants to do something risky.
 
 ```
-cargo run --release                       # the window (keys 1-9, 0, M pick a state)
-cargo test                                # state, timing and demo logic (no GPU needed)
-cargo run -- --snap out.png --size 1280x800 --scene thinking --at 2     # headless picture (debug build)
-cargo run -- --script s.json --snap out.png --at 1.0                    # drive clicks and keys, then picture
+cargo run --release                        # the design-review window (hand-made states, demo, simulated voice)
+cargo run --release -- --spawn             # start Orbit (microphone, wake word, model) and show it
+cargo run --release -- --spawn-demo        # start a scripted turn with a yes/no question: no microphone needed
+cargo run --release -- --url "ws://127.0.0.1:8765/?token=..."    # show an Orbit that is already running
+cargo test                                 # the logic, and the link against Orbit's real demo (needs the project's .venv)
 ```
 
-Rune is pinned to one revision in `Cargo.toml` (`dev` is never rewritten). Cargo does not inherit a
-dependency's `[patch]` table, so it is repeated there at the same revision: update both together.
+An Orbit that is already running is started with `python -m orbit --voice --ipc`, which prints the link to paste in the
+panel's **Backend** box (or pass with `--url`). The window can also start one itself: **Start Orbit** and **Start demo** in
+the same section. Close the window, or have it crash, and the Orbit it started stops by itself (see below).
+
+Keys 1-9, 0 and M put the sphere in a state by hand. While the link is open Orbit drives instead, and Esc answers a question
+with "no".
+
+## How the window and Orbit fit together
+
+- **The link** is a WebSocket on `127.0.0.1` with a password in the address. The window refuses to connect anywhere else,
+  because the address carries that password. Orbit tells the window its state, the loudness of the voice being heard, what was
+  said and any open question; the window can send exactly one thing back, the yes or no to that question. The messages are
+  listed at the top of `src/orbit/ipc/protocol.py` in the Orbit project.
+- **Starting Orbit.** `--spawn` makes a one-off password and a free port, starts Orbit with them, and connects. It keeps the
+  child's standard input open and never writes to it: when the window closes or crashes the pipe ends, and Orbit stops cleanly
+  by itself, so there is never an Orbit listening with nobody to show it. Set `ORBIT_PYTHON` to use another Python than the
+  project's `.venv`, and `ORBIT_ROOT` if the project is elsewhere.
+- **Pacing.** Orbit reports what happened ("wake" then, a tenth of a second later, "listening"); the window owns how long each
+  animation takes, so a flash (wake 0.4 s, success 0.75 s, error 0.7 s) always plays out before the next state shows. The kill
+  switch never waits. See `src/pacer.rs`.
+- **Reconnecting.** The link retries by itself (0.5 s, doubling, at most 8 s), so starting the window before Orbit, or
+  restarting Orbit, just works. Losing Orbit returns the sphere to idle and clears the caption and any open question.
 
 ## Layout
 
-- `src/orbit/` the sphere. `state` (the 11 states), `params` (what each does, blended on change),
-  `controller` (the shared state, level and timers), `sim` (one sphere's clock and blend, produces the
-  numbers for a frame), `geometry` (the points), `gpu` + `sphere.wgsl` (drawing), `compositor` (paints a
-  sphere in every Rune `effect` slot).
-- `src/app.rs` app state: dev-panel controls, the scripted demo turn, the simulated voice.
-- `src/view.rs` the window, copied from the design.
+- `src/orbit/` the sphere. `state` (the 11 states), `params` (what each does, blended on change), `controller` (the shared
+  state, level and timers), `sim` (one sphere's clock and blend, produces the numbers for a frame), `geometry` (the points),
+  `gpu` + `sphere.wgsl` (drawing), `compositor` (paints a sphere in every Rune `effect` slot).
+- `src/link/` the connection: `message` (what Orbit sends, as types), `endpoint` (which addresses are allowed), and the thread
+  that connects, reads, writes the one answer, and reconnects.
+- `src/pacer.rs` flash timing. `src/spawn.rs` starting Orbit. `src/app.rs` app state and rules. `src/view.rs` the window.
+- `tests/live.rs` the window's link against Orbit's real demo over a real socket: a whole turn, a question answered from the
+  window, a wrong password, retrying until Orbit is up, and Orbit stopping when the window goes away.
+
+## Building
+
+Rune is pinned to one revision in `Cargo.toml` (`dev` is never rewritten). Cargo does not inherit a dependency's `[patch]`
+table, so it is repeated there at the same revision: update both together.
+
+Headless pictures, without a window (debug build): `cargo run -- --snap out.png --size 1280x800 --scene live-confirm --at 1`.
+Scenes: the 11 states, `live-speaking`, `live-confirm`, `live-retrying`, `live-refused`.

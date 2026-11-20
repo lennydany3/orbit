@@ -114,6 +114,8 @@ def _main(argv: list[str] | None) -> int:
     parser.add_argument("--ipc", action="store_true",
                         help="with --voice: let the sphere window connect (a WebSocket on this PC only, protected by a token)")
     parser.add_argument("--ipc-port", type=int, default=config.IPC_PORT, help=f"with --ipc: the port (default {config.IPC_PORT})")
+    parser.add_argument("--exit-with-parent", action="store_true",
+                        help="stop (like Ctrl+C) when standard input ends: set by the sphere window, which keeps it open while it runs")
     args = parser.parse_args(argv)
     if args.ipc and not args.voice:
         parser.error("--ipc needs --voice: the sphere shows a voice turn")
@@ -145,13 +147,21 @@ def _main(argv: list[str] | None) -> int:
         link = start_link(args.ipc_port) if args.ipc else None
         if args.ipc and link is None:
             return 2
+        if args.exit_with_parent:
+            import _thread
+
+            from .ipc.lifetime import watch_parent
+
+            watch_parent(sys.stdin.buffer, _thread.interrupt_main)
         try:
             result = run_voice(agent, device=args.mic or voice_config.MIC_DEVICE, wake_enabled=not args.no_wake,
                                follow_up=False if args.no_follow_up else None, ui=link.bridge if link else None)
+        except KeyboardInterrupt:                  # the window went away while voice was still loading
+            result = "quit"
         finally:
             if link:
                 link.stop()
-        if result in ("quit", "timeout"):
+        if result in ("quit", "timeout") or args.exit_with_parent:
             return 0
         print("Voice is off. Text mode: type a request ('help' for hints, 'quit' to exit).")
     while True:

@@ -152,7 +152,7 @@ impl Sphere {
         let red = if (0.0..1.0).contains(&ee) { smooth(0.0, 0.05, ee as f32) * (1.0 - smooth(0.42, 0.8, ee as f32)) } else { 0.0 };
         let sweep_env = if (0.0..0.75).contains(&es) { (PI * clamp01((es / 0.75) as f32) as f64).sin() as f32 } else { 0.0 };
         let sweep_pos = -1.9 + 3.8 * MORPH.at(clamp01((es / 0.7) as f32));
-        let arc_prog = if r { 1.0 } else { clamp01((1.0 - ef / 2.0) as f32) };
+        let arc_prog = if r { 1.0 } else { clamp01((1.0 - ef / o.follow_window.max(0.1)) as f32) };
 
         let radius = p.radius * (1.0 + 0.02 * p.breath * (TAU * t / 4.0).sin() as f32) * (1.0 + p.level_radius * lv);
 
@@ -295,6 +295,17 @@ mod tests {
         assert_eq!(step(&mut s, &o, 1.0).arc_prog, 1.0);
         assert!((step(&mut s, &o, 2.0).arc_prog - 0.5).abs() < 0.01);
         assert_eq!(step(&mut s, &o, 3.1).arc_prog, 0.0);
+    }
+
+    #[test]
+    fn the_follow_up_arc_drains_over_the_window_orbit_sends() {
+        let mut o = Orbit::new();
+        o.follow_window = 8.0;
+        let mut s = Sphere::new(&o);
+        step(&mut s, &o, 0.0);
+        o.set_state(OrbState::FollowUp, 1.0);
+        assert!((step(&mut s, &o, 5.0).arc_prog - 0.5).abs() < 0.01, "half the 8 s window has passed");
+        assert_eq!(step(&mut s, &o, 9.5).arc_prog, 0.0);
     }
 
     #[test]

@@ -2,10 +2,12 @@
 //! design's layout, colours and type, built from Rune elements.
 
 use rune::tok::{TextStyle, motion};
-use rune::{Align, Color, Cx, Drag, El, Phase, col, effect, el, row, text};
+use rune::{Align, Color, Cx, Drag, El, Phase, ScrollSpec, col, effect, el, row, text, text_input};
 
-use crate::app::{App, DEMO};
+use crate::app::{App, Ask, DEMO};
+use crate::link::Status;
 use crate::orbit::{OrbState, STATES, SphereConfig};
+use crate::spawn::Kind;
 
 /// Marks that tell the compositor which sphere a slot is.
 pub const STAGE_MARK: u32 = 1;
@@ -72,14 +74,14 @@ fn stage(s: &App, ink: &Ink) -> El {
         .child(text("Sphere states, motion review").font(t(12.0, 400.0).tracking(0.72)).color(ink.muted));
 
     let mut footer = col().key("footer").items_center().gap(18.0);
-    if let Some(step) = s.demo_step().filter(|d| !d.cap.is_empty()) {
+    if let Some((who, said)) = s.caption() {
         footer = footer.child(
             col()
                 .key("caption")
                 .items_center()
                 .gap(6.0)
-                .child(text(step.who).font(t(11.0, 400.0).tracking(1.54)).color(ink.muted))
-                .child(text(step.cap).font(t(18.0, 400.0)).color(ink.fg)),
+                .child(text(who).font(t(11.0, 400.0).tracking(1.54)).color(ink.muted))
+                .child(text(said).font(t(18.0, 400.0)).color(ink.fg).max_w(640.0).align(Align::Center).wrap()),
         );
     }
     footer = footer.child(
@@ -109,7 +111,17 @@ fn stage(s: &App, ink: &Ink) -> El {
         .child(el().key("strip").h(72.0))
         .child(header)
         .child(
-            col().key("overlay").absolute(0.0, 0.0).w_full().h_full().justify_end().items_center().pb(36.0).child(footer),
+            col()
+                .key("overlay")
+                .absolute(0.0, 0.0)
+                .w_full()
+                .h_full()
+                .justify_end()
+                .items_center()
+                .pb(36.0)
+                .gap(28.0)
+                .children(s.live.confirm.as_ref().map(|ask| confirm_dialog(ask, ink)))
+                .child(footer),
         )
 }
 
@@ -118,8 +130,7 @@ fn stage(s: &App, ink: &Ink) -> El {
 fn panel(s: &App, ink: &Ink) -> El {
     let body = col()
         .key("panel-body")
-        .grow(1.0)
-        .min_w(0.0)
+        .w_full()
         .px(20.0)
         .pt(22.0)
         .pb(28.0)
@@ -128,7 +139,8 @@ fn panel(s: &App, ink: &Ink) -> El {
         .child(section(ink, "level", level_section(s, ink)))
         .child(section(ink, "demo", demo_section(s, ink)))
         .child(section(ink, "overlay", overlay_section(s, ink)))
-        .child(section(ink, "reduced", reduced_section(s, ink)));
+        .child(section(ink, "reduced", reduced_section(s, ink)))
+        .child(section(ink, "backend", backend_section(s, ink)));
 
     row()
         .key("panel")
@@ -136,7 +148,7 @@ fn panel(s: &App, ink: &Ink) -> El {
         .h_full()
         .fill(ink.panel)
         .child(el().key("edge").w(1.0).h_full().fill(ink.hair))
-        .child(body)
+        .child(col().key("panel-scroll").grow(1.0).min_w(0.0).h_full().scroll(ScrollSpec { stick_bottom: false }).child(body))
 }
 
 /// A section after the first: a hairline above it and 20 px of room under the line.
@@ -288,6 +300,155 @@ fn reduced_section(s: &App, ink: &Ink) -> El {
         s.orbit.reduced(),
         |s: &mut App, t| s.set_reduced(!s.orbit.reduced(), t),
     )
+}
+
+// ---- the link to Orbit --------------------------------------------------------------------
+
+/// Connect, or disconnect when already linked (the button and Enter in the address box do the same).
+fn toggle_link(s: &mut App, t: f64) {
+    if s.live.status.is_linked() {
+        s.disconnect(t);
+    } else {
+        let url = s.live.url.text.clone();
+        s.connect(&url, t);
+    }
+}
+
+fn backend_section(s: &App, ink: &Ink) -> El {
+    let live = &s.live;
+    let linked = live.status.is_linked();
+    let dot = if live.status == Status::Open { ink.fg } else { Color::WHITE.alpha(0.18) };
+
+    let header = row()
+        .justify_between()
+        .items_center()
+        .child(caption(ink, "Backend"))
+        .child(
+            row()
+                .key("status")
+                .items_center()
+                .gap(6.0)
+                .child(el().key("dot").size(6.0, 6.0).radius(3.0).fill(dot))
+                .child(text(live.status.label()).font(t(12.0, 400.0)).color(ink.muted)),
+        );
+
+    let field = text_input(&live.url, t(12.0, 400.0).mono())
+        .key("url")
+        .single_line()
+        .grow(1.0)
+        .min_w(0.0)
+        .color(ink.fg)
+        .on_edit(|s: &mut App| &mut s.live.url)
+        .on_submit(|s: &mut App, tx| toggle_link(s, tx.clock()));
+    let url_box = row()
+        .key("url-box")
+        .grow(1.0)
+        .min_w(0.0)
+        .h(32.0)
+        .px(10.0)
+        .items_center()
+        .radius(8.0)
+        .fill(hex("#111114"))
+        .border(1.0, ink.hair)
+        .child(field);
+    let connect = small_button("connect", if linked { "Disconnect" } else { "Connect" }, ink)
+        .on_press_tx(|s: &mut App, tx| toggle_link(s, tx.clock()));
+
+    let shown = live
+        .notice
+        .clone()
+        .or_else(|| Some(live.last_message.clone()).filter(|m| !m.is_empty()))
+        .unwrap_or_else(|| format!("{{\"state\":\"{}\",\"level\":{:.2}}}", s.orbit.state.id(), s.shown_level));
+    let message = col()
+        .key("message")
+        .w_full()
+        .px(10.0)
+        .py(8.0)
+        .radius(8.0)
+        .fill(hex("#111114"))
+        .border(1.0, Color::WHITE.alpha(0.06))
+        .child(text(shown).font(t(12.0, 400.0).mono()).color(ink.muted).wrap_anywhere().shrink());
+
+    let mut body = col().key("backend-body").gap(10.0).child(header).child(row().gap(6.0).child(url_box).child(connect));
+    if !linked {
+        body = body.child(
+            row()
+                .key("starters")
+                .gap(6.0)
+                .child(
+                    small_button("start-orbit", "Start Orbit", ink)
+                        .on_press_tx(|s: &mut App, tx| s.spawn(Kind::Orbit, tx.clock())),
+                )
+                .child(
+                    small_button("start-demo", "Start demo", ink).on_press_tx(|s: &mut App, tx| s.spawn(Kind::Demo, tx.clock())),
+                ),
+        );
+    }
+    body.child(message)
+}
+
+/// A 32 px outlined button, as the design's Connect button.
+fn small_button(key: &str, label: &str, ink: &Ink) -> El {
+    row()
+        .key(key)
+        .role("button")
+        .label(label)
+        .focusable(true)
+        .h(32.0)
+        .px(12.0)
+        .center()
+        .radius(8.0)
+        .fill(Color::WHITE.alpha(0.06))
+        .border(1.0, Color::WHITE.alpha(0.12))
+        .hover(Color::WHITE.alpha(0.04))
+        .child(text(label).font(t(12.0, 400.0)).color(ink.fg).a11y_hidden())
+}
+
+/// Orbit asks before it does something risky; the buttons answer it, and so does Esc (no).
+fn confirm_dialog(ask: &Ask, ink: &Ink) -> El {
+    let answers = if ask.sent.is_some() {
+        text("Sent. Waiting for Orbit\u{2026}").font(t(12.0, 400.0)).color(ink.muted)
+    } else {
+        row()
+            .key("answers")
+            .gap(8.0)
+            .child(answer_button("confirm-no", "No", false, ink))
+            .child(answer_button("confirm-yes", "Yes", true, ink))
+    };
+    col()
+        .key("confirm")
+        .role("dialog")
+        .label("Orbit asks")
+        .w(380.0)
+        .padding(20.0)
+        .gap(14.0)
+        .items_center()
+        .radius(14.0)
+        .fill(hex("#0A0A0C").alpha(0.96))
+        .border(1.0, ink.hair_strong)
+        .child(text("Orbit asks").font(t(11.0, 400.0).tracking(1.54)).color(ink.muted))
+        .child(text(format!("Do you want me to {}?", ask.action)).font(t(16.0, 400.0)).color(ink.fg).align(Align::Center).wrap().max_w(340.0))
+        .child(answers)
+        .child(text(if ask.sent.is_some() { "" } else { "Esc says no" }).font(t(11.0, 400.0)).color(ink.muted))
+}
+
+fn answer_button(key: &str, label: &str, yes: bool, ink: &Ink) -> El {
+    row()
+        .key(key)
+        .role("button")
+        .label(label)
+        .focusable(true)
+        .h(32.0)
+        .w(84.0)
+        .center()
+        .radius(8.0)
+        .fill(if yes { ink.fg } else { Color::TRANSPARENT })
+        .border(1.0, if yes { ink.fg } else { ink.hair_strong })
+        .hover(Color::WHITE.alpha(if yes { 0.0 } else { 0.06 }))
+        .on_press(move |s: &mut App| {
+            s.answer_confirm(yes);
+        })
+        .child(text(label).font(t(13.0, 500.0)).color(if yes { Color::BLACK } else { ink.fg }).a11y_hidden())
 }
 
 // ---- controls -----------------------------------------------------------------------------

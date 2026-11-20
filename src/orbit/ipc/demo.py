@@ -38,7 +38,14 @@ def voice(feed: Callable[[np.ndarray], None], db_range: tuple[float, float], sec
         sleep(1 / 12)
 
 
-def play_turn(bridge: UiBridge, *, sleep: Callable[[float], None] = time.sleep, confirm: bool = False) -> None:
+def short_sleeps(seconds: float) -> None:
+    """Sleeps in 50 ms slices, so a Ctrl+C (or the window going away) is noticed at once."""
+    end = time.monotonic() + seconds
+    while (left := end - time.monotonic()) > 0:
+        time.sleep(min(0.05, left))
+
+
+def play_turn(bridge: UiBridge, *, sleep: Callable[[float], None] = short_sleeps, confirm: bool = False) -> None:
     """One whole turn. With `confirm`, it asks a risky-action question and waits up to 10 s for a face to answer it."""
     def go(new: State, reason: str = "", seconds: float | None = None) -> None:
         bridge.state_changed(State.IDLE, new, reason, seconds)
@@ -87,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m orbit.ipc.demo", description=__doc__.splitlines()[0])
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--confirm", action="store_true", help="end each turn with a yes/no question for the window to answer")
+    p.add_argument("--exit-with-parent", action="store_true", help="stop when standard input ends (the sphere window keeps it open)")
     p.add_argument("--token", default=config.IPC_TOKEN, help="the token faces must send (default: ORBIT_IPC_TOKEN, else a new random one, printed)")
     args = p.parse_args(argv)
     try:
@@ -98,7 +106,13 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as e:
         print(f"Cannot open port {args.port}: {e}")
         return 2
-    print(f"Demo face link: {link.url}\nCtrl+C stops.")
+    if args.exit_with_parent:
+        import _thread
+
+        from .lifetime import watch_parent
+
+        watch_parent(sys.stdin.buffer, _thread.interrupt_main)
+    print(f"Demo face link: {link.url}\nCtrl+C stops.", flush=True)
     try:
         while True:
             play_turn(link.bridge, confirm=args.confirm)

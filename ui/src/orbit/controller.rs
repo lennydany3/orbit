@@ -37,6 +37,11 @@ pub struct Orbit {
     pub epoch: u32,
     /// The clock time of the change that bumped `epoch`.
     pub changed_at: f64,
+    /// Whether the one-shot states hand over to the next one on their own timers (the design-review panel and its demo).
+    /// Off while Orbit itself is driving: it sends every state, and the pacer decides how long each flash plays.
+    pub auto_return: bool,
+    /// How long the follow-up rim arc takes to drain: 2 s in the demo, the real listening window when Orbit sends it.
+    pub follow_window: f64,
     pending: Option<Pending>,
 }
 
@@ -57,6 +62,8 @@ impl Orbit {
             reduced: false,
             epoch: 0,
             changed_at: 0.0,
+            auto_return: true,
+            follow_window: 2.0,
             pending: None,
         }
     }
@@ -81,24 +88,27 @@ impl Orbit {
         self.entered_at = t;
         self.epoch += 1;
         self.changed_at = t;
-        match s {
+        let back = match s {
             OrbState::Wake => {
                 self.fx.wake = t;
-                self.after(0.4, OrbState::Listening);
+                Some((0.4, OrbState::Listening))
             }
             OrbState::Success => {
                 self.fx.success = t;
-                self.after(0.75, OrbState::Idle);
+                Some((0.75, OrbState::Idle))
             }
             OrbState::Error => {
                 self.fx.error = t;
-                self.after(0.7, OrbState::Idle);
+                Some((0.7, OrbState::Idle))
             }
             OrbState::FollowUp => {
                 self.fx.follow = t;
-                self.after(2.0, OrbState::Idle);
+                Some((self.follow_window, OrbState::Idle))
             }
-            _ => {}
+            _ => None,
+        };
+        if let Some((secs, to)) = back.filter(|_| self.auto_return) {
+            self.after(secs, to);
         }
     }
 
@@ -159,6 +169,28 @@ mod tests {
             assert_eq!(o.state, OrbState::Idle);
             assert_eq!(o.next_due(), None);
         }
+    }
+
+    #[test]
+    fn with_auto_return_off_nothing_hands_over_by_itself() {
+        let mut o = Orbit::new();
+        o.auto_return = false;
+        for s in [OrbState::Wake, OrbState::Success, OrbState::Error, OrbState::FollowUp] {
+            o.set_state(s, 1.0);
+            assert_eq!(o.next_due(), None, "{s:?}");
+            assert!(!o.tick(100.0));
+            assert_eq!(o.state, s);
+        }
+        assert_eq!(o.fx.wake, 1.0, "the flash still starts from the time it was set");
+        assert_eq!(o.fx.follow, 1.0);
+    }
+
+    #[test]
+    fn the_follow_up_hand_over_uses_the_window_it_was_given() {
+        let mut o = Orbit::new();
+        o.follow_window = 8.0;
+        o.set_state(OrbState::FollowUp, 1.0);
+        assert_eq!(o.next_due(), Some(9.0));
     }
 
     #[test]

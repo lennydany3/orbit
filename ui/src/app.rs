@@ -1,7 +1,19 @@
-//! The app's state and the rules that move it: the shared orbit, the dev panel's controls, the
-//! scripted demo turn and the simulated voice. No drawing and no windowing, so all of it is tested.
+//! The app's state and the rules that move it: the shared orbit, the dev panel's controls, the scripted demo turn, the
+//! simulated voice, and the live link to Orbit. No drawing and no windowing, so all of it is tested.
+//!
+//! Two things can drive the sphere. By hand (the panel's buttons, the demo, the simulated voice), or Orbit itself over the
+//! link. While the link is open Orbit drives: its states are paced (see `pacer`), its level replaces the simulated one, and the
+//! sphere's own hand-over timers are off.
 
+use std::sync::Arc;
+
+use rune::{TextEdit, Waker};
+
+use crate::link::message::{self, Incoming};
+use crate::link::{Event, Link, Status};
 use crate::orbit::{HasOrbit, OrbState, Orbit};
+use crate::pacer::Pacer;
+use crate::spawn::{Kind, Spawned};
 
 pub struct DemoStep {
     pub state: OrbState,
@@ -47,6 +59,84 @@ pub struct DemoRun {
     due: f64,
 }
 
+/// How long what was said stays under the sphere once nothing is being said.
+const CAPTION_SECONDS: f64 = 6.0;
+/// The longest line shown under the sphere; the full text goes to the console, the face shows a glance.
+const CAPTION_CHARS: usize = 220;
+
+/// What was said, shown under the sphere.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Caption {
+    pub who: String,
+    pub text: String,
+    shown_at: f64,
+}
+
+/// A risky action Orbit is asking about.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ask {
+    pub id: i64,
+    /// "close window Notepad".
+    pub action: String,
+    pub question: String,
+    /// The answer given from here, while waiting for Orbit to confirm it took it.
+    pub sent: Option<bool>,
+}
+
+fn clip(text: &str, chars: usize) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= chars {
+        return text;
+    }
+    let mut cut: String = text.chars().take(chars.saturating_sub(1)).collect();
+    cut.truncate(cut.trim_end().len());
+    cut.push('\u{2026}');
+    cut
+}
+
+fn quiet_waker() -> Waker {
+    Arc::new(|| {})
+}
+
+/// Everything about the link to Orbit.
+pub struct Live {
+    link: Option<Link>,
+    waker: Waker,
+    pub status: Status,
+    /// The address box.
+    pub url: TextEdit,
+    /// The last thing Orbit sent, as text (the design shows the same under the address).
+    pub last_message: String,
+    /// What went wrong, if anything: a bad address, Orbit refusing, Orbit stopping.
+    pub notice: Option<String>,
+    pacer: Pacer,
+    level: f32,
+    pub caption: Option<Caption>,
+    pub confirm: Option<Ask>,
+    /// How the last chat reply felt (`proud`, `caring` ...), for the face to use.
+    pub feeling: String,
+    child: Option<Spawned>,
+}
+
+impl Default for Live {
+    fn default() -> Self {
+        Live {
+            link: None,
+            waker: quiet_waker(),
+            status: Status::Off,
+            url: TextEdit::new("ws://127.0.0.1:8765/?token="),
+            last_message: String::new(),
+            notice: None,
+            pacer: Pacer::new(),
+            level: 0.0,
+            caption: None,
+            confirm: None,
+            feeling: String::new(),
+            child: None,
+        }
+    }
+}
+
 pub struct App {
     pub orbit: Orbit,
     /// The slider's own value, used when nothing is simulating the level.
@@ -56,11 +146,12 @@ pub struct App {
     /// The level the panel shows (updated about 14 times a second, not every frame).
     pub shown_level: f32,
     last_push: f64,
+    pub live: Live,
 }
 
 impl Default for App {
     fn default() -> Self {
-        App { orbit: Orbit::new(), manual: 0.35, voice: false, demo: None, shown_level: 0.35, last_push: -1.0 }
+        App { orbit: Orbit::new(), manual: 0.35, voice: false, demo: None, shown_level: 0.35, last_push: -1.0, live: Live::default() }
     }
 }
 
@@ -71,13 +162,19 @@ impl HasOrbit for App {
 }
 
 impl App {
+    // ---- by hand ----------------------------------------------------------------------------------------------------
+
     /// Picking a state by hand stops the demo.
     pub fn pick(&mut self, s: OrbState, t: f64) {
         self.demo = None;
         self.orbit.set_state(s, t);
     }
 
+    /// Starts the scripted turn. Not while Orbit is driving: two storytellers would fight.
     pub fn start_demo(&mut self, t: f64) {
+        if self.live_open() {
+            return;
+        }
         self.voice = false;
         self.run_step(0, t);
     }
@@ -117,31 +214,222 @@ impl App {
         self.orbit.set_reduced(on, t);
     }
 
-    /// When something timed is next due (a hand-over or the next demo step).
-    pub fn next_due(&self) -> Option<f64> {
-        match (self.demo.map(|d| d.due), self.orbit.next_due()) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+    // ---- the link to Orbit ------------------------------------------------------------------------------------------
+
+    /// Remembers what wakes the UI when the link thread has news. Set once, before connecting.
+    pub fn set_waker(&mut self, waker: Waker) {
+        self.live.waker = waker;
+    }
+
+    /// Is Orbit connected, and so driving the sphere?
+    pub fn live_open(&self) -> bool {
+        self.live.status == Status::Open
+    }
+
+    /// Starts connecting to `url` (any link already in use is closed first).
+    pub fn connect(&mut self, url: &str, t: f64) {
+        self.drop_link(t);
+        match Link::connect(url, self.live.waker.clone()) {
+            Ok(link) => {
+                self.live.link = Some(link);
+                self.live.status = Status::Connecting;
+                self.live.notice = None;
+            }
+            Err(why) => {
+                self.live.status = Status::Error;
+                self.live.notice = Some(why);
+            }
         }
+    }
+
+    /// Closes the link. An Orbit this window started keeps running.
+    pub fn disconnect(&mut self, t: f64) {
+        self.drop_link(t);
+        self.live.status = Status::Off;
+        self.live.notice = None;
+    }
+
+    fn drop_link(&mut self, t: f64) {
+        self.live.link = None;
+        if self.live_open() {
+            self.go_dark(t);
+        }
+        self.live.status = Status::Off;
+    }
+
+    /// Starts Orbit (or its scripted demo) and connects to it.
+    pub fn spawn(&mut self, kind: Kind, t: f64) {
+        match Spawned::start(kind) {
+            Ok(child) => {
+                let url = child.url.clone();
+                self.live.child = Some(child);
+                self.live.url.replace_text(url.clone());
+                self.connect(&url, t);
+            }
+            Err(why) => {
+                self.live.status = Status::Error;
+                self.live.notice = Some(why);
+            }
+        }
+    }
+
+    fn go_live(&mut self, t: f64) {
+        self.orbit.auto_return = false;
+        self.demo = None;
+        self.voice = false;
+        self.live.pacer.clear();
+        self.live.notice = None;
+        let _ = t;
+    }
+
+    fn go_dark(&mut self, t: f64) {
+        self.orbit.auto_return = true;
+        self.orbit.set_state(OrbState::Idle, t);
+        self.live.pacer.clear();
+        self.live.level = 0.0;
+        self.live.confirm = None;
+        self.live.caption = None;
+    }
+
+    fn drain_link(&mut self, t: f64) -> bool {
+        let events = self.live.link.as_ref().map(Link::poll).unwrap_or_default();
+        let mut changed = !events.is_empty();
+        for event in events {
+            self.on_event(event, t);
+        }
+        if let Some(child) = self.live.child.as_mut()
+            && let Some(why) = child.exited()
+        {
+            self.live.child = None;
+            self.live.notice = Some(why);
+            changed = true;
+        }
+        changed
+    }
+
+    /// One thing the link thread reported.
+    pub fn on_event(&mut self, event: Event, t: f64) {
+        match event {
+            Event::Status(status) => {
+                let was_open = self.live_open();
+                self.live.status = status;
+                match status {
+                    Status::Open => self.go_live(t),
+                    _ if was_open => self.go_dark(t),
+                    _ => {}
+                }
+            }
+            Event::Message(raw) => {
+                self.live.last_message = clip(&raw, 140);
+                for message in message::parse(&raw) {
+                    self.apply(message, t);
+                }
+            }
+        }
+    }
+
+    /// One message from Orbit.
+    pub fn apply(&mut self, message: Incoming, t: f64) {
+        match message {
+            Incoming::Hello { state, level } => {
+                self.live.pacer.clear();
+                self.orbit.set_state(state, t);
+                self.live.level = level;
+            }
+            Incoming::State { state, seconds, .. } => self.live.pacer.push(state, seconds, t),
+            Incoming::Level(v) => self.live.level = v,
+            Incoming::Transcript { text, .. } => self.say("You", &text, t),
+            Incoming::Reply { text, emotion, .. } => {
+                self.live.feeling = emotion;
+                self.say("Orbit", &text, t);
+            }
+            Incoming::Confirm { id, question, action } => self.live.confirm = Some(Ask { id, action, question, sent: None }),
+            Incoming::ConfirmDone { id, .. } => {
+                if self.live.confirm.as_ref().is_some_and(|ask| ask.id == id) {
+                    self.live.confirm = None;
+                }
+            }
+            Incoming::Error(why) => self.live.notice = Some(why),
+        }
+    }
+
+    fn say(&mut self, who: &str, text: &str, t: f64) {
+        self.live.caption = Some(Caption { who: who.to_owned(), text: clip(text, CAPTION_CHARS), shown_at: t });
+    }
+
+    /// What is shown under the sphere: what Orbit last heard or said, else the demo's line.
+    pub fn caption(&self) -> Option<(String, String)> {
+        match (&self.live.caption, self.demo_step()) {
+            (Some(c), _) => Some((c.who.clone(), c.text.clone())),
+            (None, Some(d)) if !d.cap.is_empty() => Some((d.who.to_owned(), d.cap.to_owned())),
+            _ => None,
+        }
+    }
+
+    /// Answers the open question. The message to send, if there is a question still waiting for an answer.
+    pub fn take_answer(&mut self, yes: bool) -> Option<String> {
+        let ask = self.live.confirm.as_mut().filter(|a| a.sent.is_none())?;
+        ask.sent = Some(yes);
+        Some(message::confirm_answer(ask.id, yes))
+    }
+
+    /// Answers the open question over the link. False if there is none, or the link is gone.
+    pub fn answer_confirm(&mut self, yes: bool) -> bool {
+        let Some(text) = self.take_answer(yes) else { return false };
+        let sent = self.live.link.as_ref().is_some_and(|link| link.send(text));
+        if !sent && let Some(ask) = self.live.confirm.as_mut() {
+            ask.sent = None;
+        }
+        sent
+    }
+
+    // ---- time -------------------------------------------------------------------------------------------------------
+
+    /// When something timed is next due: a demo step, a sphere hand-over, a paced state, or a caption leaving.
+    pub fn next_due(&self) -> Option<f64> {
+        [self.demo.map(|d| d.due), self.orbit.next_due(), self.live.pacer.next_due(), self.caption_expires()]
+            .into_iter()
+            .flatten()
+            .reduce(f64::min)
+    }
+
+    fn caption_expires(&self) -> Option<f64> {
+        self.live.caption.as_ref().map(|c| c.shown_at + CAPTION_SECONDS)
     }
 
     /// Runs everything due by `t`, in order, then sets the level for this frame. True when something
     /// the panel shows changed.
     pub fn advance(&mut self, t: f64) -> bool {
-        let mut changed = false;
-        for _ in 0..32 {
-            let demo_due = self.demo.map(|d| d.due);
+        let mut changed = self.drain_link(t);
+        for _ in 0..64 {
             let Some(due) = self.next_due().filter(|d| *d <= t) else { break };
-            if demo_due == Some(due) {
+            if self.demo.map(|d| d.due) == Some(due) {
                 let next = self.demo.map_or(0, |d| d.step + 1);
                 self.run_step(next, due);
-            } else {
+            } else if self.live.pacer.next_due() == Some(due) {
+                for shown in self.live.pacer.drain(due) {
+                    if let Some(window) = shown.seconds.filter(|_| shown.state == OrbState::FollowUp) {
+                        self.orbit.follow_window = window;
+                    }
+                    self.orbit.set_state(shown.state, shown.at);
+                }
+            } else if self.orbit.next_due() == Some(due) {
                 self.orbit.tick(due);
+            } else {
+                // Only a caption was due: it has been up long enough, unless Orbit is still speaking it.
+                self.live.caption = None;
             }
             changed = true;
         }
+        if self.orbit.state == OrbState::Speaking
+            && let Some(c) = self.live.caption.as_mut()
+        {
+            c.shown_at = t;                                       // a long reply stays up while it is being spoken
+        }
 
-        let level = if self.voice_active() {
+        let level = if self.live_open() {
+            self.live.level
+        } else if self.voice_active() {
             voice_level(t)
         } else if self.demo.is_some() {
             0.0
@@ -245,5 +533,195 @@ mod tests {
         app.orbit.set_state(OrbState::Wake, 5.2);
         let due = app.next_due().unwrap();
         assert!((due - 5.6).abs() < 1e-9, "the wake hand-over comes sooner than the next step: {due}");
+    }
+
+    // ------------------------------------------------------------------ driven by Orbit
+    fn live() -> App {
+        let mut app = App::default();
+        app.on_event(Event::Status(Status::Open), 0.0);
+        app
+    }
+
+    fn msg(app: &mut App, raw: &str, t: f64) {
+        app.on_event(Event::Message(raw.to_owned()), t);
+    }
+
+    #[test]
+    fn connecting_hands_the_sphere_to_orbit_and_stops_the_hand_made_things() {
+        let mut app = App::default();
+        app.start_demo(0.0);
+        app.voice = true;
+        app.on_event(Event::Status(Status::Open), 1.0);
+        assert!(app.live_open() && !app.orbit.auto_return);
+        assert!(app.demo.is_none() && !app.voice);
+        app.start_demo(2.0);
+        assert!(app.demo.is_none(), "the demo cannot start while Orbit drives");
+    }
+
+    #[test]
+    fn a_new_face_is_told_where_orbit_is_and_shows_it_at_once() {
+        let mut app = live();
+        msg(&mut app, r#"{"type":"hello","version":1,"state":"thinking","level":0.5}"#, 3.0);
+        app.advance(3.0);
+        assert_eq!(app.orbit.state, OrbState::Thinking);
+        assert_eq!(app.orbit.level, 0.5);
+    }
+
+    #[test]
+    fn orbits_states_arrive_paced_and_its_level_replaces_the_simulated_one() {
+        let mut app = live();
+        msg(&mut app, r#"{"state":"wake"}"#, 10.0);
+        msg(&mut app, r#"{"state":"listening"}"#, 10.1);
+        msg(&mut app, r#"{"level":0.7}"#, 10.1);
+        app.advance(10.1);
+        assert_eq!(app.orbit.state, OrbState::Wake, "the wake flash plays first");
+        assert_eq!(app.orbit.level, 0.7);
+        assert_eq!(app.next_due(), Some(10.4));
+        app.advance(10.4);
+        assert_eq!(app.orbit.state, OrbState::Listening);
+        assert_eq!(app.orbit.entered_at, 10.4, "stamped with the time it was due");
+    }
+
+    #[test]
+    fn nothing_hands_over_on_its_own_while_orbit_drives() {
+        let mut app = live();
+        msg(&mut app, r#"{"state":"success"}"#, 1.0);
+        app.advance(1.0);
+        app.advance(50.0);
+        assert_eq!(app.orbit.state, OrbState::Success, "only Orbit moves it on");
+    }
+
+    #[test]
+    fn the_follow_up_arc_follows_the_window_orbit_announces() {
+        let mut app = live();
+        msg(&mut app, r#"{"state":"follow_up","seconds":8.0}"#, 2.0);
+        app.advance(2.0);
+        assert_eq!(app.orbit.follow_window, 8.0);
+        assert_eq!(app.orbit.state, OrbState::FollowUp);
+    }
+
+    #[test]
+    fn what_was_said_is_shown_and_leaves_after_six_seconds_of_quiet() {
+        let mut app = live();
+        msg(&mut app, r#"{"type":"transcript","who":"you","text":"open  spotify"}"#, 1.0);
+        assert_eq!(app.caption(), Some(("You".into(), "open spotify".into())));
+        assert_eq!(app.next_due(), Some(7.0));
+        app.advance(6.9);
+        assert!(app.caption().is_some());
+        assert!(app.advance(7.0));
+        assert_eq!(app.caption(), None);
+    }
+
+    #[test]
+    fn a_reply_stays_up_for_as_long_as_it_is_being_spoken() {
+        let mut app = live();
+        msg(&mut app, r#"{"state":"speaking"}"#, 1.0);
+        msg(&mut app, r#"{"type":"reply","text":"A long answer.","spoken":"A long answer.","kind":"chat","emotion":"proud"}"#, 1.0);
+        for i in 0..400 {
+            app.advance(1.0 + i as f64 * 0.1);                    // forty seconds of speech
+        }
+        assert_eq!(app.caption(), Some(("Orbit".into(), "A long answer.".into())));
+        assert_eq!(app.live.feeling, "proud");
+        msg(&mut app, r#"{"state":"idle"}"#, 41.0);
+        app.advance(41.0);
+        app.advance(48.0);
+        assert_eq!(app.caption(), None, "gone six seconds after it stopped");
+    }
+
+    #[test]
+    fn a_very_long_reply_is_cut_for_the_glance_not_the_screen_filled() {
+        let mut app = live();
+        let long = "word ".repeat(300);
+        msg(&mut app, &format!(r#"{{"type":"reply","text":"{long}","spoken":"","kind":"action","emotion":"neutral"}}"#), 1.0);
+        let (_, text) = app.caption().unwrap();
+        assert!(text.chars().count() <= CAPTION_CHARS && text.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn a_risky_action_opens_a_question_and_the_answer_goes_back_once() {
+        let mut app = live();
+        msg(&mut app, r#"{"type":"confirm","id":4,"question":"q","action":"close window Notepad"}"#, 1.0);
+        assert_eq!(app.live.confirm.as_ref().map(|a| a.action.as_str()), Some("close window Notepad"));
+        let sent = app.take_answer(true).expect("an answer to send");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&sent).unwrap(), serde_json::json!({"type": "confirm", "id": 4, "yes": true}));
+        assert_eq!(app.take_answer(false), None, "the first answer stands");
+        assert_eq!(app.live.confirm.as_ref().unwrap().sent, Some(true));
+        msg(&mut app, r#"{"type":"confirm_done","id":4,"answer":true,"by":"ui"}"#, 1.5);
+        assert!(app.live.confirm.is_none());
+    }
+
+    #[test]
+    fn a_settled_question_for_another_id_leaves_this_one_open() {
+        let mut app = live();
+        msg(&mut app, r#"{"type":"confirm","id":4,"question":"q","action":"a"}"#, 1.0);
+        msg(&mut app, r#"{"type":"confirm_done","id":3,"answer":false,"by":"voice"}"#, 1.1);
+        assert!(app.live.confirm.is_some());
+        msg(&mut app, r#"{"type":"confirm_done","id":4,"answer":false,"by":"voice"}"#, 1.2);
+        assert!(app.live.confirm.is_none(), "answered by voice: the question closes on screen too");
+    }
+
+    #[test]
+    fn with_no_link_an_answer_cannot_be_sent_and_the_question_stays_open() {
+        let mut app = live();
+        msg(&mut app, r#"{"type":"confirm","id":4,"question":"q","action":"a"}"#, 1.0);
+        assert!(!app.answer_confirm(true));
+        assert_eq!(app.live.confirm.as_ref().unwrap().sent, None, "so the buttons come back");
+    }
+
+    #[test]
+    fn losing_orbit_returns_the_sphere_to_idle_and_clears_what_belonged_to_the_turn() {
+        let mut app = live();
+        msg(&mut app, r#"{"state":"listening"}"#, 1.0);
+        msg(&mut app, r#"{"type":"transcript","who":"you","text":"hi"}"#, 1.0);
+        msg(&mut app, r#"{"type":"confirm","id":1,"question":"q","action":"a"}"#, 1.0);
+        msg(&mut app, r#"{"level":0.9}"#, 1.0);
+        app.advance(1.0);
+        app.on_event(Event::Status(Status::Closed), 2.0);
+        assert_eq!(app.live.status, Status::Closed);
+        assert_eq!(app.orbit.state, OrbState::Idle);
+        assert!(app.orbit.auto_return, "the panel's own timers work again");
+        assert!(app.live.caption.is_none() && app.live.confirm.is_none());
+        app.advance(2.1);
+        assert_eq!(app.orbit.level, 0.35, "back to the slider");
+    }
+
+    #[test]
+    fn the_kill_switch_shows_at_once_even_behind_a_flash() {
+        let mut app = live();
+        msg(&mut app, r#"{"state":"success"}"#, 1.0);
+        msg(&mut app, r#"{"state":"speaking"}"#, 1.0);
+        app.advance(1.0);
+        msg(&mut app, r#"{"state":"muted","reason":"kill switch"}"#, 1.1);
+        app.advance(1.1);
+        assert_eq!(app.orbit.state, OrbState::Muted);
+    }
+
+    #[test]
+    fn messages_that_are_not_understood_change_nothing_and_orbits_errors_are_shown() {
+        let mut app = live();
+        for raw in ["", "garbage", "[]", r#"{"state":"dancing"}"#, r#"{"type":"future_thing","x":1}"#, r#"{"type":"transcript"}"#] {
+            msg(&mut app, raw, 1.0);
+        }
+        app.advance(1.0);
+        assert_eq!(app.orbit.state, OrbState::Idle);
+        assert!(app.live.caption.is_none() && app.live.notice.is_none());
+        msg(&mut app, r#"{"type":"error","message":"no such confirmation is open"}"#, 2.0);
+        assert_eq!(app.live.notice.as_deref(), Some("no such confirmation is open"));
+    }
+
+    #[test]
+    fn a_link_to_somewhere_else_is_an_error_not_a_connection() {
+        let mut app = App::default();
+        app.connect("ws://example.com:8765/?token=x", 0.0);
+        assert_eq!(app.live.status, Status::Error);
+        assert!(app.live.notice.as_deref().unwrap().contains("this PC"));
+        assert!(!app.live_open());
+    }
+
+    #[test]
+    fn the_last_message_is_kept_for_the_panel_but_clipped() {
+        let mut app = live();
+        msg(&mut app, &format!(r#"{{"type":"error","message":"{}"}}"#, "x".repeat(500)), 1.0);
+        assert!(app.live.last_message.chars().count() <= 140);
     }
 }

@@ -5,6 +5,10 @@ edition = "2024"
 description = "Orbit's desktop face: the particle sphere, drawn on the GPU with Rune."
 publish = false
 
+[lib]
+name = "orbit_ui"
+path = "src/lib.rs"
+
 [[bin]]
 name = "orbit-ui"
 path = "src/main.rs"
@@ -13,6 +17,8 @@ path = "src/main.rs"
 rune = { git = "https://github.com/anomalyco/rune", rev = "8fbc395190dbff430db9d9fc515bb6ac8cc7d13d" }
 bytemuck = { version = "1.25", features = ["derive"] }
 wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "dx12"] }
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+serde_json = "1.0.154"
 
 # Cargo does not inherit a dependency's patches, so repeat Rune's table at the same rev.
 [patch.crates-io]
