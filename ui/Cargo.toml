@@ -1,0 +1,26 @@
+[package]
+name = "orbit-ui"
+version = "0.1.0"
+edition = "2024"
+description = "Orbit's desktop face: the particle sphere, drawn on the GPU with Rune."
+publish = false
+
+[[bin]]
+name = "orbit-ui"
+path = "src/main.rs"
+
+[dependencies]
+rune = { git = "https://github.com/anomalyco/rune", rev = "8fbc395190dbff430db9d9fc515bb6ac8cc7d13d" }
+bytemuck = { version = "1.25", features = ["derive"] }
+wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "dx12"] }
+
+# Cargo does not inherit a dependency's patches, so repeat Rune's table at the same rev.
+[patch.crates-io]
+winit = { git = "https://github.com/anomalyco/rune", rev = "8fbc395190dbff430db9d9fc515bb6ac8cc7d13d" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "8fbc395190dbff430db9d9fc515bb6ac8cc7d13d" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "8fbc395190dbff430db9d9fc515bb6ac8cc7d13d" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "8fbc395190dbff430db9d9fc515bb6ac8cc7d13d" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "8fbc395190dbff430db9d9fc515bb6ac8cc7d13d" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "8fbc395190dbff430db9d9fc515bb6ac8cc7d13d" }
+
+[workspace]
