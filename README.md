@@ -1,141 +1,386 @@
 # Orbit
 
-A local assistant that operates your Windows PC from plain-language text requests
-("open Spotify", "volume 30", "open my GitHub"). Runs on a local model (Qwen2.5 7B via Ollama), no paid API.
+A desktop assistant for Windows 11 that you talk to. Say "hey orbit, open Spotify and play lofi on the Echo", "volume 30",
+"close Notepad" or "open my GitHub" and it does it, using whichever way is most reliable (the Spotify API, Windows itself, or
+your browser). It is also a friend you can chat with. It lives in the system tray, and a small orb floats up over your work
+only while Orbit is doing something.
 
-**Status: Step 4 of 5 (Spotify API done).** Open apps, windows, media keys, volume, websites, YouTube, and Spotify search/play/transfer. Vision fallback (Step 5) is optional and not built.
+<p align="center">
+  <img src="docs/screenshots/sphere-speaking.png" alt="Orbit's window: the particle sphere while Orbit speaks a reply" width="860">
+</p>
 
-## Setup (Windows 11, Python 3.12)
+- **Local by default, cloud when you add keys.** With no keys, the language model (Qwen2.5 7B via Ollama), speech-to-text
+  (Whisper) and the voice (Piper) all run on this PC and nothing leaves it. Add a Groq and/or Sarvam key and each part switches
+  to the cloud on its own, for much lower latency.
+- **Safe by design.** Risky actions (closing a window, quitting an app, buying, sending, deleting) ask you yes or no first, by
+  voice, by clicking, or with a key chord. Everything Orbit does is printed first and logged with secrets redacted.
+- **Tested.** 1172 Python tests and 193 Rust tests pass.
 
-1. Install [Ollama](https://ollama.com) and start it. Install Brave or Google Chrome (the browser layer drives it).
-2. `ollama pull qwen2.5:7b` (about 4.7 GB).
-3. In this folder: `python -m venv .venv`
-4. `.venv\Scripts\activate`
-5. `pip install -e ".[dev]"`
-6. `python -m orbit` (add `--no-llm` for rules only; `python -m orbit "volume 30"` runs one request; `--fake-tools` adds the Step 1 test tools).
-7. `pytest` to run the tests.
-8. Optional, Spotify: create an app at developer.spotify.com (redirect URI `http://127.0.0.1:8888/callback`, Web API), add your account under User Management, then `setx SPOTIFY_CLIENT_ID "<client id>"`, open a new terminal and run `python -m orbit auth spotify` once.
+## Contents
+
+[What it can do](#what-it-can-do) · [Setup](#setup-windows-11) · [How it works](#how-it-works) · [The desktop app](#the-desktop-app) ·
+[Voice](#voice) · [Spotify](#spotify-api-layer) · [Browser](#browser-layer) · [Friend mode](#friend-mode) ·
+[Privacy](#privacy) · [Known limits](#known-limits-honest-list)
+
+## What it can do
+
+| Layer | What Orbit can do |
+|---|---|
+| **API** (best, tried first) | Spotify: play a song, artist, album, playlist or your liked songs; transfer playback to a speaker or phone; per-device volume; play, pause, next, previous; now playing. |
+| **OS** (Windows itself) | Open and close apps ("quit" ends every process of an app), list, focus, move and arrange windows across monitors, volume and mute, media keys, the time and date, click UI controls in any app (UI Automation, or OCR as a fallback) and read what a window shows. |
+| **Browser** | Open sites and searches, read and click inside your own Brave page, navigation (back, forward, reload, home), tabs (list, switch, close), YouTube play and fullscreen. |
+| **Chat** | Talk about your day, ask a doubt, get encouragement or a roast. Anything that is not a PC command is chat. |
+| **Your own commands** | Make a phrase that runs a list of steps: open apps, websites and folders, press keys, type text, wait. |
+
+Several requests in one sentence work ("open Spotify, then play my favourite music on the speaker"). Simple commands are handled
+by fast rules with no model call.
+
+## Setup (Windows 11)
+
+**Orbit (Python 3.12):**
+
+1. Install [Ollama](https://ollama.com) and start it, then `ollama pull qwen2.5:7b` (about 4.7 GB). Install Brave (or Google
+   Chrome; `--browser chrome`).
+2. In this folder: `python -m venv .venv`, then `.venv\Scripts\activate`.
+3. `pip install -e ".[dev,voice,ipc]"` (`dev` for the tests, `voice` for the microphone and speech, `ipc` for the desktop app).
+4. Text mode: `python -m orbit` (add `--no-llm` for rules only; `python -m orbit "volume 30"` runs one request and exits;
+   `--fake-tools` adds the Step 1 test tools).
+5. Voice (optional), download the models once; this is the only thing that touches the network for voice, and only when you run it:
+   ```
+   python -m orbit.voice.fetch_models whisper small.en tiny.en
+   python -m orbit.voice.fetch_models piper en_US-amy-medium
+   python -m orbit.voice.fetch_models wakeword hey_mycroft
+   python -m orbit --voice
+   ```
+6. Spotify (optional): create an app at developer.spotify.com (redirect URI `http://127.0.0.1:8888/callback`, Web API), add your
+   account under User Management, then `setx SPOTIFY_CLIENT_ID "<client id>"`, open a new terminal and run
+   `python -m orbit auth spotify` once.
+7. Cloud (optional): copy `.env.example` to `.env` and add `GROQ_API_KEY` / `SARVAM_API_KEY` (see [Cloud mode](#cloud-mode-groq--sarvam-ai)).
+
+**The desktop app (Rust, optional)**, in `ui/`: install [Rust](https://rustup.rs) (the toolchain is pinned to 1.99.1 and
+installs itself), then `cargo run --release -- --spawn`. It starts Orbit for you and puts it in the tray.
+
+**Tests:** `pytest` (Python) and, from `ui/`, `cargo test` (Rust; the link tests use this project's `.venv`).
 
 ## How it works
 
 ```
-text -> fast rules (no model) --match--> tool call
-     -> LLM (tool calling)  ----------->     |
-                                      validate (pydantic)
-                                      safety gate (risky = ask you first)
-                                      router: api -> os -> browser (best layer first)
-                                      verify the effect; retry once; fall back to next layer
-                                      result -> back to the model / final reply
+text or voice -> fast rules (no model) --match--> tool call
+              -> LLM (tool calling)  ----------->     |
+                                               validate (pydantic)
+                                               safety gate (risky = ask you first)
+                                               router: api -> os -> browser (best layer first)
+                                               verify the effect; retry once; fall back to the next layer
+                                               result -> back to the model / final reply
 ```
 
 - Everything the agent does is printed first and logged to `logs/orbit.log` (secrets redacted).
-- Ctrl+C stops a running request. Step cap: 8 model round-trips. Stops after 3 failed tool calls in a row.
-- Name lives in `src/orbit/config.py` (`APP_NAME`). Limits and the model name are there too.
+- Ctrl+C stops a running request. Step cap: 8 model round-trips. It stops after 3 failed tool calls in a row.
+- An action is only reported as done when Orbit checked the effect (a window closed, a track changed, a page changed).
+- The name lives in `src/orbit/config.py` (`APP_NAME`), with the limits and model names.
 
-## Spotify (API layer)
+## The desktop app
 
-The router prefers the API layer over OS and browser. Login uses PKCE, so there is no client secret anywhere; the refresh token lives in the Windows Credential Manager (entry `Orbit/spotify-refresh-token`), never in a file or the logs. Tools: play (song, artist, album, playlist, or "my favourite music" = your liked songs), transfer playback (to a device by name, optionally with a volume; "this" = the Spotify app on this PC), set a device's volume, play/pause/next/previous on whichever device is playing, list devices, now playing. Volume follows the sound: when Spotify is playing on a speaker or phone, "reduce the volume", "make it louder" and "volume 40" change THAT device's volume (relative or absolute; the PC's volume would change nothing you can hear); when it plays on this PC or something else is playing, they change the PC volume. "echo pop volume 50", "in echo pop volume 50%", "reduce the volume in echo pop" and "set the volume of the speaker to 30" name the device. "speaker", "phone" and "tv" work as device kinds ("switch to speaker"), and are never guessed when there are two of a kind. "pause", "play", "next" and "previous" go through Spotify itself whenever Spotify is the current media player (it may be playing on a speaker, which the PC media keys cannot reach); if a media key does nothing and Spotify is involved, Orbit asks Spotify directly. Right after a Spotify request, "switch to echo" also means Spotify (so they reach a speaker too); otherwise "pause" uses the PC media keys. Spotify tools only appear when `SPOTIFY_CLIENT_ID` is set.
+Orbit's face is `orbit-ui` (in `ui/`, see [ui/README.md](ui/README.md) for everything): a particle sphere drawn on the GPU. It
+lives in the tray. When Orbit does something, a small orb floats up at the bottom right, above the taskbar, showing what it is
+doing and how loud the voice is; a few seconds after things go quiet it fades away. The orb never takes focus and clicks pass
+through it, so it never gets in your way.
 
-## Browser layer
+```
+cd ui
+cargo run --release -- --spawn        # start Orbit (microphone, wake word, model) and keep it in the tray
+cargo run --release -- --spawn-demo   # a scripted turn with a yes/no question, no microphone needed
+orbit-ui --autostart on               # start with Windows (off to undo; status to look). Never set unless you ask.
+```
 
-Two ways to use a browser, chosen with `--browser-mode` (or `ORBIT_BROWSER_MODE`):
+Every state has its own motion: idle, wake, listening (the surface follows your voice), transcribing, thinking, confirming
+(an amber pulse), speaking (waves with the voice level), follow-up, success, error and muted.
 
-- **`mine` (default): your own Brave window and profile.** "open my github", "open youtube", "search cats" open the link in your **Personal** profile (change with `ORBIT_BRAVE_PROFILE`), where you are already logged in. Orbit can then **read and click inside that page**: "click the ishowspeed live", "what page am I on", "play some video", "fullscreen". This uses Windows UI Automation (what screen readers use), not remote debugging, which Chromium blocks for a profile that is in use, and sites that distrust automated browsers (Google sign-in) do not object to it. Navigation: "go back", "go forward", "reload", "go to the home page" and "go to youtube home page" press the browser's own buttons or load the address in the **current tab** ("open ..." opens a new tab). "go back" means the browser, not the previous song (say "previous song" for that). A link that ignores the accessible press is opened by its own address. Tabs: "list my tabs", "close this tab", "close all other youtube tabs", "close all youtube tabs", "switch to the github tab". Closing keeps the tab you are on, asks first when 4 or more tabs would close, refuses to close every tab (that is the window: say "close brave"), and never sends Ctrl+W unless Brave has the keyboard. Clicks forgive typos and filler words ("clcik theh traver walles viedo" finds "Trevor Wallace Making ...") but never invent a match: if nothing on the page is close, it says so and lists what it can see. Limits: it sees links, buttons and fields by their names, not images or video frames; it works on the Brave window in front (or the top one); a click is confirmed by the page, address or the control's own label changing, so a click with no visible effect is reported as failed; clicking something that looks risky (buy, send, delete...) asks you first, and Orbit refuses to press a risky-looking control you did not name.
-- **`orbit`: Orbit's own automated window** (also used for "play X on youtube" + fullscreen, which Orbit verifies from the video element). It has a separate profile in `.browser-profile/` and never touches your everyday profiles. Sites that distrust automated browsers refuse sign-in there (Google shows "Couldn't sign you in"); GitHub's own username/password login works. Switch the browser itself with `--browser chrome`.
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/sphere-listening.png" alt="Listening: the surface follows the microphone level" width="420"><br><sub><b>Listening</b>: the surface follows your voice</sub></td>
+    <td align="center"><img src="docs/screenshots/sphere-thinking.png" alt="Thinking: tilted spin with travelling sparks" width="420"><br><sub><b>Thinking</b>: tilted spin, travelling sparks</sub></td>
+  </tr>
+</table>
 
-"open my github" opens `github.com/lennydany3` (change with `ORBIT_GITHUB_USER`); "open github" opens the site. Words like "in brave" are ignored. Only http(s) links are opened. Clicking a button whose text looks risky (buy, send, delete, pay...) asks you first. Web search uses DuckDuckGo.
+### Risky actions ask first
 
-## Voice (in progress) and privacy
+When Orbit needs a yes or no, the question appears above the sphere. Answer by clicking, by voice, or with **Ctrl+Alt+Y** /
+**Ctrl+Alt+N** (those two chords are only held while a question is open, so they never take the keys from another program the
+rest of the time). Esc says no.
 
-Voice lives in `src/orbit/voice/` (test bench: `python -m orbit.voice.run --help`).
+<p align="center">
+  <img src="docs/screenshots/confirm.png" alt="The question 'Do you want me to close window Notepad?' with No and Yes buttons" width="760">
+</p>
 
-- **Local by default, cloud when you add keys.** Microphone capture, wake word, voice-activity detection, echo cancellation and hotkeys always run on this PC. With no API keys, speech-to-text (Whisper `small.en` on the CPU), the spoken reply (Piper) and the language model (Ollama) are local too, and nothing leaves the PC. With keys (next section), the speech clip, the reply text and your requests go to Sarvam and Groq. Orbit prints which mode it is in when voice starts.
-- **Nothing is recorded while idle.** Audio is only kept in memory for the turn being processed. No audio is saved by default: the only recordings are the test clips you make yourself with `python -m orbit.voice.run record` / `record-wake` (git-ignored, local only).
-- **Models:** `python -m orbit.voice.fetch_models ...` is the only thing that downloads voice models, and only when you run it.
+### Settings
 
-### Cloud mode: Groq (language model) + Sarvam AI (speech-to-text and voice), for lower latency
+Every change is saved the moment you make it, to `settings.json` in the project folder (git-ignored; `ORBIT_SETTINGS` moves it).
+A hand-edited file Orbit cannot fully read does not stop anything: the bad entry is left out, the page lists what, and the first
+save keeps the old file as `settings.json.bak`.
+
+**Hotkeys.** Click a chord and press the new keys (Esc cancels). The orb, yes and no chords take effect at once; one Windows
+will not give Orbit is refused with a reason and nothing changes. The hold-to-talk key is picked from a list and Orbit follows
+it within a second, with no restart.
+
+<p align="center">
+  <img src="docs/screenshots/settings-hotkeys.png" alt="The Hotkeys settings page" width="760">
+</p>
+
+**Commands.** Say a phrase and Orbit runs a list of steps in order, without asking the language model. Say it exactly
+(filler like "please" and a leading "run" are fine). A command that presses keys or types asks one yes or no first, listing
+everything it will do. Steps that open a folder only open it: nothing is ever run, and the language model never sees these
+commands and cannot press keys or type. Switch a command off without deleting it.
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/settings-commands.png" alt="The Commands page: two commands, one switched off" width="400"><br><sub>Your commands</sub></td>
+    <td align="center"><img src="docs/screenshots/settings-editor.png" alt="The command editor: name, phrases and steps" width="400"><br><sub>The editor: phrases, then steps</sub></td>
+  </tr>
+</table>
+
+**Sounds.** A soft tone when the orb fades in and another when it fades away, with a switch and a volume slider (0 to 100).
+Only a real show or hide makes a sound, and it costs nothing at rest.
+
+<p align="center">
+  <img src="docs/screenshots/settings-sounds.png" alt="The Sounds settings page" width="620">
+</p>
+
+### Tray, cost and safety of the link
+
+- **Tray menu** (right-click): show or hide the orb, open the Orbit window, Settings, quit (which also stops the Orbit it started).
+  Ctrl+Alt+O, or a click on the tray icon, pins the orb on screen. Windows 11 hides new tray icons in the "hidden icons"
+  flyout: turn Orbit on in Settings, Personalization, Taskbar, Other system tray icons to keep it in view.
+- **Cost at rest:** about 0% of one core and about 100 MB with the orb hidden; about 10% of one core while it animates.
+- **Only this PC, only the window.** The link is a WebSocket on `127.0.0.1` (port 8765, `--ipc-port` or `ORBIT_IPC_PORT`) and
+  needs a random token that the app hands Orbit itself. A connection from a web page is always refused (a browser always sends
+  its page's origin), so no website can listen to your voice turns or answer a question for you. `ORBIT_IPC_ORIGINS` names pages
+  you want to allow.
+- **A face can send exactly one thing:** the yes or no for an open question. It cannot send requests or press keys. Audio never
+  leaves Orbit: the face gets one loudness number about 20 times a second, only while a voice is being heard.
+- **Clean shutdown.** The app keeps a pipe open to the Orbit it started, so closing or crashing it stops Orbit cleanly: there is
+  never an Orbit listening with nobody to show it.
+- **Run it by hand:** `python -m orbit --voice --ipc` prints the link to give `orbit-ui --url ...`. Without a microphone,
+  `python -m orbit.ipc.demo` (add `--confirm` for the question) plays a scripted turn on the same link.
+
+## Voice
+
+Voice lives in `src/orbit/voice/` (test bench: `python -m orbit.voice.run --help`). Start it with `python -m orbit --voice`.
+
+Start a turn by **holding Right Ctrl** (changeable in Settings) while you speak, or by saying **"hey orbit"** (`--no-wake` for
+hold-to-talk only; `--mic "<name>"` picks the microphone). Orbit transcribes what you said, runs the same `agent.handle(text)`
+as the text prompt, and speaks a short reply.
+
+- **Short, natural spoken replies.** The agent's terse tool reports are rephrased for speech ("asked 'Spotify Premium' to close"
+  is spoken as "Okay, closing Spotify."). When it did not understand, it says what it heard and asks again. One or two
+  sentences, never URLs, code or lists; the full reply is always printed. `CONVERSATIONAL = False` in `voice/config.py` reads the
+  reports out as they are.
+- **No dead air.** If the agent takes longer than about 2.5 s, Orbit says "One moment." (and "Still working on it." after about
+  8 s). `FILLERS = False` turns that off.
+- **Questions get answers.** After Orbit asks you something, it listens for 6 s without the wake word. After any reply you have
+  2 s for the next request without the wake word (`--no-follow-up` turns that off).
+- **Risky actions ask by voice.** "Do you want me to close window Notepad? Say yes or no." Only a clear yes runs it; silence,
+  "maybe" or anything unclear is a no.
+- **Interrupt it by voice.** Say "hey orbit" while Orbit talks: it mutes the instant the wake word model fires and stops for good
+  once a Whisper check agrees. Holding the key also interrupts at once. To avoid hearing itself, Orbit subtracts its own voice
+  from the microphone (echo cancellation; earbuds need none). `BARGE_IN = False` switches this off. Run
+  `python -m orbit.voice.run echotest` to measure whether it works with your speaker and microphone. Honest limits: it only
+  removes sound Orbit *knows* (its own voice), not music or a TV; Bluetooth speakers delay the sound by an unknown amount
+  (the filter covers about 0.5 s); some laptop microphones process the sound in a way a linear filter cannot undo. It was
+  verified in simulation, not on the author's own speakers.
+- **Not fooled by background sound.** The no-wake follow-up stays closed while music or a video is playing, filler "transcripts"
+  ("Uh...") and Whisper's silence hallucinations ("Thank you.") are ignored, and a raw tool call is never read out loud.
+- **Faster.** The language model is loaded when voice starts and kept loaded (Ollama otherwise unloads it after a few minutes and
+  the next request waits about 20 s); transcription starts at a 0.55 s pause and is kept only if you really stopped.
+- **Kill switch:** Ctrl+Alt+Esc stops the microphone instantly; Orbit carries on in text mode. If voice cannot start (no
+  microphone, a missing model) it says why and falls back to the text prompt instead of crashing.
+- **Where the time goes** (printed after each turn): on the author's PC, about 3.2 s from the end of speech to the first spoken
+  word with local models (speech-to-text about 2.0 s dominates), about 2.8 s with hold-to-talk. A busy PC is slower. Cloud mode
+  is the way to bring this down.
+
+Dev bench without a microphone or a real agent: `python -m orbit.voice.loop --echo-agent --wav replay.wav` (a stand-in agent that
+repeats your request; "close notepad" pretends to be risky so you can try the spoken yes / no).
+
+### Cloud mode: Groq + Sarvam AI
+
+Groq runs the language model; Sarvam does speech-to-text and the voice. Both are optional and independent.
 
 1. Get keys: Groq at <https://console.groq.com/keys>, Sarvam at <https://dashboard.sarvam.ai>.
-2. Copy `.env.example` to `.env` in the project folder and paste them in (`.env` is git-ignored; a variable set in your terminal overrides the file):
+2. Copy `.env.example` to `.env` and paste them in (`.env` is git-ignored; a variable set in your terminal overrides the file):
    ```
    GROQ_API_KEY=gsk_...
    SARVAM_API_KEY=...
    ```
 3. Check them: `python -m orbit.cloud_check` (one tiny request each, prints the seconds each took).
-4. Run as usual: `python -m orbit --voice`. Each part switches to the cloud on its own when its key exists (`ORBIT_LLM`, `ORBIT_STT`, `ORBIT_TTS` = `auto` | cloud name | local force one side; `--llm ollama` forces the local model for one run).
+4. Run as usual. Each part switches to the cloud when its key exists (`ORBIT_LLM`, `ORBIT_STT`, `ORBIT_TTS` = `auto` | the cloud
+   name | the local engine; `--llm ollama` forces the local model for one run). `ORBIT_LANGUAGE` picks the language you speak
+   (`en-IN`, `hi-IN`, ...); the other settings are listed in `.env.example`.
 
-What goes where: only the speech clip trimmed by the local silence detector is uploaded (never the always-on microphone stream), the wake word and echo cancellation stay local, and Orbit saves no audio. If the internet or a service fails, Orbit falls back to Whisper / Piper / Windows voice for the next minute instead of waiting on timeouts; the language model has no automatic fallback (use `--llm ollama`). The Sarvam voice plays through the same output path as Piper and records what it plays for echo cancellation, so interrupting it by voice works the same. Model and voice names (`ORBIT_GROQ_MODEL`, `ORBIT_SARVAM_*`) are settings because providers rename them; `ORBIT_LANGUAGE` picks the language you speak (`en-IN`, `hi-IN`, ...).
-
-### Friend mode: talk to Orbit about anything
-
-Orbit is also a friend you can talk to, not just a PC remote. Tell it about your day and it reacts and encourages you; ask it for a roast; ask a doubt ("what's the difference between a process and a thread?") and it explains in plain words with an example; say you're stressed or low and it slows down and is kind. It remembers the conversation for the session (last 8 exchanges, in memory only; `clear` forgets it).
-
-- **How it decides chat or command.** PC commands ("open spotify", "volume 30", "what's playing?") still go through the rules and tools, exactly as before. Anything else is chat, answered by a friend persona with no tools (so it is also cheaper on Groq's token limit). Obvious cases are decided by simple word checks; only unclear ones cost one tiny extra model call; right after a chat, vague follow-ups ("and then?") stay chat. Turn it off with `--no-friend` or `ORBIT_FRIEND=0`.
-- **Emotion.** Every chat reply starts with a hidden feeling tag (neutral, happy, excited, proud, caring, sad, teasing, calm, serious). The tag is never shown or spoken (the console prints `[feeling] proud`); it sets the voice's speed and expressiveness (`EMOTION_STYLE` in `voice/config.py`). Honest limit: Sarvam's voice only lets us change pace and how varied the delivery is, so most of the feeling comes from the words the model chooses (the voice is not a real "sad" or "laughing" voice). Offline, Piper only changes speed.
-- **Spoken whole.** Chat replies are spoken in full (up to 5 sentences), and the conversation stays open for 8 s after a reply without the wake word, so you can just keep talking.
-- **Safety.** Roasts are playful and only about what you did (procrastination, snacks, sleep), never looks, family, religion, money or health; if you sound low it skips the jokes; if you say something that sounds like hurting yourself it drops the humour, answers seriously and encourages you to reach out to someone you trust or a local helpline. It is an AI model, not a therapist, and it cannot browse the internet, so double-check facts that matter.
-- **Settings (`.env`).** `ORBIT_USER_NAME` (what Orbit knows you as), `ORBIT_FRIEND`. If the big Groq model hits its free-tier token limit, that one request is answered by the small model (`ORBIT_GROQ_FALLBACK_MODEL`) instead of waiting. Chat uses more tokens than a command (persona + history), so a very fast conversation on the free tier can still hit the limit.
-
-### Talking to Orbit: `python -m orbit --voice`
-
-Everything the text REPL does, by voice. Start a turn by **holding Right Ctrl** while you speak and releasing it, or by saying **"hey orbit"** (add `--no-wake` for hold-to-talk only; `--mic "<name>"` picks the microphone). Orbit transcribes what you said, runs the same `agent.handle(text)` as the text REPL (the agent is unchanged), and speaks a short reply.
-
-- **Short, natural spoken replies.** The agent's terse tool reports are rephrased for speech only ("asked 'Spotify Premium' to close" is spoken as "Okay, closing Spotify."; emoji, "(204)" counts and internal tool names are dropped; the opener varies). When it did not understand, it says what it heard and asks again. One or two sentences, never URLs, code or lists; the original reply is always printed in the terminal, with a `[says]` line when the spoken version differs. `CONVERSATIONAL = False` in `voice/config.py` reads the reports out as they are.
-- **No dead air.** If the agent takes longer than about 2.5 s, Orbit says "One moment." (and "Still working on it." after about 8 s). `FILLERS = False` turns that off.
-- **Questions get answers.** When Orbit asks you something ("Would you like to play something?"), it listens for 6 s without the wake word, so you can just reply.
-- **Risky actions ask by voice.** "Do you want me to close window Notepad? Say yes or no." Only a clear yes runs it; silence, "maybe" or anything unclear is a no.
-- **Follow-up window.** For 2 s after a reply you can say the next request without the wake word (`--no-follow-up` turns it off).
-- **Interrupt it by voice.** Say **"hey orbit"** while Orbit is talking: it mutes the instant the wake word model fires, and stops for good once the Whisper check agrees (if the check says no, it carries on). Holding the key also interrupts at once. The microphone stays open while Orbit speaks (it is off while Orbit transcribes and thinks). To avoid hearing itself, Orbit subtracts its own voice from the microphone (echo cancellation, `AEC` in `voice/config.py`); with earbuds or headphones there is no echo to begin with. A reply that contains the word "orbit" is spoken half-duplex, so Orbit cannot trigger itself. Switch off with `BARGE_IN = False`.
-  - **Does it work with your speaker and microphone?** Run `python -m orbit.voice.run echotest`: it plays a reply, measures how much your microphone hears it and how much the canceller removes, plays a second voice saying the wake word over the reply, and tells you the result. Honest limits: it only removes sound Orbit *knows* (its own voice), not music or a TV; Bluetooth speakers delay the sound by an unknown amount (the filter covers about 0.5 s); some laptop microphones process the sound in a way a linear filter cannot undo. The canceller measures its own benefit and passes the microphone through untouched when it does not clearly help, and was verified in simulation (including a person talking over the echo, and 15 ms of timing jitter like real hardware has) but not on the author's own speakers, whose sound the laptop microphone barely picks up.
-- **Not fooled by background sound.** The no-wake follow-up window stays closed while music or a video is playing (lyrics are not commands; say "hey orbit" or hold the key), filler "transcripts" like "Uh..." and Whisper's silence hallucinations ("Thank you.") are ignored, and a model reply that is a raw tool call is never read out loud. `FOLLOW_UP_WHILE_MEDIA = True` restores the old behaviour.
-- **Faster.** The language model is loaded when voice starts and kept loaded (Ollama otherwise unloads it after a few minutes and the next request waits ~20 s); transcription starts at a 0.55 s pause and is kept only if you really stopped (saves about 0.4 s a turn); "play X from / on / in / via Spotify" is a rule, not a 3 to 8 s model call.
-- **Kill switch:** Ctrl+Alt+Esc stops the microphone instantly; Orbit carries on in text mode. If voice cannot start at all (no microphone, a missing model) it says why and falls back to the text prompt instead of crashing.
-- **States you can see:** `[listening]`, `[thinking]`, `[speaking]`, plus the wake-word and confirmation lines. Every state change is also logged with a timestamp to `logs/voice.log` (add `--verbose` in the dev bench to print them). What you said is only written to that log if `LOG_TRANSCRIPTS = True` in `voice/config.py`; audio is never written.
-- **Where the time goes** (printed after each turn): on this PC, from the end of your speech to the first spoken word is about 2.3 s (speech-to-text about 2.0 s, the agent for a rule command about 0.1 s, the voice about 0.3 s) plus the 0.9 s end-of-speech wait, so about 3.2 s after you stop talking; with hold-to-talk the key release ends the turn, so about 2.8 s. A busy PC makes it slower (one run took 5.5 s while the system was at 85% load). Speech-to-text dominates; options are listed in "Known limits".
-
-Dev bench without a microphone or a real agent: `python -m orbit.voice.loop --echo-agent --wav replay.wav` (a stand-in agent that only repeats your request; "close notepad" pretends to be risky so you can try the spoken yes / no).
+Only the speech clip trimmed by the local silence detector is uploaded (never the always-on microphone stream); the wake word
+and echo cancellation stay local, and Orbit saves no audio. If the internet or a service fails, Orbit falls back to Whisper /
+Piper / Windows voice for the next minute instead of waiting on timeouts; the language model has no automatic fallback (use
+`--llm ollama`).
 
 ### Wake word: "Hey Orbit"
 
-openWakeWord ships no "Orbit" model, so `hey_orbit` is trained here, offline, in about 6 minutes: `python -m orbit.voice.run train-wake` (needs the feature models: `fetch_models wakeword hey_mycroft`). It learns from "hey orbit" spoken by your Piper voices at many speeds, with noise and room echo, against ordinary speech and look-alikes ("hey mycroft", "a little bit"). The result is `models/openwakeword/hey_orbit.npz` (not committed).
+openWakeWord ships no "Orbit" model, so `hey_orbit` is trained here, offline, in about 6 minutes:
+`python -m orbit.voice.run train-wake` (needs the feature models: `fetch_models wakeword hey_mycroft`). The result is
+`models/openwakeword/hey_orbit.npz` (not committed).
 
-- **Train it on your own voice** for much better results: `python -m orbit.voice.run record-wake --device "Microphone Array" --count 25 --talk 60`, then `train-wake` again. These clips are saved locally in `tests/voice/fixtures_wake/` (git-ignored).
-- **Every candidate is double-checked** by a quick local Whisper pass (`tiny.en`) that must hear "orbit" in the last 2.4 s, so look-alikes are rejected. The wake-word classifier itself runs all the time at under 1% CPU; the check runs only on candidates.
-- **Honest numbers (V4, synthetic voices only):** on Windows David and Zira at three speeds, which were not used for training, 22 of 24 "hey orbit" clips woke it and 0 of 84 other clips did. Real rooms, TV and your voice are a different test: use `python -m orbit.voice.run wake` to measure false wakes yourself.
-- Pre-trained stand-ins still work: `--word hey_mycroft` (or `alexa`, `hey_jarvis`; note "Jarvis" alone triggers `hey_jarvis`).
+- **Train it on your own voice** for much better results: `python -m orbit.voice.run record-wake --device "Microphone Array"
+  --count 25 --talk 60`, then `train-wake` again. These clips stay local (git-ignored).
+- **Every candidate is double-checked** by a quick local Whisper pass (`tiny.en`) that must hear "orbit", so look-alikes are
+  rejected. The wake-word classifier runs all the time at under 1% CPU; the check runs only on candidates.
+- **Honest numbers (synthetic voices only):** on Windows David and Zira at three speeds, which were not used for training, 22 of
+  24 "hey orbit" clips woke it and 0 of 84 other clips did. Real rooms, TV and your voice are a different test: measure false
+  wakes yourself with `python -m orbit.voice.run wake`.
+- Pre-trained stand-ins still work: `--word hey_mycroft` (or `alexa`, `hey_jarvis`).
 
-### Desktop face: the sphere window (`ui/`)
+## Friend mode
 
-`python -m orbit --voice --ipc` lets the sphere window (see `ui/README.md`) show what Orbit is doing: listening, thinking, speaking, your voice level, what was said, and the "are you sure?" question for risky actions, which you can then answer with a click instead of your voice. Install the extra first: `pip install -e ".[ipc]"`.
+Orbit is also a friend you can talk to, not just a PC remote. Tell it about your day and it reacts and encourages you; ask for a
+roast; ask a doubt ("what's the difference between a process and a thread?") and it explains in plain words with an example; say
+you are stressed or low and it slows down and is kind. It remembers the last 8 exchanges (in memory only; `clear` forgets them).
 
-- **Only this PC, only the window.** The link is a WebSocket on `127.0.0.1` (port 8765, `--ipc-port` or `ORBIT_IPC_PORT`). A connection needs the random token Orbit prints at start (`ORBIT_IPC_TOKEN` to choose one), and a connection from a web page is always refused (a browser always sends its page's origin), so no website can listen to your voice turns or answer a confirmation for you. `ORBIT_IPC_ORIGINS` names pages you want to allow (for example the design's review page).
-- **A face can send exactly one thing:** the yes or no for a question that is open. It cannot send requests or press keys.
-- **What it is told:** the messages are listed at the top of `src/orbit/ipc/protocol.py`. Audio never leaves Orbit: the face gets one loudness number about 20 times a second, only while a voice is being heard (your microphone while you talk, Orbit's voice while it speaks, nothing while only the wake word listens).
-- **The simplest way to use it:** from `ui/`, `cargo run --release -- --spawn` starts Orbit and puts it in the tray: a small orb floats up over your work when Orbit is doing something, and Ctrl+Alt+O pins it (the app keeps a pipe open to Orbit, so closing or crashing it stops Orbit cleanly). Add `--spawn-demo` instead to try it without speaking.
-- **Settings and your own commands.** The window's Settings page edits `settings.json` (git-ignored; `ORBIT_SETTINGS` moves it): the hotkeys (the orb, yes, no, and the hold-to-talk key, which Orbit follows within a second) and commands you make yourself. A command is a phrase and a list of steps: open an app, a website or a folder, press a key combination, type text, wait. Say the phrase exactly (filler like "please" and a leading "run" are fine) and Orbit runs the steps without asking the language model. A command that presses keys or types asks one yes or no first, listing everything it will do; folder steps only open the folder. Bad entries in the file are left out with a note at start-up, never a crash.
-- **Working on the face without a microphone:** `python -m orbit.ipc.demo` (add `--confirm` for the yes/no question) plays a scripted turn on the same link.
+- **Chat or command.** PC commands ("open spotify", "volume 30", "what's playing?") go through the rules and tools exactly as
+  before. Anything else is chat, answered by a friend persona with no tools. Obvious cases are decided by simple word checks;
+  only unclear ones cost one tiny extra model call. Turn it off with `--no-friend` or `ORBIT_FRIEND=0`.
+- **Emotion.** Every chat reply starts with a hidden feeling tag (neutral, happy, excited, proud, caring, sad, teasing, calm,
+  serious) that sets the voice's speed and expressiveness. Honest limit: Sarvam's voice only lets us change pace and how varied
+  the delivery is, so most of the feeling comes from the words. Offline, Piper only changes speed.
+- **Spoken whole.** Chat replies are spoken in full (up to 5 sentences), and the conversation stays open for 8 s after a reply.
+- **Safety.** Roasts are playful and only about what you did (procrastination, snacks, sleep), never looks, family, religion,
+  money or health. If you sound low it skips the jokes. If you say something that sounds like hurting yourself it drops the
+  humour, answers seriously and encourages you to reach out to someone you trust or a local helpline. It is an AI model, not a
+  therapist, and it cannot browse the internet, so double-check facts that matter.
+- **Settings (`.env`).** `ORBIT_USER_NAME`, `ORBIT_FRIEND`, `ORBIT_GROQ_FALLBACK_MODEL` (answers when the big model hits the
+  free-tier token limit).
+
+## Spotify (API layer)
+
+The router prefers the API layer over OS and browser. Login uses PKCE, so there is no client secret anywhere; the refresh token
+lives in the Windows Credential Manager (`Orbit/spotify-refresh-token`), never in a file or the logs. Spotify tools only appear
+when `SPOTIFY_CLIENT_ID` is set.
+
+- **Play** a song, artist, album, playlist, or "my favourite music" (your liked songs). **Transfer** playback to a device by
+  name, optionally with a volume ("this" = the Spotify app on this PC). "speaker", "phone" and "tv" work as device kinds and
+  are never guessed when there are two of a kind. **Control** play, pause, next, previous on whichever device is playing, list
+  devices, now playing.
+- **Volume follows the sound.** When Spotify plays on a speaker or phone, "reduce the volume", "make it louder" and "volume 40"
+  change THAT device (relative or absolute); when it plays on this PC or something else is playing, they change the PC volume.
+  Name a device to be explicit ("echo pop volume 50", "set the volume of the speaker to 30").
+- **Pause, play, next, previous** go through Spotify itself whenever it is the current media player (a speaker cannot be reached
+  by the PC media keys); if a media key does nothing and Spotify is involved, Orbit asks Spotify directly. Right after a Spotify
+  request, "switch to echo" also means Spotify.
+
+## Browser layer
+
+Two ways to use a browser, chosen with `--browser-mode` (or `ORBIT_BROWSER_MODE`):
+
+- **`mine` (default): your own Brave window and profile.** "open my github", "open youtube" and "search cats" open the link in
+  your **Personal** profile (change with `ORBIT_BRAVE_PROFILE`), where you are already logged in. Orbit can then **read and click
+  inside that page**: "click the ishowspeed live", "what page am I on", "play some video", "fullscreen". This uses Windows UI
+  Automation (what screen readers use), not remote debugging, which Chromium blocks for a profile in use and which sites that
+  distrust automation (Google sign-in) do not object to.
+  - **Navigation:** "go back", "go forward", "reload", "go to the home page" press the browser's own buttons or load the
+    address in the **current tab** ("open ..." opens a new tab). "go back" means the browser, not the previous song.
+  - **Tabs:** "list my tabs", "close this tab", "close all other youtube tabs", "switch to the github tab". Closing keeps the tab
+    you are on, asks first when 4 or more tabs would close, and refuses to close every tab (that is the window: say "close
+    brave").
+  - **Typo-tolerant clicks:** "clcik theh traver walles viedo" finds "Trevor Wallace Making ...", but Orbit never invents a
+    match: if nothing on the page is close, it says so and lists what it can see.
+  - **Limits:** it sees links, buttons and fields by their names, not images or video frames; it works on the Brave window in
+    front; a click is confirmed by the page, address or the control's own label changing, so a click with no visible effect
+    is reported as failed; clicking something risky-looking (buy, send, delete, pay...) asks you first, and Orbit refuses to press
+    a risky-looking control you did not name.
+- **`orbit`: Orbit's own automated window** (also used for "play X on youtube" + fullscreen, which Orbit verifies from the video
+  element). It has a separate profile in `.browser-profile/` and never touches your everyday profiles. Sites that distrust
+  automated browsers refuse sign-in there (Google shows "Couldn't sign you in"); GitHub's own login works. Switch the browser
+  with `--browser chrome`.
+
+"open my github" opens `github.com/lennydany3` (change with `ORBIT_GITHUB_USER`); "open github" opens the site. Only http(s)
+links are opened. Web search uses DuckDuckGo.
+
+## Privacy
+
+- **Local by default.** Microphone capture, wake word, voice-activity detection, echo cancellation and hotkeys always run on this
+  PC. With no API keys, nothing leaves the PC. With keys, the speech clip, the reply text and your requests go to Sarvam and
+  Groq; Orbit prints which mode it is in when voice starts.
+- **Nothing is recorded while idle.** Audio is only kept in memory for the turn being processed and is never saved. The only
+  recordings are the test clips you make yourself with `record` / `record-wake` (git-ignored).
+- **Logs** go to `logs/` (git-ignored). Every state change is logged with a timestamp; what you said is only written if
+  `LOG_TRANSCRIPTS = True` in `voice/config.py`.
+- **Nothing is downloaded behind your back.** `fetch_models` is the only voice code that uses the network, and only when you run
+  it. `.env`, `settings.json`, `models/` and `.browser-profile/` are git-ignored.
+
+## Project layout
+
+```
+src/orbit/
+  agent/          rules, router, safety gate, friend mode, rescue, custom commands, the loop
+  tools/
+    api_layer/    Spotify (PKCE login, Credential Manager)
+    os_layer/     apps, windows, monitors, volume, media keys, UI Automation + OCR clicks, processes
+    browser_layer/ your Brave profile (UI Automation) and Orbit's own automated window (Playwright)
+  llm/            Ollama (local) and Groq (cloud)
+  voice/          microphone, wake word, VAD, echo cancellation, speech-to-text, voice, the voice loop
+  ipc/            the WebSocket link to the desktop app
+ui/               orbit-ui: the tray app and sphere (Rust + Rune)
+tests/            1172 Python tests, plus shared fixtures the Rust side is tested against
+docs/screenshots/ the pictures in this file
+```
+
+The screenshots are real renders of the window, made headless with
+`cargo run -- --snap out.png --size 1280x800 --scene <name>` from `ui/` (scenes are listed in `ui/src/main.rs`).
 
 ## Known limits (honest list)
 
-- A phone or speaker only shows up as a Spotify device while its Spotify app is open or was used recently (Echo speakers can be slow to wake and sometimes need a second try). Spotify's own "transfer" call sometimes answers HTTP 500 for this PC; Orbit then restarts the current song on the target device instead, and says so.
+**Spotify**
+- A phone or speaker only shows up as a Spotify device while its Spotify app is open or was used recently (Echo speakers can be
+  slow to wake and sometimes need a second try). Spotify's own "transfer" call sometimes answers HTTP 500 for this PC; Orbit then
+  restarts the current song on the target device and says so.
+- Premium is needed for play and transfer. In development mode only accounts listed under User Management (max 5) can log in.
+- Spotify must be running on the PC for it to appear as a device; a multi-step request opens it first. Its volume is separate
+  from Windows volume.
+- Playlist playback can only be confirmed as "something is playing", not that it came from that playlist. "Favourite music" is
+  your liked songs (the 50 most recent). Spotify's API sometimes does not report what context is playing, so artist and album
+  playback is verified from the current track.
 
-- Spotify needs Premium for play/transfer. In development mode only accounts listed under User Management (max 5) can log in.
-- Spotify must be running on the PC for it to appear as a device; the multi-step request opens it first. Spotify's own volume is separate from Windows volume.
-- Playlist playback can only be confirmed as "something is playing", not that it came from that playlist. "Favourite music" means your liked songs (the 50 most recent).
-- Spotify's API sometimes does not report what context is playing, so artist/album playback is verified from the current track.
+**Browser**
+- YouTube "playing" is verified from the video element, so a pre-roll ad counts as playing. Cookie-consent pages (EU) must be
+  accepted once by hand.
+- A browser click cannot be retried automatically (a second click could undo the first); if nothing visibly changes it reports
+  failure.
+- Pages that block automation (captchas, logins with 2FA) cannot be driven in Orbit's own window.
 
-- YouTube "playing" is verified from the video element, so a pre-roll ad counts as playing. Cookie-consent pages (EU) must be accepted once by hand.
-- `browser_click` finds things by visible text and can't be retried automatically (a second click could undo the first); if nothing visibly changes it reports failure.
-- Pages that block automation (captchas, logins with 2FA) cannot be driven.
-- Media keys go to whatever Windows treats as the current media session (often the last app that played). `pause`/`play` are safe to repeat; `next`/`prev` are verified by track change, which can't be confirmed for live streams or one-track playlists.
-- Opening an app finds it by Start-menu name; if two apps match ("visual studio") it asks instead of guessing. Store apps can show their window under a generic host, so window matching may miss some.
+**Windows**
+- Media keys go to whatever Windows treats as the current media session (often the last app that played). `pause` and `play` are
+  safe to repeat; `next` and `previous` are verified by track change, which cannot be confirmed for live streams or one-track
+  playlists.
+- Opening an app finds it by Start-menu name; if two apps match ("visual studio") it asks instead of guessing. Store apps can
+  show their window under a generic host, so window matching may miss some.
 - Windows may refuse to bring a window to the front; the tool then reports failure rather than pretending.
-- `open <name>` is a rule for apps only. Websites ("open github") come with the browser layer in Step 3.
-- The 7B model sometimes misreads amounts ("quieter, around 20 percent" became 67%). Plain commands use rules, not the model.
 - "Works on every app" is not achievable. Games and custom-drawn UIs may not be controllable.
-- **Administrator windows (Task Manager, anything started "as administrator") cannot be controlled by a normal program: Windows refuses to let Orbit close, minimize or move them.** Orbit now checks for this first and says so ("'Task Manager' runs as administrator, so Windows does not let Orbit close it") instead of reporting a close that never happened. To control such windows, open the terminal with "Run as administrator" and start Orbit from there; that gives Orbit (and anything it runs) full administrator rights, so only do it when you need it.
-- **Closing a window is not quitting the app.** Many apps (ChatGPT, Spotify, Discord ...) keep running in the system tray after their window closes. "close chatgpt" closes the window and tells you it is still running in the background; **"quit chatgpt"** (also "exit", "kill", "force close", "close chatgpt completely") ends all of the app's processes. It always asks first, because quitting can lose unsaved work. It never quits Windows itself, system services, the Ollama model server, or the program Orbit is running inside.
-- A 7B local model makes mistakes on vague or multi-step requests; expect 10-20 s for those. Simple commands skip the model.
-- Memory is short-term: the model sees your last 6 requests (capped at about 5,000 characters) so "close it" works. It is forgotten when you quit; type `clear` to forget sooner. Rule commands like "pause" are remembered but never need memory.
-- "Close" asks the window to close like its X button (nothing is force-killed). If the app shows a "save changes?" box the window stays open and Orbit reports that. A window whose title looks unsaved (starts with `*`) asks you first. Orbit never closes its own terminal.
+- **Administrator windows (Task Manager, anything started "as administrator") cannot be controlled by a normal program.**
+  Windows refuses to let Orbit close, minimize or move them, and Orbit says so up front. To control such windows, start Orbit
+  from a terminal opened with "Run as administrator"; that gives Orbit (and anything it runs) full administrator rights, so only
+  do it when you need it.
+- **Closing a window is not quitting the app.** Many apps (ChatGPT, Spotify, Discord ...) keep running in the tray after the
+  window closes. "close chatgpt" closes the window and tells you it is still running; **"quit chatgpt"** (also "exit", "kill",
+  "force close", "close chatgpt completely") ends all of the app's processes. It always asks first, because quitting can lose
+  unsaved work. It never quits Windows itself, system services, the Ollama model server, or the program Orbit runs inside.
+- "Close" asks the window to close like its X button (nothing is force-killed). If the app shows a "save changes?" box the window
+  stays open and Orbit reports that. A window whose title looks unsaved (starts with `*`) asks you first. Orbit never closes its
+  own terminal.
+
+**Language model and memory**
+- The local 7B model makes mistakes on vague or multi-step requests; expect 10-20 s for those (it once read "quieter, around 20
+  percent" as 67%). Simple commands skip the model, and the cloud model is faster and more accurate.
+- Memory is short-term: the model sees your last 6 requests (capped at about 5,000 characters) so "close it" works. It is
+  forgotten when you quit; type `clear` to forget sooner.
 - Ctrl+C during a model call takes effect when that call returns (at most the 120 s timeout).
+
+**Desktop app**
+- The floating orb is a separate overlay window, so the screenshots above show the main window only.
+- The `.exe`'s own icon in Explorer is not set (that needs a Windows resource file at build time); the window, taskbar and
+  tray icons are.
