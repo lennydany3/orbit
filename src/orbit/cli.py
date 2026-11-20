@@ -152,7 +152,7 @@ def _main(argv: list[str] | None) -> int:
 
             from .ipc.lifetime import watch_parent
 
-            watch_parent(sys.stdin.buffer, _thread.interrupt_main)
+            watch_parent(sys.stdin.fileno(), _thread.interrupt_main)
         try:
             result = run_voice(agent, device=args.mic or voice_config.MIC_DEVICE, wake_enabled=not args.no_wake,
                                follow_up=False if args.no_follow_up else None, ui=link.bridge if link else None)

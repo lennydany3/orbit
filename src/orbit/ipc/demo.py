@@ -111,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
 
         from .lifetime import watch_parent
 
-        watch_parent(sys.stdin.buffer, _thread.interrupt_main)
+        watch_parent(sys.stdin.fileno(), _thread.interrupt_main)
     print(f"Demo face link: {link.url}\nCtrl+C stops.", flush=True)
     try:
         while True:
