@@ -9,9 +9,11 @@ from pydantic import ValidationError
 from .. import config
 from .. import visual
 from ..llm.base import LLM, LLMError
+from ..logging_setup import redact
 from ..tools.base import Registry, ToolResult
 from ..tools.os_layer import symbols
-from . import context, friend, rescue, rules
+from ..voice import farewell
+from . import context, friend, rescue, rules, screen_help
 from . import custom as custom_commands
 from .router import Log, Router
 from .safety import Safety
@@ -74,7 +76,7 @@ _WORKING_LABELS = {
     "browser_youtube_play": "Playing the video\u2026", "browser_fullscreen": "Going fullscreen\u2026", "browser_close_tabs": "Closing tabs\u2026",
     "browser_switch_tab": "Switching tabs\u2026", "browser_page_info": "Reading the page\u2026",
     "os_click": "Clicking\u2026", "os_type": "Typing\u2026", "os_scroll": "Scrolling\u2026", "os_open_app": "Opening the app\u2026",
-    "os_read_window": "Reading the window\u2026",
+    "os_read_window": "Reading the window\u2026", "os_look_at_screen": "Looking at your screen\u2026",
     # (moving, arranging and closing windows need no pill: the pointer carrying or pressing the window is the animation)
 }
 # "second" and "twice" are numbers too: an optional number you said in words was not invented
@@ -150,6 +152,11 @@ class Agent:
         """Did the last request end with a tool call that failed? (The voice face shows it as an error flash.)"""
         return self._part_failed
 
+    def end_conversation(self) -> None:
+        """The user said "nothing" / "leave it" / "talk later": the chat is over, so a vague follow-up is not part of it any more.
+        (What was said is still remembered for the session; `forget` clears that.)"""
+        self._in_chat = False
+
     def forget(self) -> None:
         """Clear the conversation memory."""
         self.turns.clear()
@@ -192,6 +199,12 @@ class Agent:
             command = self.custom.match(text)
             if command is not None:
                 return self._run_custom(command, text)
+        goodbye = farewell.detect(text)
+        if goodbye is not None:                       # "nothing", "leave it", "let's talk later", "bye": the chat is over, no model call
+            self.end_conversation()
+            self.last_kind, self.last_emotion = "chat", "calm"
+            self.log("friend", f"you ended the conversation ({goodbye.kind})")
+            return self._finish([{"role": "user", "content": text}], farewell.reply(goodbye))
         # Several requests in one sentence ("open spotify and then tell me what is playing"): handle them one at a
         # time, each as its own small request (a rule if one fits, otherwise the model). A small model is far
         # more reliable on one thing at a time. Only done when every part starts like a request.
@@ -222,6 +235,8 @@ class Agent:
         """One request: a fast rule if one fits, otherwise the model."""
         user = [{"role": "user", "content": text}]
         was_chatting, self._in_chat = self._in_chat, False
+        if config.SCREEN_HELP and screen_help.asks_about_screen(rules.normalize(text)) and self.registry.get_exposed("os_look_at_screen"):
+            return self._finish(user, self._answer_about_screen(text))      # "what does this mean?": about what the user points at
         m = self._rule_for(text)
         if m:
             self.log("rule", f"'{m.rule}' matched, no model call")
@@ -275,11 +290,34 @@ class Agent:
         if not reply:
             emotion, reply = "caring", "Sorry, I zoned out for a second. Say that again?"
         self.log("friend", f"replied in {resp.elapsed_s:.1f}s, feeling {emotion}")
+        self._remember_chat(text, emotion, reply)
+        return reply
+
+    def _remember_chat(self, text: str, emotion: str, reply: str) -> None:
+        """Keep this exchange for the conversation (so "and why?" works next), within the size budget, and mark the reply as chat."""
         self.chat_turns.append([{"role": "user", "content": text}, {"role": "assistant", "content": f"[{emotion}] {reply}"}])
         del self.chat_turns[: max(0, len(self.chat_turns) - config.MAX_CHAT_TURNS)]
         while len(self.chat_turns) > 1 and sum(len(m["content"]) for p in self.chat_turns for m in p) > config.MAX_CHAT_CHARS:
             self.chat_turns.pop(0)
         self.last_kind, self.last_emotion, self._in_chat = "chat", emotion, True
+
+    # ---- questions about what is on the screen ----
+    def _answer_about_screen(self, text: str) -> str:
+        """"What does this mean?": read the window under the mouse pointer (title, what is under the pointer, selected text, the
+        text around it) and let the language model answer from that text. It sees text, never pictures, and secrets in it are masked."""
+        if self.llm is None:
+            self._part_failed = True
+            return "I need the language model to explain what is on your screen, and it is switched off (--no-llm)."
+        looked = self.execute("os_look_at_screen", {})
+        if not looked.ok:
+            return f"I could not look at the screen: {looked.error}"
+        block = screen_help.redact_secrets(redact(str(looked.data or "")))
+        where = getattr(self, "llm_description", "the language model")
+        self.log("screen", f"{looked.summary}; sending that text to {where} to answer")
+        resp = self.llm.chat(screen_help.build_messages(text, block), [])
+        reply = screen_help.tidy_reply(resp.content) or "I looked, but I could not tell what that is from the text on the screen."
+        self.log("screen", f"answered in {resp.elapsed_s:.1f}s")
+        self._remember_chat(text, "calm", reply)
         return reply
 
     def _rule_for(self, text: str) -> rules.RuleMatch | None:
@@ -415,7 +453,7 @@ class Agent:
             messages.append(assistant)
             turn.append(assistant)
             for call in resp.tool_calls:
-                result = self.execute(call.name, call.arguments)
+                result = self.execute(call.name, call.arguments, by_model=True)
                 tool_msg = {"role": "tool", "tool_name": call.name, "content": result.for_model()}
                 messages.append(tool_msg)
                 turn.append(tool_msg)
@@ -460,9 +498,11 @@ class Agent:
             return contextlib.nullcontext()
         return visual.working(label, lambda: _work_area(tool_name))
 
-    def execute(self, name: str, args: dict) -> ToolResult:
-        """validate -> print -> safety gate -> router (run + verify + retry + fallback)."""
+    def execute(self, name: str, args: dict, by_model: bool = False) -> ToolResult:
+        """validate -> print -> safety gate -> router (run + verify + retry + fallback). `by_model` = the language model asked for it."""
         tool = self.registry.get_exposed(name)
+        if tool is not None and by_model and not tool.model_visible:
+            tool = None                                  # a tool only Orbit's own code may run: to the model it does not exist
         if tool is None:
             hint = self.registry.closest_names(name)
             error = f"unknown tool '{name}'." + (f" Closest: {', '.join(hint)}." if hint else "")

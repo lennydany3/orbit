@@ -164,6 +164,39 @@ def find_text(words: list[Word], query: str) -> tuple[int, int, str] | None:
     return (best[1], best[2], best[3]) if best else None
 
 
+def words_to_lines(words: list[Word]) -> list[str]:
+    """The words the OCR engine found, regrouped into lines of text in reading order (top to bottom, left to right)."""
+    ordered = sorted(words, key=lambda w: (w.y + w.height / 2, w.x))
+    lines: list[list[Word]] = []
+    centre = 0.0
+    for w in ordered:
+        mid = w.y + w.height / 2
+        if lines and abs(mid - centre) <= max(6.0, 0.6 * w.height):
+            lines[-1].append(w)
+            centre = (centre * (len(lines[-1]) - 1) + mid) / len(lines[-1])
+        else:
+            lines.append([w])
+            centre = mid
+    return [" ".join(w.text for w in sorted(line, key=lambda w: w.x)) for line in lines]
+
+
+def words_near(words: list[Word], x: float, y: float, across: int = 360, down: int = 110) -> list[Word]:
+    """The words within `across` pixels sideways and `down` pixels up or down of a point (a pointer position in the picture)."""
+    return [w for w in words if abs(w.x + w.width / 2 - x) <= across and abs(w.y + w.height / 2 - y) <= down]
+
+
+def word_under(words: list[Word], x: float, y: float, slack: int = 18) -> Word | None:
+    """The word the point is on (or within `slack` pixels of), preferring the one it is truly inside."""
+    best, best_gap = None, float("inf")
+    for w in words:
+        gap_x = max(w.x - x, 0, x - (w.x + w.width))
+        gap_y = max(w.y - y, 0, y - (w.y + w.height))
+        gap = (gap_x ** 2 + gap_y ** 2) ** 0.5
+        if gap <= slack and gap < best_gap:
+            best, best_gap = w, gap
+    return best
+
+
 def find_glyph(words: list[Word], glyphs: tuple[str, ...]) -> tuple[int, int, str] | None:
     """Where a SYMBOL is, when the OCR engine reads it as a character (x, +, a heart, three dots, a play triangle):
     (centre x, centre y, the character found), or None. Only small standalone marks count, never a letter inside a word."""

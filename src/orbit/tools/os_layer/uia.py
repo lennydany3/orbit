@@ -89,7 +89,7 @@ def _controls(hwnd: int, limit: int) -> list[Control]:
     found = None
     for attempt in range(_WARM_UP_ATTEMPTS):
         page = root.FindFirst(UIA.TreeScope_Descendants, _type_condition([UIA.UIA_DocumentControlTypeId]))
-        found = page.FindAll(UIA.TreeScope_Descendants, cond) if page is not None else None
+        found = page.FindAll(UIA.TreeScope_Descendants, cond) if page else None          # (a missing page is a NULL pointer, not None)
         if found is not None and found.Length > 0:
             break
         time.sleep(1.0)
@@ -295,6 +295,91 @@ def read_text(el, limit: int = 4000) -> str | None:
         return (text.DocumentRange.GetText(limit) or "").rstrip("\r\n")
     except Exception:
         return None
+
+
+_TYPE_NAMES = {50000: "button", 50002: "checkbox", 50003: "combo box", 50004: "text field", 50005: "link", 50006: "image", 50007: "list item",
+               50008: "list", 50011: "menu item", 50013: "radio button", 50018: "tab bar", 50019: "tab", 50020: "text", 50021: "toolbar",
+               50023: "tree", 50024: "tree item", 50026: "group", 50028: "data grid", 50029: "data item", 50030: "document", 50032: "window",
+               50033: "pane", 50034: "header", 50036: "table", 50037: "title bar"}
+
+
+def type_name(el) -> str:
+    return _TYPE_NAMES.get(el.CurrentControlType, "element")
+
+
+def describe_at(x: int, y: int) -> dict | None:
+    """What is at a screen position, as UI Automation knows it: {"name", "kind", "text", "trail"} (trail = the names of what
+    contains it, nearest first). Apps that publish nothing (many Electron apps) give an unnamed "pane"."""
+    try:
+        el = _retrying(lambda: _uia().ElementFromPoint(UIA.tagPOINT(int(x), int(y))))
+    except comtypes.COMError:
+        return None
+    if not el:
+        return None
+    info = {"name": (el.CurrentName or "").strip(), "kind": type_name(el), "text": (read_text(el, 600) or "").strip(), "trail": []}
+    walker, node = _uia().ControlViewWalker, el
+    for _ in range(6):
+        try:
+            node = walker.GetParentElement(node)
+        except comtypes.COMError:
+            break
+        if not node:
+            break
+        name = (node.CurrentName or "").strip()
+        if name:
+            info["trail"].append(f"{type_name(node)} '{name[:50]}'")
+    info["trail"] = info["trail"][:3]
+    return info
+
+
+def _text_pattern(el):
+    return el.GetCurrentPattern(UIA.UIA_TextPatternId).QueryInterface(UIA.IUIAutomationTextPattern)
+
+
+def _ranges_text(ranges, limit: int) -> str:
+    pieces, total = [], 0
+    for i in range(ranges.Length):
+        piece = (ranges.GetElement(i).GetText(min(limit, 500)) or "").replace("￼", " ").strip()      # (￼ marks an embedded object)
+        if piece:
+            pieces.append(piece)
+            total += len(piece) + 1
+        if total >= limit:                                                    # a long page has hundreds of ranges: stop once there is enough
+            break
+    return " ".join(pieces)[:limit]
+
+
+def window_text(hwnd: int, limit: int = 3000) -> tuple[str, str]:
+    """(the text visible in a window's main document, the text selected in it), through UI Automation's text pattern. Browsers
+    and editors that publish a document give both; ("", "") for anything else. A covered browser window publishes nothing."""
+    def look():
+        root = _uia().ElementFromHandle(hwnd)
+        doc = root.FindFirst(UIA.TreeScope_Descendants, _type_condition([UIA.UIA_DocumentControlTypeId]))
+        if not doc:
+            return None
+        return _text_pattern(doc)
+
+    try:
+        pattern = _retrying(look)
+    except (comtypes.COMError, OSError, ValueError):
+        return "", ""
+    if pattern is None:
+        return "", ""
+    parts = []
+    for read in (pattern.GetVisibleRanges, pattern.GetSelection):          # separately: reading no selection may fail, and must not lose the page
+        try:
+            parts.append(_ranges_text(read(), limit))
+        except (comtypes.COMError, OSError, ValueError):
+            parts.append("")
+    return parts[0], parts[1]
+
+
+def focused_selection(limit: int = 1500) -> str:
+    """The text selected in whatever has the keyboard focus ("" if nothing is selected or it cannot be read)."""
+    try:
+        el = _uia().GetFocusedElement()
+        return _ranges_text(_text_pattern(el).GetSelection(), limit) if el else ""
+    except (comtypes.COMError, OSError, ValueError):
+        return ""
 
 
 def focused_field() -> Field | None:

@@ -59,6 +59,11 @@ BRAVE_PATHS = [
 # "open my github" opens this profile (github.com/<name>). Change it with the ORBIT_GITHUB_USER environment variable.
 GITHUB_USER = os.environ.get("ORBIT_GITHUB_USER", "lennydany3")
 
+# --- Questions about the screen ("what does this mean?", pointing at something): the text on the screen is read (OCR and Windows'
+# accessibility info), secrets in it are masked, and that text goes to the language model. With the cloud model (Groq) it leaves
+# this PC for that one question; with the local model it never does. 0 = Orbit never reads the screen to answer.
+SCREEN_HELP = os.environ.get("ORBIT_SCREEN_HELP", "1").lower() not in ("0", "off", "false", "no")
+
 # --- On-screen animations: Orbit's pointer gliding to what it clicks, the click ripple, the "working" pill ---
 VISUALS = os.environ.get("ORBIT_VISUALS", "1").lower() not in ("0", "off", "false", "no")   # --no-visuals turns them off for one run
 VISUALS_SPEED = float(os.environ.get("ORBIT_VISUALS_SPEED", "1"))                            # 2 = twice as fast, 0.5 = half as fast

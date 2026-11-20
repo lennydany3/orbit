@@ -27,6 +27,7 @@ import numpy as np
 from . import config
 from ..ipc.bridge import NullBridge
 from .aec import EchoCanceller, ReferenceAligner, ReferenceTimeline
+from . import farewell
 from .phrasing import Phraser, strip_emoji
 from .state import State, TurnTimer, VoiceState
 from .summarize import spoken_summary
@@ -185,6 +186,7 @@ class VoiceLoop:
         self._filler_future: Future | None = None
         self._fillers_said = 0
         self._last_spoken = ""
+        self._closing = False                      # the goodbye being spoken ends the conversation: no follow-up window after it
         self._follow_window = config.FOLLOW_UP_S
         self.st = VoiceState(clock=clock, log=self._on_transition, on_change=self._on_change)
         self.turn = TurnTimer(clock=clock)
@@ -229,6 +231,7 @@ class VoiceLoop:
             self.wake.reset()
 
     def _idle(self, reason: str) -> None:
+        self._closing = False
         self.st.to(State.IDLE, reason)
         self._resume_mic()
         self._reset_listeners()
@@ -441,6 +444,10 @@ class VoiceLoop:
         self.turn.mark("text")
         if self.monitor is not None:
             self.monitor.add_timing("speech-to-text", result.seconds)
+        goodbye = farewell.detect(text)
+        if goodbye is not None:
+            self._end_conversation(text, goodbye, result.seconds)
+            return
         if not re.search(r"[A-Za-z0-9]", text) or is_noise(text):
             if self.mode == "followup":                    # nobody addressed Orbit here: say nothing, just stop listening
                 self.out(f'  (ignored: "{text.strip()}" is not a request)')
@@ -457,6 +464,23 @@ class VoiceLoop:
         self.st.to(State.THINKING, "running the agent")
         self.out("[thinking]")
         self.agent_future = spawn(self.agent.handle, text)
+
+    def _end_conversation(self, text: str, goodbye, seconds: float) -> None:
+        """"nothing", "leave it", "let's talk later", "bye"...: say a short goodbye and go back to waiting for "hey orbit".
+        The language model is not involved, and no follow-up window opens afterwards."""
+        self.out(f'You said: "{text}"   [speech-to-text {seconds:.1f}s]')
+        self.out(f"  (you ended the conversation: {goodbye.kind})")
+        self.ui.transcript("you", text)
+        if config.LOG_TRANSCRIPTS:
+            self._flog(f"transcript: {text}")
+        end = getattr(self.agent, "end_conversation", None)
+        if end is not None:
+            end()                                          # a vague "and then?" after this must not count as a chat follow-up
+        said = farewell.reply(goodbye, self.phraser.rng)
+        self.out(f"Orbit: {said}")
+        self.ui.reply(said, said, "chat", "calm")
+        self._speak(said, "you ended the conversation", emotion="calm", chat=False)
+        self._closing = True                               # (set after _speak, which clears it for every other reply)
 
     def _tick_thinking(self) -> None:
         request = self.confirm.poll()
@@ -531,6 +555,7 @@ class VoiceLoop:
             set_it(emotion)
 
     def _speak(self, text: str, reason: str, emotion: str = "neutral", chat: bool = False) -> None:
+        self._closing = False
         self._chat_turn = chat
         self._set_emotion(emotion)
         self._barge = self._can_barge_in(text)
@@ -570,7 +595,9 @@ class VoiceLoop:
             if self.monitor is not None:
                 self.monitor.add_timing("end of speech -> first spoken word", self.turn.gap("speech_end", "first_audio"))
         self.turns += 1
-        if self.follow_up and not config.FOLLOW_UP_WHILE_MEDIA and self._media_check():
+        if self._closing:
+            self._idle("conversation ended by you: waiting for the wake word")
+        elif self.follow_up and not config.FOLLOW_UP_WHILE_MEDIA and self._media_check():
             self.out('  (music is playing, so no follow-up without the wake word: say "'
                      + self.wake_name.replace("_", " ") + '" or hold the key)')
             self._idle("media is playing")

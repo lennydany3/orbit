@@ -73,6 +73,7 @@ class Tool:
     idempotent: bool = True               # False = running it twice could do harm (a click), so never auto-retry
     needs_confirm: Callable[[Any], bool] | None = None  # per-call risk check on top of `risk`
     user_text: str = ""                   # name of a parameter whose words must come from the user's own request (never from a web page)
+    model_visible: bool = True            # False = only Orbit's own code may run it (the language model is never offered it or allowed to call it)
 
     def __post_init__(self) -> None:
         if self.layer not in LAYER_ORDER:
@@ -148,7 +149,7 @@ class Registry:
 
     def relevant(self, text: str, limit: int) -> list[Tool]:
         """Pick the tools most related to the request (word overlap). Few tools = send them all."""
-        tools = self.exposed()
+        tools = [t for t in self.exposed() if t.model_visible]
         if len(tools) <= limit:
             return tools
         words = {w for w in text.lower().replace("_", " ").split() if len(w) > 2}

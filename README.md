@@ -16,13 +16,13 @@ only while Orbit is doing something.
   voice, by clicking, or with a key chord. Everything Orbit does is printed first and logged with secrets redacted.
 - **You can watch it work.** Orbit's own pointer glides to what it is about to click, presses it with a ripple, carries a window
   across monitors by its title bar, and a small "working" pill shows while a job runs ([details](#seeing-what-orbit-does)).
-- **Tested.** 1361 Python tests and 193 Rust tests pass.
+- **Tested.** 1523 Python tests and 193 Rust tests pass.
 
 ## Contents
 
 [What it can do](#what-it-can-do) · [Setup](#setup-windows-11) · [How it works](#how-it-works) · [Seeing what Orbit does](#seeing-what-orbit-does) ·
 [The desktop app](#the-desktop-app) · [Voice](#voice) · [Spotify](#spotify-api-layer) · [Browser](#browser-layer) · [Friend mode](#friend-mode) ·
-[Privacy](#privacy) · [Known limits](#known-limits-honest-list)
+[Ask about your screen](#ask-about-your-screen) · [Privacy](#privacy) · [Known limits](#known-limits-honest-list)
 
 ## What it can do
 
@@ -204,6 +204,14 @@ as the text prompt, and speaks a short reply.
   2 s for the next request without the wake word (`--no-follow-up` turns that off).
 - **Risky actions ask by voice.** "Do you want me to close window Notepad? Say yes or no." Only a clear yes runs it; silence,
   "maybe" or anything unclear is a no.
+- **End the conversation by voice.** After "hey orbit" Orbit keeps listening for a few seconds. Say **"nothing"**, **"leave it"**,
+  **"never mind"**, **"let's talk later"**, **"that's all"**, **"no thanks"**, **"not now"**, **"bye"**, **"good night"** or
+  **"stop listening"** (also "forget it", "I'm done", "talk to you later", "go to sleep", "be quiet", "end the conversation" and
+  more) and Orbit answers with a short goodbye ("Okay, talk to you later.") and goes back to waiting for "hey orbit": no
+  follow-up window opens, and the language model never sees it. Only whole sentences count, so "nothing is playing", "do nothing" or
+  a bare "stop" (which can mean the music) are not goodbyes. Common Hindi and Tamil phrases ("kuch nahi", "rehne do", "baad mein
+  baat karte hain", "onnum illa", "appuram pesalam", and the same in Devanagari and Tamil script) work too, best effort. The same
+  phrases end a chat in the text prompt. The phrase list is `src/orbit/voice/farewell.py`.
 - **Interrupt it by voice.** Say "hey orbit" while Orbit talks: it mutes the instant the wake word model fires and stops for good
   once a Whisper check agrees. Holding the key also interrupts at once. To avoid hearing itself, Orbit subtracts its own voice
   from the microphone (echo cancellation; earbuds need none). `BARGE_IN = False` switches this off. Run
@@ -279,6 +287,30 @@ you are stressed or low and it slows down and is kind. It remembers the last 8 e
 - **Settings (`.env`).** `ORBIT_USER_NAME`, `ORBIT_FRIEND`, `ORBIT_GROQ_FALLBACK_MODEL` (answers when the big model hits the
   free-tier token limit).
 
+## Ask about your screen
+
+Point at something with the mouse and ask: **"what does this mean?"**, **"what is this error?"**, **"what's going on in this
+screen?"**, **"explain this"**, **"summarize this page"**, **"translate this"**, **"I have a doubt about this"**, **"is this
+safe?"**, **"what am I looking at?"**. Orbit reads the window your mouse pointer is on and answers from what it finds, in plain
+words (spoken whole, like a chat reply), and you can keep asking follow-ups.
+
+What it reads, and what it cannot:
+- **It reads text, it cannot see pictures.** It gets the window's title and program; the control under the pointer as Windows names
+  it ("button Backspace", "data item ..., inside table Folders and files"); any text you have **selected** (the best way to say
+  exactly what you mean: select a word or line, then ask "what does this mean?"); the words around the pointer and the word
+  it is on, read with OCR; and, in a browser, the page's own visible text. A photo, a video frame, a chart or a game gives it
+  little, and it says so instead of guessing.
+- **Selecting text is the most reliable pointer.** With nothing selected it uses the words nearest the mouse pointer.
+- It takes about 0.3 s to read an ordinary window and about 2 s for a browser page, plus the model's answer.
+- **When Orbit's own terminal is under the pointer** (text mode), it looks at the window behind it instead and says so.
+- Only **your own question** triggers it. The language model is never offered the screen reader and cannot call it, so a web page
+  or a document cannot trick Orbit into reading your screen.
+
+Privacy: the text it reads goes to the language model for that one question. With the **local** model (Ollama) it never leaves
+this PC; with the **cloud** model (Groq) it is sent to Groq, and Orbit prints that when it happens (`[screen] ... sending that text
+to Groq ...`). Before it is sent, things that look like passwords, API keys, tokens and card numbers are masked. It reads
+nothing until you ask. Turn it off with `ORBIT_SCREEN_HELP=0`.
+
 ## Spotify (API layer)
 
 The router prefers the API layer over OS and browser. Login uses PKCE, so there is no client secret anywhere; the refresh token
@@ -345,6 +377,9 @@ links are opened. Web search uses Google.
 - **Local by default.** Microphone capture, wake word, voice-activity detection, echo cancellation and hotkeys always run on this
   PC. With no API keys, nothing leaves the PC. With keys, the speech clip, the reply text and your requests go to Sarvam and
   Groq; Orbit prints which mode it is in when voice starts.
+- **The screen is read only when you ask about it** ("what does this mean?"), and then only the window under your mouse pointer, as
+  text. It goes to the language model for that answer (to Groq in cloud mode; nowhere in local mode), with passwords, keys, tokens
+  and card numbers masked first. See [Ask about your screen](#ask-about-your-screen).
 - **Nothing is recorded while idle.** Audio is only kept in memory for the turn being processed and is never saved. The only
   recordings are the test clips you make yourself with `record` / `record-wake` (git-ignored).
 - **Logs** go to `logs/` (git-ignored). Every state change is logged with a timestamp; what you said is only written if
@@ -356,17 +391,17 @@ links are opened. Web search uses Google.
 
 ```
 src/orbit/
-  agent/          rules, router, safety gate, friend mode, rescue, custom commands, the loop
+  agent/          rules, router, safety gate, friend mode, screen questions, rescue, custom commands, the loop
   tools/
     api_layer/    Spotify (PKCE login, Credential Manager)
     os_layer/     apps, windows, monitors, volume, media keys, UI Automation + OCR clicks, processes
     browser_layer/ your Brave profile (UI Automation) and Orbit's own automated window (Playwright)
   llm/            Ollama (local) and Groq (cloud)
-  voice/          microphone, wake word, VAD, echo cancellation, speech-to-text, voice, the voice loop
+  voice/          microphone, wake word, VAD, echo cancellation, speech-to-text, voice, the voice loop, ending a conversation
   ipc/            the WebSocket link to the desktop app
   visual/         the on-screen animations: Orbit's pointer, the click ripple, the working pill
 ui/               orbit-ui: the tray app and sphere (Rust + Rune)
-tests/            1361 Python tests, plus shared fixtures the Rust side is tested against
+tests/            1523 Python tests, plus shared fixtures the Rust side is tested against
 docs/screenshots/ the pictures in this file
 ```
 
@@ -419,6 +454,17 @@ The screenshots are real renders of the window, made headless with
 - Memory is short-term: the model sees your last 6 requests (capped at about 5,000 characters) so "close it" works. It is
   forgotten when you quit; type `clear` to forget sooner.
 - Ctrl+C during a model call takes effect when that call returns (at most the 120 s timeout).
+
+**Screen questions and ending a conversation**
+- Orbit answers from **text** (OCR, Windows' accessibility names, a browser's page text), never from pictures. OCR can misread small
+  or stylised text, and apps that publish no accessibility information (many Electron apps) rely on OCR alone. If the text does not
+  say, Orbit says so; it is a language model, so double-check an answer that matters (an error's fix, a safety judgement).
+- "This" means the window under the mouse pointer (selected text if there is any). If your pointer is somewhere else, say what
+  you mean, or point first and ask again.
+- A sentence about music or the clock ("what is this song") is never treated as a screen question; if a screen question is
+  missed, add the word "screen" ("what does this mean on my screen").
+- A goodbye must be a whole sentence ("nothing", "leave it"), so a bare "stop" is left alone (it can mean the music), and a
+  mis-heard goodbye just means Orbit waits for "hey orbit" again. The Hindi and Tamil phrase lists are best effort.
 
 **Animations, typing and scrolling**
 - Orbit's pointer and the "working" pill are drawn on top of the screen and are hidden from screen capture only on Windows 10
