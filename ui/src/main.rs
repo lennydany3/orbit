@@ -2,14 +2,14 @@
 //!
 //! It lives in the tray. When Orbit is doing something a small orb floats up over your work (bottom right, above the
 //! taskbar, never taking focus, clicks passing through) and goes away when things are quiet. Ctrl+Alt+O, or a click on the
-//! tray icon, pins it on screen. The tray menu opens the full window: the design-review panel, with every state, a scripted
-//! demo, a simulated voice and the connection to Orbit.
+//! tray icon, pins it on screen. The tray menu opens the window: the big sphere, what state it is in and what was last said.
 //!
-//!   (no options)     open the review window, with the tray and the orb ready
+//!   (no options)     open the window, with the tray and the orb ready (nothing is connected: use one of the options below)
 //!   --spawn          start Orbit (microphone, wake word, model) and show it; the window stays in the tray
 //!   --spawn-demo     the same with a scripted turn and a yes/no question, no microphone needed
 //!   --url ws://127.0.0.1:PORT/?token=...   show an Orbit that is already running (`python -m orbit --voice --ipc`)
-//!   --window         open the review window as well as the tray
+//!   --window         open the window as well as the tray
+//!   --autostart on|off|status   start Orbit (--spawn) when you sign in to Windows; never done unless you ask
 //!
 //! Headless, for checking the look without a window:
 //! `cargo run -- --snap out.png --size 1280x800 --scene thinking` (see the scenes below).
@@ -17,6 +17,7 @@
 use std::time::Duration;
 
 use orbit_ui::app::App;
+use orbit_ui::autostart;
 use orbit_ui::clock;
 use orbit_ui::face::{self, Face};
 use orbit_ui::link::{Event, Status};
@@ -71,7 +72,7 @@ fn poll(s: &mut App, t: f64, tx: &mut rune::Tx) -> bool {
     changed
 }
 
-/// Keys 1 to 9, 0 and M put the sphere in a state (the panel lists them). Esc answers a question with no.
+/// Keys 1 to 9, 0 and M put the sphere in a state, to try them. Esc answers a question with no.
 fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut rune::Tx) -> bool {
     if ev.mods.cmd || ev.mods.alt || ev.mods.ctrl || ev.mods.logo {
         return false;
@@ -100,7 +101,7 @@ fn live(s: &mut App, state: &str, messages: &[&str]) {
 
 fn spec() -> AppSpec<App> {
     AppSpec::<App> {
-        min_size: Some((900.0, 560.0)),
+        min_size: Some((520.0, 420.0)),
         families: ("Inter", "Cascadia Mono, Consolas, Inter"),       // the design's monospace, for addresses and messages
         setup: Some(setup),
         poll: Some(poll),
@@ -145,12 +146,50 @@ fn orb_overlay() -> rune::ConfiguredOverlay<Face> {
     spec.margin = 14.0;
     spec.align = Align::End;
     spec.inset = 20.0;
-    spec.options(OverlayOptions { input: OverlayInput::Regions, ..Default::default() })
+    spec.options(OverlayOptions { input: OverlayInput::Regions, prewarm: true, ..Default::default() })
         .compositor(SphereCompositor::default())
-        .release_gpu_after(Duration::from_secs(30))
+}
+
+/// `orbit-ui --autostart on|off|status`: handled before anything starts, and the program ends. The exit code, if it was asked.
+fn autostart_command() -> Option<i32> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let at = args.iter().position(|a| a == "--autostart")?;
+    let exe = std::env::current_exe().ok()?;
+    let done = |result: Result<(), String>, message: &str| match result {
+        Ok(()) => {
+            println!("{message}");
+            0
+        }
+        Err(why) => {
+            eprintln!("orbit-ui: {why}");
+            1
+        }
+    };
+    Some(match args.get(at + 1).map(String::as_str) {
+        Some("on") => done(
+            autostart::enable(autostart::NAME, &exe, &["--spawn"]),
+            &format!("Orbit will start when you sign in: {}
+Turn it off with: orbit-ui --autostart off", exe.display()),
+        ),
+        Some("off") => done(autostart::disable(autostart::NAME), "Orbit will no longer start when you sign in."),
+        Some("status") => {
+            match autostart::current(autostart::NAME) {
+                Some(command) => println!("on: {command}"),
+                None => println!("off"),
+            }
+            0
+        }
+        _ => {
+            eprintln!("usage: orbit-ui --autostart on|off|status");
+            2
+        }
+    })
 }
 
 fn main() {
+    if let Some(code) = autostart_command() {
+        std::process::exit(code);
+    }
     clock::start();
     if rune::is_headless() {
         rune::run_with(spec(), SphereCompositor::default());

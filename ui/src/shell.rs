@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use rune::{AppHandle, OverlayHandle, Tray, TrayEvent, TrayIcon, TrayItem, TraySpec};
+use rune::{AppHandle, OverlayHandle, ShortcutId, Tray, TrayEvent, TrayIcon, TrayItem, TraySpec};
 
 use crate::app::App;
 use crate::face::{Face, FaceKey};
@@ -22,11 +22,13 @@ pub struct Shell {
     shown: bool,
     last_key: Option<FaceKey>,
     last_size: Option<(f32, f32)>,
+    /// The answer chords, held only while a question is open.
+    answer_keys: Option<(ShortcutId, ShortcutId)>,
 }
 
 impl Shell {
     pub fn new(orb: OverlayHandle<Face>, hub: AppHandle<App>, tray: Option<Tray>) -> Shell {
-        Shell { orb: Some(orb), hub: Some(hub), tray, shown: false, last_key: None, last_size: None }
+        Shell { orb: Some(orb), hub: Some(hub), tray, shown: false, last_key: None, last_size: None, answer_keys: None }
     }
 
     pub fn has_tray(&self) -> bool {
@@ -34,7 +36,9 @@ impl Shell {
     }
 
     /// Brings the orb up to date: new content if it changed, a new size if the question came or went, and a fade in or out.
-    pub fn apply(&mut self, face: Face, visible: bool) {
+    pub fn apply(&mut self, mut face: Face, visible: bool) {
+        self.hold_answer_keys(face.wants_answer_keys());
+        face.keys = self.answer_keys.is_some();
         let Some(orb) = &self.orb else { return };
         let (key, size) = (face.key(), face.size());
         if self.last_size != Some(size) {
@@ -57,6 +61,41 @@ impl Shell {
 }
 
 const ICON: usize = 32;
+
+impl Shell {
+    /// Ctrl+Alt+Y and Ctrl+Alt+N answer the question, from anywhere, without the orb ever taking focus. They are held only
+    /// while a question is open, so they never take those keys from another app the rest of the time. If another program
+    /// already has a chord, that one simply is not offered.
+    fn hold_answer_keys(&mut self, wanted: bool) {
+        let Some(hub) = self.hub.clone() else { return };
+        match (wanted, self.answer_keys) {
+            (true, None) => {
+                let answer = |yes: bool| {
+                    move |app: &mut App, tx: &mut rune::Tx| {
+                        app.answer_confirm(yes);
+                        app.sync_shell(crate::clock::now(tx.clock()));
+                    }
+                };
+                let yes = "ctrl+alt+y".parse().ok().and_then(|chord| hub.register_shortcut(chord, answer(true)).ok());
+                let no = "ctrl+alt+n".parse().ok().and_then(|chord| hub.register_shortcut(chord, answer(false)).ok());
+                match (yes, no) {
+                    (Some(y), Some(n)) => self.answer_keys = Some((y, n)),
+                    (y, n) => {
+                        for id in [y, n].into_iter().flatten() {
+                            let _ = hub.unregister_shortcut(id);
+                        }
+                    }
+                }
+            }
+            (false, Some((yes, no))) => {
+                let _ = hub.unregister_shortcut(yes);
+                let _ = hub.unregister_shortcut(no);
+                self.answer_keys = None;
+            }
+            _ => {}
+        }
+    }
+}
 
 /// The tray icon: the sphere in miniature on a dark disc, so it shows on a light or a dark taskbar.
 pub fn tray_icon() -> TrayIcon {

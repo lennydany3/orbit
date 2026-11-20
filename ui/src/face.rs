@@ -1,5 +1,5 @@
-//! The floating orb: what shows over your work while Orbit is doing something. A small dark circle with the sphere in it, what
-//! was just said beside it, and, when Orbit needs a yes or no, the question above it.
+//! The floating orb: what shows over your work while Orbit is doing something. A small dark circle with the sphere in it and,
+//! when Orbit needs a yes or no, the question above it. What was said is not shown here (the window has it).
 //!
 //! This is its own window (a Rune overlay, so it never takes focus and clicks pass straight through it), so it has its own
 //! state: a copy of what the hub knows, pushed here whenever it changes. The only part that takes clicks is the question's
@@ -14,7 +14,7 @@ use crate::view::{Ink, OVERLAY, OVERLAY_MARK, hex};
 
 /// The orb's diameter in points.
 const ORB: f32 = 112.0;
-/// The overlay's size in points: wide enough for a sentence beside the orb, and tall enough for the orb alone.
+/// The overlay's size in points: wide enough for the question's card, and tall enough for the orb alone.
 pub const WIDTH: f32 = 420.0;
 pub const HEIGHT: f32 = ORB + 28.0;
 /// The extra height while a question is open.
@@ -23,9 +23,9 @@ pub const ASK_EXTRA: f32 = 164.0;
 #[derive(Clone)]
 pub struct Face {
     pub orbit: Orbit,
-    /// Who said it, and what.
-    pub caption: Option<(String, String)>,
     pub ask: Option<Ask>,
+    /// Whether Ctrl+Alt+Y and Ctrl+Alt+N are listening for the answer (they only are while a question is open).
+    pub keys: bool,
     /// How the buttons reach the hub.
     pub hub: Option<AppHandle<App>>,
 }
@@ -38,7 +38,7 @@ impl HasOrbit for Face {
 
 impl Face {
     pub fn new(hub: Option<AppHandle<App>>) -> Face {
-        Face { orbit: Orbit::new(), caption: None, ask: None, hub }
+        Face { orbit: Orbit::new(), ask: None, keys: false, hub }
     }
 
     /// The overlay's size for what it shows now.
@@ -52,9 +52,14 @@ impl Face {
         FaceKey {
             epoch: self.orbit.epoch,
             level: (self.orbit.level * 50.0).round() as i32,
-            caption: self.caption.clone(),
             ask: self.ask.as_ref().map(|a| (a.id, a.sent)),
+            keys: self.keys,
         }
+    }
+
+    /// Does this face need the answer chords listening? (A question that is open and not yet answered.)
+    pub fn wants_answer_keys(&self) -> bool {
+        self.ask.as_ref().is_some_and(|a| a.sent.is_none())
     }
 }
 
@@ -62,8 +67,8 @@ impl Face {
 pub struct FaceKey {
     epoch: u32,
     level: i32,
-    caption: Option<(String, String)>,
     ask: Option<(i64, Option<bool>)>,
+    keys: bool,
 }
 
 fn t(size: f32, weight: f32) -> TextStyle {
@@ -83,33 +88,17 @@ pub fn view(f: &Face, cx: &mut Cx<Face>) -> El {
         .border(1.0, ink.hair_strong)
         .child(effect(OVERLAY_MARK).effect_data(OVERLAY.to_data()).key("sphere").size(ORB - 2.0, ORB - 2.0));
 
-    let mut line = row().key("line").items_center().justify_end().gap(12.0);
-    if let Some((who, said)) = &f.caption {
-        line = line.child(
-            col()
-                .key("caption")
-                .max_w(WIDTH - ORB - 12.0)
-                .px(14.0)
-                .py(10.0)
-                .gap(3.0)
-                .radius(14.0)
-                .fill(hex("#0A0A0C").alpha(0.80))
-                .border(1.0, ink.hair_strong)
-                .child(text(who.clone()).font(t(11.0, 400.0).tracking(1.54)).color(ink.muted))
-                .child(text(said.clone()).font(t(14.0, 400.0)).color(ink.fg).wrap()),
-        );
-    }
-    line = line.child(orb);
+    let line = row().key("line").items_center().justify_end().child(orb);
 
     let mut root = col().key("face").w_full().h_full().justify_end().items_end().gap(14.0);
     if let Some(ask) = &f.ask {
-        root = root.child(ask_card(ask, &ink));
+        root = root.child(ask_card(ask, f.keys, &ink));
     }
     root.child(line)
 }
 
 /// Orbit is asking before it does something risky. The card and its two buttons are the only parts that take clicks.
-fn ask_card(ask: &Ask, ink: &Ink) -> El {
+fn ask_card(ask: &Ask, keys: bool, ink: &Ink) -> El {
     let waiting = ask.sent.is_some();
     let answers = if waiting {
         text("Sent. Waiting for Orbit\u{2026}").font(t(12.0, 400.0)).color(ink.muted)
@@ -138,6 +127,7 @@ fn ask_card(ask: &Ask, ink: &Ink) -> El {
                 .max_w(WIDTH - 80.0),
         )
         .child(answers)
+        .child(text(if keys { "Ctrl+Alt+Y yes \u{b7} Ctrl+Alt+N no" } else { "" }).font(t(11.0, 400.0)).color(ink.muted))
 }
 
 fn answer(key: &str, label: &str, yes: bool, ink: &Ink) -> El {
@@ -194,14 +184,31 @@ mod tests {
         g.orbit.set_state(OrbState::Thinking, 1.0);
         assert_ne!(g.key(), base, "a new state");
 
-        let mut h = Face::new(None);
-        h.caption = Some(("You".into(), "hi".into()));
-        assert_ne!(h.key(), base);
-
         let mut a = Face::new(None);
         a.ask = Some(ask());
         let asked = a.key();
         a.ask.as_mut().unwrap().sent = Some(true);
         assert_ne!(a.key(), asked, "answered: the buttons go away");
+    }
+
+    #[test]
+    fn the_answer_keys_listen_only_for_a_question_that_is_open_and_unanswered() {
+        let mut f = Face::new(None);
+        assert!(!f.wants_answer_keys(), "no question");
+        f.ask = Some(ask());
+        assert!(f.wants_answer_keys());
+        f.ask.as_mut().unwrap().sent = Some(false);
+        assert!(!f.wants_answer_keys(), "already answered: release the keys");
+        f.ask = None;
+        assert!(!f.wants_answer_keys());
+    }
+
+    #[test]
+    fn the_hint_appearing_redraws_the_card() {
+        let mut f = Face::new(None);
+        f.ask = Some(ask());
+        let without = f.key();
+        f.keys = true;
+        assert_ne!(f.key(), without);
     }
 }

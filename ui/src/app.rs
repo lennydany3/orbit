@@ -398,14 +398,14 @@ impl App {
 
     // ---- the floating orb --------------------------------------------------------------------------------------------
 
-    /// Is Orbit doing, or showing, anything the orb should be there for?
+    /// Is Orbit doing anything the orb should be there for? (What was said is not shown on the orb, so it never keeps it up.)
     pub fn active(&self) -> bool {
-        !matches!(self.orbit.state, OrbState::Idle | OrbState::Muted) || self.live.caption.is_some() || self.live.confirm.is_some()
+        !matches!(self.orbit.state, OrbState::Idle | OrbState::Muted) || self.live.confirm.is_some()
     }
 
     /// What the orb's window shows now.
     pub fn face(&self) -> Face {
-        Face { orbit: self.orbit.clone(), caption: self.caption(), ask: self.live.confirm.clone(), hub: self.shell.hub.clone() }
+        Face { orbit: self.orbit.clone(), ask: self.live.confirm.clone(), keys: false, hub: self.shell.hub.clone() }
     }
 
     /// Brings the orb's window up to date: its content, whether it is showing, and its size.
@@ -418,6 +418,9 @@ impl App {
     /// Pins the orb on screen, or lets it go again (the hotkey and the tray icon).
     pub fn toggle_pin(&mut self, t: f64) {
         self.presence.toggle_pin();
+        if std::env::var_os("ORBIT_UI_DEBUG").is_some() {
+            eprintln!("[hub] pin toggled at {t:.2}s: pinned={}", self.presence.pinned());
+        }
         self.sync_shell(t);
     }
 
@@ -653,6 +656,20 @@ mod tests {
         assert!(app.caption().is_some());
         assert!(app.advance(7.0));
         assert_eq!(app.caption(), None);
+    }
+
+    #[test]
+    fn the_orb_does_not_wait_for_a_caption_it_does_not_show() {
+        let mut app = live();
+        msg(&mut app, r#"{"type":"reply","text":"Gotcha.","spoken":"Gotcha.","kind":"chat","emotion":"neutral"}"#, 1.0);
+        assert!(app.live.caption.is_some() && app.caption().is_some(), "the window still has it");
+        assert!(!app.active(), "but an idle Orbit with something to read is not a reason to show the orb");
+        msg(&mut app, r#"{"state":"speaking"}"#, 1.0);
+        app.advance(1.0);
+        assert!(app.active());
+        msg(&mut app, r#"{"state":"idle"}"#, 3.0);
+        app.advance(3.0);
+        assert!(!app.active(), "idle again: the orb's linger runs from here, not from the caption's six seconds");
     }
 
     #[test]
