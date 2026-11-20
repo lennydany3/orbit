@@ -254,6 +254,39 @@ impl App {
         self.prefs.reset_hotkeys();
     }
 
+    // ---- the orb's sounds -------------------------------------------------------------------------------------------
+
+    /// The switch on the Settings page. Switching on lets you hear it.
+    pub fn set_sounds_enabled(&mut self, on: bool) {
+        if self.prefs.set_sounds_enabled(on) && on {
+            self.hear_sounds();
+        }
+    }
+
+    /// The volume slider was let go (`keep`) or abandoned.
+    pub fn finish_volume(&mut self, keep: bool) {
+        if self.prefs.finish_volume(keep) {
+            self.hear_sounds();
+        }
+    }
+
+    pub fn step_volume(&mut self, direction: i8) {
+        if self.prefs.step_volume(direction) {
+            self.hear_sounds();
+        }
+    }
+
+    pub fn reset_sounds(&mut self) {
+        if self.prefs.reset_sounds() {
+            self.hear_sounds();
+        }
+    }
+
+    /// Plays the orb's pop-up tone at the volume now set, so a change can be judged by ear.
+    fn hear_sounds(&mut self) {
+        self.shell.preview(self.prefs.settings.sounds);
+    }
+
     // ---- by hand ----------------------------------------------------------------------------------------------------
 
     /// Picking a state by hand stops the demo.
@@ -498,7 +531,7 @@ impl App {
         }
         let visible = self.presence.visible(self.active(), t);
         let face = self.face();
-        self.shell.apply(face, visible);
+        self.shell.apply(face, visible, self.prefs.settings.sounds);
     }
 
     /// Pins the orb on screen, or lets it go again (the hotkey and the tray icon).

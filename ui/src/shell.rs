@@ -1,13 +1,15 @@
 //! The window's connection to the desktop: the floating orb, and the tray icon. Everything here talks to Rune's handles, which
 //! work from any thread; the decisions (when the orb shows, what it says) are made elsewhere and only carried out here.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rune::{AppHandle, OverlayHandle, Shortcut, ShortcutError, ShortcutId, Tray, TrayEvent, TrayIcon, TrayItem, TraySpec};
 
 use crate::app::App;
 use crate::face::{Face, FaceKey};
 use crate::orbit::geometry::sphere_points;
+use crate::settings::Sounds;
+use crate::sound::{Chime, Cue, Player};
 
 /// How the orb leaves: a quick fade (Windows and macOS; elsewhere it just goes).
 const FADE_OUT: Duration = Duration::from_millis(260);
@@ -28,19 +30,30 @@ pub struct Shell {
     /// on every frame).
     orb_chord: Option<(String, ShortcutId)>,
     orb_refused: Option<(String, String)>,
+    /// When a show or hide gets a sound, and how it is played. (Quiet unless made with `new`: only the real window speaks.)
+    chime: Chime,
+    pub player: Player,
 }
 
 impl Shell {
     pub fn new(orb: OverlayHandle<Face>, hub: AppHandle<App>, tray: Option<Tray>) -> Shell {
-        Shell { orb: Some(orb), hub: Some(hub), tray, shown: false, last_key: None, last_size: None, answer_keys: None, orb_chord: None, orb_refused: None }
+        Shell { orb: Some(orb), hub: Some(hub), tray, shown: false, last_key: None, last_size: None, answer_keys: None, orb_chord: None, orb_refused: None, chime: Chime::default(), player: Player::speaking() }
     }
 
     pub fn has_tray(&self) -> bool {
         self.tray.is_some()
     }
 
-    /// Brings the orb up to date: new content if it changed, a new size if the question came or went, and a fade in or out.
-    pub fn apply(&mut self, mut face: Face, visible: bool) {
+    /// Plays the pop-up tone at the volume in `sounds`, for the Settings page to let you hear a change (nothing if it is off).
+    pub fn preview(&mut self, sounds: Sounds) {
+        if sounds.audible() {
+            self.player.play(Cue::Up, sounds.volume);
+        }
+    }
+
+    /// Brings the orb up to date: new content if it changed, a new size if the question came or went, and a fade in or out
+    /// (with its sound: only a real show or hide has one, never a change of what the orb says).
+    pub fn apply(&mut self, mut face: Face, visible: bool, sounds: Sounds) {
         self.hold_answer_keys(face.wants_answer_keys(), &face.yes, &face.no);
         face.keys = self.answer_keys.is_some();
         let Some(orb) = &self.orb else { return };
@@ -59,6 +72,9 @@ impl Shell {
                 orb.fade_in(FADE_IN);
             } else {
                 orb.fade_out(FADE_OUT);
+            }
+            if let Some(cue) = self.chime.on_change(visible, sounds, Instant::now()) {
+                self.player.play(cue, sounds.volume);
             }
         }
     }

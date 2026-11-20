@@ -32,6 +32,7 @@ def test_the_example_file_the_window_writes_is_read_as_written():
         ("open", "Spotify", 0.0), ("open", "https://github.com", 0.0), ("wait", "", 1.5), ("keys", "ctrl+shift+s", 0.0)]
     assert not hello.enabled and hello.steps[0].value == "Hello there!"
     assert work.sends_keys and hello.sends_keys
+    assert s.sounds == settings.Sounds(enabled=False, volume=65)
 
 
 def test_broken_json_falls_back_to_the_defaults_and_says_so(tmp_path):
@@ -156,6 +157,49 @@ def test_key_combinations_are_read_the_way_the_window_reads_them():
 def test_phrases_are_compared_the_way_the_window_compares_them():
     for said, expected in json.loads((FIXTURES / "phrases.json").read_text(encoding="utf-8")):
         assert settings.normalize_phrase(said) == expected, said
+
+
+SOUNDS = json.loads((FIXTURES / "sounds.json").read_text(encoding="utf-8"))
+
+
+def test_no_sounds_entry_means_on_and_quiet():
+    s = parsed({})
+    assert s.sounds == settings.Sounds(True, 40) and s.sounds.audible and s.problems == []
+    assert not settings.Sounds(True, 0).audible and not settings.Sounds(False, 90).audible
+    assert SOUNDS["default_volume"] == settings.DEFAULT_VOLUME
+
+
+@pytest.mark.parametrize("case", SOUNDS["volume"], ids=lambda c: repr(c["in"]))
+def test_the_sound_volume_is_read_the_way_the_window_reads_it(case):
+    expected = case.get("out")
+    assert settings.parse_volume(case["in"]) == expected
+    s = parsed({"sounds": {"volume": case["in"]}})
+    assert s.sounds.volume == (settings.DEFAULT_VOLUME if expected is None else expected)
+    assert len(s.problems) == (expected is None)
+
+
+@pytest.mark.parametrize("case", SOUNDS["enabled"], ids=lambda c: repr(c["in"]))
+def test_the_sounds_switch_is_read_the_way_the_window_reads_it(case):
+    s = parsed({"sounds": {"enabled": case["in"]}})
+    assert s.sounds.enabled == case.get("out", True)
+    assert len(s.problems) == ("out" not in case)
+
+
+@pytest.mark.parametrize("raw", [True, 5, "loud", [], None])
+def test_a_sounds_entry_that_is_not_an_object_is_ignored_with_a_reason(raw):
+    s = parsed({"sounds": raw})
+    assert s.sounds == settings.Sounds() and "not an object" in s.problems[0]
+
+
+def test_each_half_of_the_sounds_entry_stands_alone():
+    s = parsed({"sounds": {"volume": 70}})
+    assert s.sounds == settings.Sounds(True, 70) and s.problems == []
+    assert parsed({"sounds": {"enabled": False}}).sounds == settings.Sounds(False, 40)
+
+
+def test_the_sounds_never_stop_the_rest_of_the_file_being_read():
+    s = parsed({"sounds": 7, "hotkeys": {"talk": "f8"}, "commands": [command()]})
+    assert s.talk_key == "f8" and len(s.commands) == 1 and len(s.problems) == 1
 
 
 def test_the_talk_keys_the_window_offers_are_the_ones_orbit_accepts():

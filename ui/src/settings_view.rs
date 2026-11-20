@@ -1,11 +1,11 @@
-//! The Settings page, drawn: a column of sections on the left (Hotkeys, Commands) and the chosen one on the right. All the
+//! The Settings page, drawn: a column of sections on the left (Hotkeys, Commands, Sounds) and the chosen one on the right. All the
 //! rules live in `editor`; this only shows its state and turns clicks into calls on it.
 //!
 //! More sections (the model and its keys, the voice, the orb) slot in as another `Section`, another nav entry and another
 //! function here; nothing else has to change.
 
 use rune::tok::TextStyle;
-use rune::{Color, El, ScrollSpec, col, edit_access, el, row, text, text_input};
+use rune::{Color, Drag, El, Phase, ScrollSpec, Tx, col, edit_access, el, row, text, text_input};
 
 use crate::app::App;
 use crate::editor::{Draft, Field, Section, StepKind, describe_field};
@@ -22,6 +22,7 @@ pub(crate) fn page(s: &App, ink: &Ink) -> El {
     let content = match s.prefs.section {
         Section::Hotkeys => hotkeys(s, ink),
         Section::Commands => commands(s, ink),
+        Section::Sounds => sounds(s, ink),
     };
     col()
         .key("settings")
@@ -89,6 +90,7 @@ fn nav(s: &App, ink: &Ink) -> El {
         .gap(4.0)
         .child(item("nav-hotkeys", "Hotkeys", Section::Hotkeys))
         .child(item("nav-commands", "Commands", Section::Commands))
+        .child(item("nav-sounds", "Sounds", Section::Sounds))
 }
 
 // ---- pieces ---------------------------------------------------------------------------------------------------------
@@ -308,6 +310,96 @@ fn talk_row(s: &App, ink: &Ink) -> El {
                 .child(text("Hold this key while you speak, as an alternative to saying \"Hey Orbit\".").font(t(12.0, 400.0)).color(ink.muted).wrap()),
         )
         .child(chips)
+}
+
+// ---- sounds ---------------------------------------------------------------------------------------------------------
+
+/// The slider's track, in points (the buttons beside it move it by ten).
+const SLIDER_W: f32 = 220.0;
+const KNOB: f32 = 14.0;
+
+fn sounds(s: &App, ink: &Ink) -> El {
+    let sounds = s.prefs.sounds();
+    let on = sounds.enabled;
+    let switch_row = row()
+        .key("sounds-switch-row")
+        .w_full()
+        .px(18.0)
+        .py(14.0)
+        .gap(16.0)
+        .items_center()
+        .justify_between()
+        .child(
+            col()
+                .key("sounds-switch-text")
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(4.0)
+                .child(text("Orb sounds").font(t(14.0, 500.0)).color(ink.fg))
+                .child(text("A soft tone as the orb fades in and another as it fades away. Never while it is only updating what it says.").font(t(12.0, 400.0)).color(ink.muted).wrap()),
+        )
+        .child(switch("sounds-on".to_owned(), on, "Orb sounds", ink).on_press(move |s: &mut App| s.set_sounds_enabled(!on)));
+    let hint = if on { "Drag the slider, or use the buttons. You hear the pop-up tone at the new volume." } else { "Switch the sounds on to hear a change." };
+    let controls = row()
+        .key("volume-controls")
+        .gap(8.0)
+        .items_center()
+        .child(glyph_button("volume-down".to_owned(), "\u{2212}", "Quieter", ink).on_press(|s: &mut App| s.step_volume(-1)))
+        .child(volume_slider(sounds.volume, on, ink))
+        .child(glyph_button("volume-up".to_owned(), "+", "Louder", ink).on_press(|s: &mut App| s.step_volume(1)))
+        .child(text(format!("{}%", sounds.volume)).key("volume-readout").font(t(12.0, 500.0).mono()).color(if on { ink.fg } else { ink.muted }).w(40.0));
+    let volume_row = row()
+        .key("volume-row")
+        .w_full()
+        .px(18.0)
+        .py(14.0)
+        .gap(16.0)
+        .items_center()
+        .justify_between()
+        .child(
+            col()
+                .key("volume-text")
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(4.0)
+                .child(text("Volume").font(t(14.0, 500.0)).color(ink.fg))
+                .child(text(hint).font(t(12.0, 400.0)).color(ink.muted).wrap()),
+        )
+        .child(controls);
+    col()
+        .key("sounds")
+        .w_full()
+        .gap(18.0)
+        .child(heading(ink, "Sounds", "Orbit makes a quiet sound when the orb appears and when it goes away."))
+        .child(card("sounds-card", ink).child(switch_row).child(divider(ink)).child(volume_row))
+        .child(row().key("sounds-actions").gap(10.0).items_center().child(button("reset-sounds", "Reset to the defaults", ink, false).on_press(|s: &mut App| s.reset_sounds())))
+        .child(notice(s, ink))
+}
+
+/// A horizontal slider, 0 to 100. Pressing anywhere on it moves the knob there, and dragging follows the pointer; the volume is
+/// saved where it is let go (Esc during the drag puts it back).
+fn volume_slider(percent: u8, on: bool, ink: &Ink) -> El {
+    let frac = f32::from(percent.min(100)) / 100.0;
+    let knob_x = (SLIDER_W - KNOB) * frac;
+    let tint = if on { ink.fg } else { Color::WHITE.alpha(0.4) };
+    let at = |g: &Drag| ((g.x / g.w.max(1.0)).clamp(0.0, 1.0) * 100.0).round() as u8;
+    el()
+        .key("volume-slider")
+        .role("slider")
+        .label("Volume")
+        .focusable(true)
+        .w(SLIDER_W)
+        .h(28.0)
+        .on_drag(move |s: &mut App, g: &mut Drag, tx: &mut Tx| {
+            tx.instant();
+            match g.phase {
+                Phase::Down | Phase::Move => s.prefs.drag_volume(at(g)),
+                Phase::Up => s.finish_volume(!g.cancelled()),
+            }
+        })
+        .child(el().key("volume-track").absolute(0.0, 12.0).w(SLIDER_W).h(4.0).radius(2.0).fill(Color::WHITE.alpha(0.16)))
+        .child(el().key("volume-fill").absolute(0.0, 12.0).w(knob_x + KNOB / 2.0).h(4.0).radius(2.0).fill(tint))
+        .child(el().key("volume-knob").absolute(knob_x, 7.0).size(KNOB, KNOB).radius(KNOB / 2.0).fill(tint))
 }
 
 // ---- commands -------------------------------------------------------------------------------------------------------

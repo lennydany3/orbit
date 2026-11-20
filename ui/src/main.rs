@@ -162,6 +162,12 @@ fn spec() -> AppSpec<App> {
                 s.prefs.orb_error = Some("Ctrl + Alt + O is already in use by another program, so Orbit cannot have it.".into());
                 s.prefs.fail("Ctrl + Alt + Y is already used for \"Answer yes\".");
             }),
+            ("settings-sounds", |s| settings_scene(s, Section::Sounds)),
+            ("settings-sounds-on", |s| {
+                settings_scene(s, Section::Sounds);
+                s.prefs.set_sounds_enabled(true);
+                s.prefs.drag_volume(40);
+            }),
             ("settings-commands", |s| settings_scene(s, Section::Commands)),
             ("settings-commands-empty", |s| {
                 settings_scene(s, Section::Commands);

@@ -48,5 +48,9 @@
     "talk": "f9",
     "yes": "ctrl+alt+y"
   },
+  "sounds": {
+    "enabled": false,
+    "volume": 65
+  },
   "version": 1
 }

@@ -7,6 +7,7 @@ or drops that one entry, and `Settings.problems` says what was ignored.
     {
       "version": 1,
       "hotkeys": {"orb": "ctrl+alt+o", "yes": "ctrl+alt+y", "no": "ctrl+alt+n", "talk": "ctrl_r"},
+      "sounds": {"enabled": true, "volume": 40},
       "commands": [
         {"id": "work", "name": "Work mode", "enabled": true, "phrases": ["work mode"],
          "steps": [{"kind": "open", "target": "Spotify"}, {"kind": "keys", "keys": "win+shift+s"},
@@ -15,10 +16,13 @@ or drops that one entry, and `Settings.problems` says what was ignored.
     }
 
 The window checks the hotkey chords itself (orb, yes, no); here only the hold-to-talk key and the commands are checked.
+The window plays the orb's sounds, so `sounds` is the window's own business; it is read here only so the file is checked the same
+way on both sides (`tests/fixtures/sounds.json` is read by both).
 """
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -28,6 +32,8 @@ from . import config
 
 SCHEMA_VERSION = 1
 DEFAULT_HOTKEYS = {"orb": "ctrl+alt+o", "yes": "ctrl+alt+y", "no": "ctrl+alt+n", "talk": "ctrl_r"}
+
+DEFAULT_VOLUME = 40       # the orb's sounds: on, and quiet
 
 MAX_COMMANDS = 50
 MAX_PHRASES = 8
@@ -84,10 +90,21 @@ class Command:
         return ", then ".join(s.describe() for s in self.steps)
 
 
+@dataclass(frozen=True)
+class Sounds:
+    enabled: bool = True
+    volume: int = DEFAULT_VOLUME      # 0 to 100
+
+    @property
+    def audible(self) -> bool:
+        return self.enabled and self.volume > 0
+
+
 @dataclass
 class Settings:
     hotkeys: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_HOTKEYS))
     commands: list[Command] = field(default_factory=list)
+    sounds: Sounds = field(default_factory=Sounds)
     problems: list[str] = field(default_factory=list)     # what was ignored, and why
 
     @property
@@ -106,6 +123,33 @@ def normalize_phrase(text: str) -> str:
 
 def valid_talk_key(name: object) -> bool:
     return isinstance(name, str) and (name in TALK_KEYS or (len(name) == 1 and name.isprintable() and not name.isspace()))
+
+
+def parse_volume(value: object) -> int | None:
+    """A volume as the file may write it: a number from 0 to 100 (a fraction is rounded, halves up), else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 100:
+        return None
+    return int(value + 0.5)
+
+
+def parse_sounds(raw: object, problems: list[str]) -> Sounds:
+    """The `sounds` entry -> the sounds, with anything wrong in it left at its default and noted in `problems`."""
+    if not isinstance(raw, dict):
+        problems.append("the sounds setting is not an object, so the defaults are used")
+        return Sounds()
+    enabled, volume = True, DEFAULT_VOLUME
+    if "enabled" in raw:
+        if isinstance(raw["enabled"], bool):
+            enabled = raw["enabled"]
+        else:
+            problems.append(f"the sounds switch {raw['enabled']!r} is not true or false, so on is used")
+    if "volume" in raw:
+        parsed = parse_volume(raw["volume"])
+        if parsed is None:
+            problems.append(f"the sound volume {raw['volume']!r} is not a number from 0 to 100, so {DEFAULT_VOLUME} is used")
+        else:
+            volume = parsed
+    return Sounds(enabled, volume)
 
 
 def parse_step(raw: object) -> tuple[Step | None, str]:
@@ -197,6 +241,8 @@ def parse(data: object) -> Settings:
                     settings.problems.append(f"the talk key {value!r} is not one Orbit knows, so {default} is used")
             elif isinstance(value, str) and value.strip() and len(value) <= 40:
                 settings.hotkeys[key] = value.strip().lower()
+    if "sounds" in data:
+        settings.sounds = parse_sounds(data["sounds"], settings.problems)
     raw_commands = data.get("commands")
     if isinstance(raw_commands, list):
         seen: dict[str, str] = {}

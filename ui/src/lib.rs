@@ -12,5 +12,6 @@ pub mod presence;
 pub mod settings;
 pub mod settings_view;
 pub mod shell;
+pub mod sound;
 pub mod spawn;
 pub mod view;

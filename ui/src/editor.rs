@@ -8,13 +8,17 @@ use std::path::PathBuf;
 
 use rune::{Key, KeyEvent, TextEdit};
 
-use crate::settings::{self, Command, Hotkeys, MAX_COMMANDS, MAX_NAME, MAX_PHRASE, MAX_PHRASES, MAX_STEPS, Settings, Step};
+use crate::settings::{self, Command, Hotkeys, MAX_COMMANDS, MAX_NAME, MAX_PHRASE, MAX_PHRASES, MAX_STEPS, Settings, Sounds, Step};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
     Hotkeys,
     Commands,
+    Sounds,
 }
+
+/// How far the volume's + and - buttons move it.
+pub const VOLUME_STEP: u8 = 10;
 
 /// The three hotkeys recorded by pressing them. (The talk key is picked from a list: it is a single key, held.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -343,6 +347,8 @@ pub struct SettingsState {
     pub confirm_delete: Option<usize>,
     /// Why Windows would not give Orbit the orb's chord, if it would not: it does not work until it is changed.
     pub orb_error: Option<String>,
+    /// The volume while its slider is being dragged: shown at once, saved when the drag ends.
+    volume_live: Option<u8>,
     /// Handed out when an edit box's command has gone, so a late keystroke has somewhere harmless to go.
     scratch: TextEdit,
 }
@@ -361,6 +367,7 @@ impl Default for SettingsState {
             notice: None,
             confirm_delete: None,
             orb_error: None,
+            volume_live: None,
             scratch: TextEdit::new(""),
         }
     }
@@ -404,6 +411,7 @@ impl SettingsState {
         self.recording = None;
         self.notice = None;
         self.confirm_delete = None;
+        self.volume_live = None;
     }
 
     /// Writes `next` (and, the first time, keeps a copy of a file that had entries Orbit could not read), then makes it current.
@@ -653,6 +661,64 @@ impl SettingsState {
         let gone = next.commands.remove(index);
         let done = self.commit(next);
         self.saved(done, &format!("\"{}\" is deleted.", gone.name))
+    }
+}
+
+// ---- sounds -----------------------------------------------------------------------------------------------------------
+
+impl SettingsState {
+    /// The sound settings as the page shows them: the volume follows the slider while it is being dragged.
+    pub fn sounds(&self) -> Sounds {
+        Sounds { volume: self.volume_live.unwrap_or(self.settings.sounds.volume), ..self.settings.sounds }
+    }
+
+    pub fn set_sounds_enabled(&mut self, on: bool) -> bool {
+        let mut next = self.settings.clone();
+        next.sounds.enabled = on;
+        let done = self.commit(next);
+        self.saved(done, if on { "Sounds are on." } else { "Sounds are off." })
+    }
+
+    /// The slider is at `percent` (0 to 100): shown at once, not yet saved.
+    pub fn drag_volume(&mut self, percent: u8) {
+        self.volume_live = Some(percent.min(100));
+    }
+
+    /// The drag ended. `keep` saves where it was left; otherwise the slider goes back to what was saved. True if a new volume
+    /// was saved.
+    pub fn finish_volume(&mut self, keep: bool) -> bool {
+        let Some(volume) = self.volume_live.take() else { return false };
+        if !keep || volume == self.settings.sounds.volume {
+            return false;
+        }
+        self.save_volume(volume)
+    }
+
+    /// Moves the volume up (`1`) or down (`-1`) by a step, stopping at 0 and 100.
+    pub fn step_volume(&mut self, direction: i8) -> bool {
+        let now = self.sounds().volume;
+        let next = if direction < 0 { now.saturating_sub(VOLUME_STEP) } else { now.saturating_add(VOLUME_STEP).min(100) };
+        self.volume_live = None;
+        if next == self.settings.sounds.volume {
+            return false;
+        }
+        self.save_volume(next)
+    }
+
+    fn save_volume(&mut self, volume: u8) -> bool {
+        let mut next = self.settings.clone();
+        next.sounds.volume = volume;
+        let done = self.commit(next);
+        self.saved(done, &format!("The volume is {volume}%."))
+    }
+
+    /// Both sound settings back to what they were out of the box.
+    pub fn reset_sounds(&mut self) -> bool {
+        let mut next = self.settings.clone();
+        next.sounds = Sounds::default();
+        self.volume_live = None;
+        let done = self.commit(next);
+        self.saved(done, "The sounds are back to the way they came.")
     }
 }
 
@@ -963,6 +1029,108 @@ mod tests {
         }
         page.new_command();
         assert!(page.draft.is_none() && !page.notice.as_ref().unwrap().good);
+    }
+
+    // ---- sounds ----
+
+    #[test]
+    fn the_sounds_switch_is_saved_at_once_and_leaves_the_rest_alone() {
+        let (mut page, file) = page();
+        assert_eq!(page.sounds(), Sounds { enabled: false, volume: 65 }, "as the example file has it");
+        assert!(page.set_sounds_enabled(true));
+        assert_eq!(on_disk(&file).sounds, Sounds { enabled: true, volume: 65 });
+        assert!(page.notice.as_ref().unwrap().good && page.notice.as_ref().unwrap().text.contains("on"));
+        assert!(page.set_sounds_enabled(false));
+        assert!(!on_disk(&file).sounds.enabled && page.notice.as_ref().unwrap().text.contains("off"));
+        assert_eq!((on_disk(&file).commands.len(), on_disk(&file).hotkeys.talk.as_str()), (2, "f9"));
+    }
+
+    #[test]
+    fn dragging_the_volume_shows_it_at_once_but_saves_only_where_the_drag_ends() {
+        let (mut page, file) = page();
+        page.drag_volume(10);
+        page.drag_volume(30);
+        page.drag_volume(80);
+        assert_eq!(page.sounds().volume, 80, "the slider follows the pointer");
+        assert_eq!(on_disk(&file).sounds.volume, 65, "but nothing was written during the drag");
+        assert!(page.finish_volume(true));
+        assert_eq!((on_disk(&file).sounds.volume, page.sounds().volume), (80, 80));
+        assert!(page.notice.as_ref().unwrap().text.contains("80%"));
+    }
+
+    #[test]
+    fn a_cancelled_drag_puts_the_volume_back_and_writes_nothing() {
+        let (mut page, file) = page();
+        page.drag_volume(5);
+        assert!(!page.finish_volume(false));
+        assert_eq!((page.sounds().volume, on_disk(&file).sounds.volume), (65, 65));
+        assert!(page.notice.is_none());
+    }
+
+    #[test]
+    fn letting_go_where_it_started_is_not_a_change() {
+        let (mut page, _) = page();
+        page.drag_volume(65);
+        assert!(!page.finish_volume(true));
+        assert!(page.notice.is_none(), "no 'saved' for nothing");
+        assert!(!page.finish_volume(true), "and with no drag going there is nothing to finish");
+    }
+
+    #[test]
+    fn the_volume_buttons_move_it_by_ten_and_stop_at_the_ends() {
+        let (mut page, file) = page();
+        assert!(page.step_volume(1));
+        assert_eq!(on_disk(&file).sounds.volume, 75);
+        for _ in 0..5 {
+            page.step_volume(1);
+        }
+        assert_eq!(on_disk(&file).sounds.volume, 100);
+        assert!(!page.step_volume(1), "already as loud as it goes");
+        for _ in 0..12 {
+            page.step_volume(-1);
+        }
+        assert_eq!(on_disk(&file).sounds.volume, 0);
+        assert!(!page.step_volume(-1));
+    }
+
+    #[test]
+    fn a_volume_that_is_not_a_multiple_of_ten_steps_to_the_next_one_either_way() {
+        let (mut page, _) = page();
+        page.drag_volume(43);
+        assert!(page.finish_volume(true));
+        assert!(page.step_volume(1) && page.sounds().volume == 53);
+        assert!(page.step_volume(-1) && page.sounds().volume == 43);
+    }
+
+    #[test]
+    fn resetting_the_sounds_puts_back_on_and_quiet_and_keeps_the_hotkeys() {
+        let (mut page, file) = page();
+        assert!(page.reset_sounds());
+        assert_eq!(on_disk(&file).sounds, Sounds::default());
+        assert_eq!(on_disk(&file).hotkeys.talk, "f9");
+    }
+
+    #[test]
+    fn a_sound_change_that_cannot_be_saved_changes_nothing_and_says_why() {
+        let (mut page, file) = page();
+        let before = page.settings.clone();
+        page.path = Some(file.parent().unwrap().join("gone").join("settings.json"));
+        assert!(!page.set_sounds_enabled(true));
+        assert!(!page.step_volume(1));
+        page.drag_volume(90);
+        assert!(!page.finish_volume(true));
+        assert_eq!(page.settings, before);
+        assert_eq!(page.sounds().volume, 65, "the slider is back at what is really saved");
+        assert!(page.notice.as_ref().unwrap().text.contains("could not write"));
+    }
+
+    #[test]
+    fn leaving_the_sounds_section_drops_a_drag_in_progress() {
+        let mut page = SettingsState::default();
+        page.select(Section::Sounds);
+        page.drag_volume(5);
+        page.select(Section::Hotkeys);
+        assert_eq!(page.sounds().volume, 40);
     }
 
     // ---- a file with things Orbit cannot read ----

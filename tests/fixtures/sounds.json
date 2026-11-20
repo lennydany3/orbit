@@ -1,0 +1,29 @@
+{
+  "volume": [
+    {"in": 0, "out": 0},
+    {"in": 40, "out": 40},
+    {"in": 100, "out": 100},
+    {"in": 55.4, "out": 55},
+    {"in": 55.6, "out": 56},
+    {"in": 12.5, "out": 13},
+    {"in": 0.4, "out": 0},
+    {"in": 99.5, "out": 100},
+    {"in": -1},
+    {"in": 100.5},
+    {"in": 101},
+    {"in": "40"},
+    {"in": true},
+    {"in": null},
+    {"in": [40]},
+    {"in": {"volume": 40}}
+  ],
+  "enabled": [
+    {"in": true, "out": true},
+    {"in": false, "out": false},
+    {"in": 1},
+    {"in": 0},
+    {"in": "yes"},
+    {"in": null}
+  ],
+  "default_volume": 40
+}

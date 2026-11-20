@@ -45,6 +45,12 @@ The window writes it and Orbit reads it; they share the rules in `tests/fixtures
   asks "yes or no?" first, once for the whole command, listing exactly what it will do (so it can be answered by voice, by
   clicking, or with the answer chords). Steps that open a folder only open it: nothing is ever run, and the language model
   never sees these commands and cannot press keys or type. Orbit picks up a saved command at once.
+- **Sounds.** A soft tone when the orb fades in and another when it fades away (`assets/sounds/pop-up.wav` and `pop-down.wav`,
+  compiled into the program). A switch and a volume slider (0 to 100; saved as `"sounds": {"enabled": true, "volume": 40}`);
+  changing either plays the pop-up tone so you can judge it. Only a real show or hide makes a sound, not a change of what the
+  orb says, and a show and hide within 350 ms make one sound, not two. Playing costs nothing at rest: nothing starts until the
+  first sound, then one thread sleeps on a channel and hands the file to Windows' `PlaySound`, which returns at once. (No new
+  crate; the one `unsafe` call is that function, in `src/sound.rs`.) Preview scene: `--scene settings-sounds-on`.
 - A hand-edited file Orbit cannot fully read does not stop anything: the bad entry is left out, the page lists what, and the
   first save keeps the old file as `settings.json.bak`.
 

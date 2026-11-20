@@ -26,6 +26,7 @@ pub const DEFAULT_ORB: &str = "ctrl+alt+o";
 pub const DEFAULT_YES: &str = "ctrl+alt+y";
 pub const DEFAULT_NO: &str = "ctrl+alt+n";
 pub const DEFAULT_TALK: &str = "ctrl_r";
+pub const DEFAULT_VOLUME: u8 = 40;
 
 /// The settings file: `ORBIT_SETTINGS`, or `settings.json` in the project folder (the same place Orbit looks).
 pub fn path() -> PathBuf {
@@ -182,6 +183,33 @@ impl Default for Hotkeys {
     }
 }
 
+/// The orb's sounds: on or off, and how loud (0 to 100, whole numbers). Quiet by default: Orbit is meant to be calm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sounds {
+    pub enabled: bool,
+    pub volume: u8,
+}
+
+impl Default for Sounds {
+    fn default() -> Self {
+        Sounds { enabled: true, volume: DEFAULT_VOLUME }
+    }
+}
+
+impl Sounds {
+    /// Would a sound be heard at all?
+    pub fn audible(&self) -> bool {
+        self.enabled && self.volume > 0
+    }
+}
+
+/// A volume as the file may write it: a number from 0 to 100 (a fraction is rounded, halves up). Anything else is not one.
+/// Python reads it the same way (`tests/fixtures/sounds.json`).
+pub fn parse_volume(value: &Value) -> Option<u8> {
+    let n = value.as_f64().filter(|n| n.is_finite() && (0.0..=100.0).contains(n))?;
+    Some((n + 0.5).floor() as u8)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Step {
     /// An app, a website or a folder: which one is worked out when it runs.
@@ -302,6 +330,7 @@ impl Command {
 pub struct Settings {
     pub hotkeys: Hotkeys,
     pub commands: Vec<Command>,
+    pub sounds: Sounds,
     /// Anything else the file had (written back untouched).
     extra: Map<String, Value>,
 }
@@ -324,7 +353,25 @@ impl Settings {
         let Some(root) = data.as_object() else {
             return (settings, vec!["the settings file is not a JSON object, so the defaults are used".into()]);
         };
-        settings.extra = root.iter().filter(|(k, _)| !matches!(k.as_str(), "version" | "hotkeys" | "commands")).map(|(k, v)| (k.clone(), v.clone())).collect();
+        settings.extra = root.iter().filter(|(k, _)| !matches!(k.as_str(), "version" | "hotkeys" | "sounds" | "commands")).map(|(k, v)| (k.clone(), v.clone())).collect();
+        match root.get("sounds") {
+            None => {}
+            Some(Value::Object(sounds)) => {
+                if let Some(value) = sounds.get("enabled") {
+                    match value.as_bool() {
+                        Some(on) => settings.sounds.enabled = on,
+                        None => problems.push(format!("the sounds switch {value} is not true or false, so on is used")),
+                    }
+                }
+                if let Some(value) = sounds.get("volume") {
+                    match parse_volume(value) {
+                        Some(v) => settings.sounds.volume = v,
+                        None => problems.push(format!("the sound volume {value} is not a number from 0 to 100, so {DEFAULT_VOLUME} is used")),
+                    }
+                }
+            }
+            Some(_) => problems.push("the sounds setting is not an object, so the defaults are used".into()),
+        }
         if let Some(keys) = root.get("hotkeys").and_then(Value::as_object) {
             let mut take = |field: &mut String, name: &str, default: &str, chord: bool| {
                 let Some(value) = keys.get(name) else { return };
@@ -374,6 +421,7 @@ impl Settings {
         let mut root = self.extra.clone();
         root.insert("version".into(), json!(VERSION));
         root.insert("hotkeys".into(), json!({"orb": self.hotkeys.orb, "yes": self.hotkeys.yes, "no": self.hotkeys.no, "talk": self.hotkeys.talk}));
+        root.insert("sounds".into(), json!({"enabled": self.sounds.enabled, "volume": self.sounds.volume}));
         root.insert("commands".into(), Value::Array(self.commands.iter().map(Command::to_value).collect()));
         let mut text = serde_json::to_string_pretty(&Value::Object(root)).unwrap_or_default();
         text.push('\n');
@@ -478,6 +526,7 @@ pub(crate) mod tests {
     const COMBOS: &str = include_str!("../../tests/fixtures/key_combos.json");
     const PHRASES: &str = include_str!("../../tests/fixtures/phrases.json");
     const TALK: &str = include_str!("../../tests/fixtures/talk_keys.json");
+    const SOUNDS: &str = include_str!("../../tests/fixtures/sounds.json");
 
     fn parsed(json: &str) -> (Settings, Vec<String>) {
         Settings::parse(&serde_json::from_str(json).unwrap())
@@ -535,7 +584,59 @@ pub(crate) mod tests {
             [Step::Open("Spotify".into()), Step::Open("https://github.com".into()), Step::Wait(1.5), Step::Keys("ctrl+shift+s".into())]
         );
         assert!(!s.commands[1].enabled);
+        assert_eq!(s.sounds, Sounds { enabled: false, volume: 65 });
         assert_eq!(s.to_json(), EXAMPLE, "the window writes exactly the file the example is");
+    }
+
+    #[test]
+    fn the_sound_volume_is_read_the_way_orbit_reads_it() {
+        let cases: Value = serde_json::from_str(SOUNDS).unwrap();
+        for case in cases["volume"].as_array().unwrap() {
+            let given = &case["in"];
+            match case.get("out") {
+                Some(out) => assert_eq!(parse_volume(given), Some(out.as_u64().unwrap() as u8), "{given}"),
+                None => assert_eq!(parse_volume(given), None, "{given} is not a volume"),
+            }
+            let (s, problems) = parsed(&json!({"sounds": {"volume": given}}).to_string());
+            assert_eq!((s.sounds.volume, problems.len()), (case.get("out").map_or(DEFAULT_VOLUME, |o| o.as_u64().unwrap() as u8), usize::from(case.get("out").is_none())), "{given}");
+        }
+        assert_eq!(cases["default_volume"], DEFAULT_VOLUME);
+    }
+
+    #[test]
+    fn the_sounds_switch_is_read_the_way_orbit_reads_it() {
+        let cases: Value = serde_json::from_str(SOUNDS).unwrap();
+        for case in cases["enabled"].as_array().unwrap() {
+            let (s, problems) = parsed(&json!({"sounds": {"enabled": case["in"]}}).to_string());
+            assert_eq!((s.sounds.enabled, problems.len()), (case.get("out").map_or(true, |o| o.as_bool().unwrap()), usize::from(case.get("out").is_none())), "{}", case["in"]);
+        }
+    }
+
+    #[test]
+    fn no_sounds_entry_means_a_quiet_default_that_is_on() {
+        let (s, problems) = parsed("{}");
+        assert_eq!(s.sounds, Sounds { enabled: true, volume: 40 });
+        assert!(problems.is_empty() && s.sounds.audible());
+        assert!(!Sounds { enabled: true, volume: 0 }.audible() && !Sounds { enabled: false, volume: 90 }.audible());
+        let (s, problems) = parsed(r#"{"sounds":{"volume":70}}"#);
+        assert_eq!((s.sounds, problems.len()), (Sounds { enabled: true, volume: 70 }, 0), "each half stands alone");
+    }
+
+    #[test]
+    fn a_sounds_entry_that_is_not_an_object_is_ignored_with_a_reason() {
+        for raw in ["true", "5", "\"loud\"", "[]", "null"] {
+            let (s, problems) = parsed(&format!(r#"{{"sounds":{raw}}}"#));
+            assert_eq!(s.sounds, Sounds::default(), "{raw}");
+            assert!(problems[0].contains("not an object"), "{raw}: {problems:?}");
+        }
+    }
+
+    #[test]
+    fn the_sounds_are_written_back_with_the_rest_and_nothing_else_is_lost() {
+        let (s, _) = parsed(r#"{"sounds":{"enabled":false,"volume":12.5},"theme":"dark"}"#);
+        let back: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(back["sounds"], json!({"enabled": false, "volume": 13}));
+        assert_eq!(back["theme"], "dark");
     }
 
     // ---- keys ----

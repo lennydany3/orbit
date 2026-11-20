@@ -22,6 +22,9 @@ fn what_the_page_saves_is_what_orbit_understands() {
     let mut page = SettingsState::open(file.clone());
     assert!(page.set_talk("f9"));
     assert!(page.apply_hotkey(Field::Orb, "ctrl+alt+p".into()));
+    assert!(page.set_sounds_enabled(false));
+    page.drag_volume(55);
+    assert!(page.finish_volume(true));
     page.new_command();
     page.name_edit().replace_text("Caf\u{e9} time!");
     page.phrase_edit(0).replace_text("  Caf\u{e9}   TIME!  ");
@@ -36,7 +39,7 @@ fn what_the_page_saves_is_what_orbit_understands() {
 
     let script = "import json,sys; from pathlib import Path; from orbit import settings; \
                   s = settings.load(Path(sys.argv[1])); \
-                  print(json.dumps({'problems': s.problems, 'hotkeys': s.hotkeys, 'commands': \
+                  print(json.dumps({'problems': s.problems, 'hotkeys': s.hotkeys, 'sounds': [s.sounds.enabled, s.sounds.volume], 'commands': \
                   [{'name': c.name, 'phrases': c.phrases, 'describe': c.describe(), 'enabled': c.enabled, 'keys': c.sends_keys} for c in s.commands]}, ensure_ascii=True))";
     let out = Command::new(&python)
         .args(["-I", "-c", script])
@@ -51,6 +54,7 @@ fn what_the_page_saves_is_what_orbit_understands() {
     assert_eq!(seen["problems"], serde_json::json!([]), "Orbit read all of it");
     assert_eq!(seen["hotkeys"]["talk"], "f9");
     assert_eq!(seen["hotkeys"]["orb"], "ctrl+alt+p");
+    assert_eq!(seen["sounds"], serde_json::json!([false, 55]), "the switch and the volume the page saved");
     let c = &seen["commands"][0];
     assert_eq!(c["name"], "Caf\u{e9} time!");
     assert_eq!(c["phrases"], serde_json::json!(["caf\u{e9} time"]), "both sides compare phrases the same way");
