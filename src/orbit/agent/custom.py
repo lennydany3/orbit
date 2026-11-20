@@ -91,7 +91,9 @@ class Hooks:
 
 
 def _fail(result: ToolResult) -> str:
-    return result.error or "it did not work"
+    """The reason, short enough to say aloud ("could not complete ... Last error: X" -> "X")."""
+    error = result.error or "it did not work"
+    return error.split("Last error: ", 1)[-1].strip()
 
 
 def run(command: settings.Command, agent, hooks: Hooks | None = None) -> tuple[bool, str]:
@@ -112,6 +114,17 @@ def run(command: settings.Command, agent, hooks: Hooks | None = None) -> tuple[b
     return True, f"Done: {command.name}."
 
 
+def _open_like_spoken(target: str, agent) -> str:
+    """An "open" step that is not an address or a folder does what saying "open <it>" does: "my github" is your GitHub page,
+    "youtube" the site, "spotify" the app. Nothing else is read into it."""
+    match = agent._rule_for(f"open {target}")
+    if match is not None:
+        ok, reply, _ = agent._run_rule(match)
+        return "" if ok else reply.removeprefix("Failed: ").split("Last error: ", 1)[-1].strip()
+    result = agent.execute("os_open_app", {"name": target})
+    return "" if result.ok else _fail(result)
+
+
 def _run_step(step: settings.Step, agent, hooks: Hooks) -> str:
     """"" if it worked, otherwise what went wrong."""
     try:
@@ -128,7 +141,7 @@ def _run_step(step: settings.Step, agent, hooks: Hooks) -> str:
             elif kind == "url":
                 result = agent.execute("browser_open", {"url": target})
             else:
-                result = agent.execute("os_open_app", {"name": target})
+                return _open_like_spoken(target, agent)
             if not result.ok:
                 return _fail(result)
     except (keyboard.KeyError_, ValueError, OSError) as e:

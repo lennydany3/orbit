@@ -76,7 +76,7 @@ impl StepKind {
 
     pub fn hint(self) -> &'static str {
         match self {
-            StepKind::Open => "An app, a website or a folder. Folders only open; nothing is ever run.",
+            StepKind::Open => "One app, website or folder per step, as if you said \"open ...\" (Spotify, my github, github.com). Folders only open; nothing is ever run.",
             StepKind::Keys => "Modifiers ctrl, alt, shift, win plus one key, like win+d or alt+tab.",
             StepKind::Type => "Typed into whichever window is in front when this step runs.",
             StepKind::Wait => "Seconds to wait before the next step, up to 30.",

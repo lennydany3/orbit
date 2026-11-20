@@ -163,6 +163,19 @@ def test_a_key_press_that_windows_refuses_stops_the_command(tmp_path):
     assert not ok and "step 1 of 2 (press ctrl+c)" in reply and "accepted 0 of 4" in reply and rig.opened == []
 
 
+def test_an_open_step_does_what_saying_open_it_does(tmp_path):
+    rig = Rig(tmp_path, [cmd(steps=[{"kind": "open", "target": "my github"}, {"kind": "open", "target": "youtube"},
+                                    {"kind": "open", "target": "vs code"}])])
+    assert run(rig.agent.custom.commands[0], rig.agent, rig.hooks)[0]
+    assert rig.opened == [("url", "https://github.com/lennydany3"), ("url", "https://www.youtube.com"), ("app", "Vs Code")]
+
+
+def test_a_failure_is_worded_to_be_said_aloud_not_read_as_a_log(tmp_path):
+    rig = Rig(tmp_path, [cmd(steps=[{"kind": "open", "target": "Nope"}])], fail=("Nope",))
+    ok, reply = run(rig.agent.custom.commands[0], rig.agent, rig.hooks)
+    assert not ok and reply == "Stopped Work mode at step 1 of 1 (open Nope): Nope not found"
+
+
 # ---------------------------------------------------------------- the one yes
 def test_opening_things_needs_no_question(tmp_path):
     rig = Rig(tmp_path, [cmd(steps=[{"kind": "open", "target": "Spotify"}, {"kind": "open", "target": "github.com"}])])
