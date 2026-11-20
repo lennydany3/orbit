@@ -31,6 +31,8 @@ SYSTEM_PROMPT = (
     "device or app name as the name (never extra words like a volume). "
     "Earlier messages in this chat are context: use them to understand words like 'it', 'that' or 'again'. "
     "When the task is done, or if no tool fits, answer in one short sentence. "
+    "After a tool succeeded, say plainly what you did in under ten words (for example \"Clicked the play button.\" or \"Moved Brave to the "
+    "primary monitor.\"). Say it once. Never answer with \"let me check\", \"one moment\" or \"working on it\" after the work is already done. "
     "The user types casually and loosely: work out what they mean (\"echo\" = the Echo speaker in the facts, \"the notes\" = "
     "the Notepad window) and use the exact names from the facts. "
     "Examples: \"move the music to echo\" -> api_spotify_transfer(device=<exact device name>); "
@@ -58,6 +60,13 @@ _ACTION_VERBS = (
 
 # "show brave" and "bring up spotify" are requests; "show me how a thread works" is a question.
 _SHOW_AN_APP = re.compile(r"^(?:show(?!\s+(?:me|us)\b)|bring up|pull up|take me to|head to|jump to)\b", re.I)
+
+
+def collapse_repeats(text: str) -> str:
+    """"Home page opened.Home page opened." -> "Home page opened." (a model sometimes says the very same thing twice in a row)."""
+    plain = (text or "").strip()
+    again = re.fullmatch(r"(.{6,}?)(?:\s*\1)+", plain, re.S)
+    return again.group(1).strip() if again else plain
 
 
 def _is_action_request(text: str) -> bool:
@@ -132,6 +141,7 @@ class Agent:
         self.recent_subjects: list[str] = []  # everything opened or focused lately that is still open: "close both"
         self._after_field_click = False       # the last thing done was putting the cursor in a text box: typing replaces a search box's words
         self._next_part = ""                  # the next request of a multi-request sentence: "click the search" before "type cats" means the box
+        self.actions_done = 0                 # tools that succeeded during the current request (the voice does not say "one moment" after work is done)
 
     # ---- public ----
     def handle(self, text: str) -> str:
@@ -139,6 +149,7 @@ class Agent:
         start = time.perf_counter()
         self.last_kind, self.last_emotion = "action", "neutral"
         self._part_failed = False
+        self.actions_done = 0
         try:
             return self._handle(text)
         except LLMError as e:
@@ -181,6 +192,7 @@ class Agent:
         return sum(len(m.get("content") or "") + len(str(m.get("tool_calls", ""))) for t in self.turns for m in t)
 
     def _finish(self, turn: list[dict], reply: str) -> str:
+        reply = collapse_repeats(reply)
         turn.append({"role": "assistant", "content": reply})
         self._remember(turn)
         return reply
@@ -546,6 +558,7 @@ class Agent:
         self._part_failed = not result.ok
         self._after_field_click = result.ok and name in ("browser_click", "os_click") and getattr(params, "kind", "any") == "field"
         if result.ok:
+            self.actions_done += 1
             if name.startswith("browser_"):
                 self.last_target_kind = "browser"
             elif name in ("os_open_app", "os_focus_window", "os_move_window", "os_arrange_window", "os_click"):

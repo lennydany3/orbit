@@ -16,7 +16,7 @@ only while Orbit is doing something.
   voice, by clicking, or with a key chord. Everything Orbit does is printed first and logged with secrets redacted.
 - **You can watch it work.** Orbit's own pointer glides to what it is about to click, presses it with a ripple, carries a window
   across monitors by its title bar, and a small "working" pill shows while a job runs ([details](#seeing-what-orbit-does)).
-- **Tested.** 1523 Python tests and 193 Rust tests pass.
+- **Tested.** 1559 Python tests and 193 Rust tests pass.
 
 ## Contents
 
@@ -198,8 +198,11 @@ as the text prompt, and speaks a short reply.
   is spoken as "Okay, closing Spotify."). When it did not understand, it says what it heard and asks again. One or two
   sentences, never URLs, code or lists; the full reply is always printed. `CONVERSATIONAL = False` in `voice/config.py` reads the
   reports out as they are.
-- **No dead air.** If the agent takes longer than about 2.5 s, Orbit says "One moment." (and "Still working on it." after about
-  8 s). `FILLERS = False` turns that off.
+- **No dead air, but no silly fillers.** If the agent takes longer than about 2.5 s *and has not done anything yet*, Orbit says
+  "One moment." (and "Still working on it." after about 8 s). Once a click, scroll or move has already happened, it stays quiet
+  and just reports what it did ("I clicked the play button."), so you never hear "Let me check." after the work is done.
+  `FILLERS = False` turns fillers off. Control names are said like a person would say them (no "(f)" shortcut hints, no emoji,
+  long video titles cut at a natural break), and an accidental repeat ("Home page opened. Home page opened.") is said once.
 - **Questions get answers.** After Orbit asks you something, it listens for 6 s without the wake word. After any reply you have
   2 s for the next request without the wake word (`--no-follow-up` turns that off).
 - **Risky actions ask by voice.** "Do you want me to close window Notepad? Say yes or no." Only a clear yes runs it; silence,
@@ -401,7 +404,7 @@ src/orbit/
   ipc/            the WebSocket link to the desktop app
   visual/         the on-screen animations: Orbit's pointer, the click ripple, the working pill
 ui/               orbit-ui: the tray app and sphere (Rust + Rune)
-tests/            1523 Python tests, plus shared fixtures the Rust side is tested against
+tests/            1559 Python tests, plus shared fixtures the Rust side is tested against
 docs/screenshots/ the pictures in this file
 ```
 

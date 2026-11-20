@@ -23,6 +23,26 @@ _RAW_TOOL_CALL = re.compile(r"^\s*(?:[a-z]+_[a-z_]+\s*[\{\(].*[\}\)]|\{.*\}|```.
 _BROWSER_SUFFIX = re.compile(r"\s+[-–|]\s+(Brave|Google Chrome|Chrome|Microsoft Edge|Mozilla Firefox)$", re.I)
 
 
+_KEY_HINT = re.compile(r"\s*(?:\((?:[A-Za-z]|(?:ctrl|alt|shift)\+\w+)\)|keyboard shortcut \w+)", re.I)
+
+
+def control_name(raw: str, words: int = 9) -> str:
+    """A control's name as you would say it out loud: no emoji, no "(f)" or "keyboard shortcut m" hints, no stray punctuation,
+    and not longer than a few words (a video's title can be a whole sentence). A long name is cut at a natural break
+    (" - ", " | ", ": ") rather than in the middle of a phrase."""
+    name = _KEY_HINT.sub("", _EMOJI.sub(" ", raw or ""))
+    name = re.sub(r"\s+", " ", name).strip(" -|:,.!?")
+    if len(name.split()) <= words:
+        return name
+    kept: list[str] = []
+    for segment in re.split(r"\s[-|–—]\s|:\s", name):
+        if len(" ".join(kept + [segment]).split()) > words:
+            break
+        kept.append(segment)
+    shortened = " - ".join(kept) if kept else " ".join(name.split()[:words])
+    return shortened.strip(" -|:,.!?")
+
+
 def strip_emoji(text: str) -> str:
     """Emoji would be read out loud as their names (or skipped awkwardly): drop them from what is spoken."""
     return re.sub(r"[ \t]+", " ", _EMOJI.sub(" ", text or "")).strip()
@@ -153,9 +173,38 @@ class Phraser:
         m = re.match(r"clicked the first video: '(.+?)'", s, re.I)
         if m:
             return f"{ok()}playing {clean_title(m.group(1))}."
+        m = re.match(r"clicked '(.+?)' \((button|link|tab|menu item|checkbox|radio button|list item|control)\)(?: in your Brave)?$", s, re.I)
+        if m:                                                      # a control on a web page: say what it is, not its raw name
+            name, kind = control_name(m.group(1)), m.group(2).lower()
+            if kind == "button":
+                said = name if re.search(r"\bbutton\b", name, re.I) else f"the {name.lower()} button"
+            elif kind == "tab":
+                said = f"the {name} tab"
+            elif kind == "link" and len(name.split()) <= 3:
+                said = f"the {name} link"
+            else:
+                said = name
+            return f"{ok()}I clicked {said}."
+        m = re.match(r"put the cursor in the '(.+?)' (?:text field|combo box)", s, re.I)
+        if m:
+            return f"{ok()}I clicked the {control_name(m.group(1)).lower()} box."
+        m = re.match(r"clicked (the symbol|the words) '(.+?)'", s, re.I)
+        if m:                                                      # a lone character ("x", a heart) is not something to read out
+            return f"{ok()}I clicked " + ("the symbol." if m.group(1).lower() == "the symbol" else f"{control_name(m.group(2))}.")
+        m = re.match(r"typed '(.+?)' and pressed Enter in ", s, re.I)
+        if m:
+            return f"{ok()}I typed {m.group(1)} and pressed enter."
+        m = re.match(r"typed '(.+?)' in ", s, re.I)
+        if m:
+            return f"{ok()}I typed {m.group(1)}."
+        if re.match(r"pressed Enter in ", s, re.I):
+            return f"{ok()}I pressed enter."
+        m = re.match(r"(scrolled .+?)(?: in your Brave)?$", s, re.I)
+        if m:
+            return f"{ok()}{m.group(1)}."
         m = re.match(r"clicked '(.+?)'", s, re.I)
         if m:
-            return f"{ok()}I clicked {clean_title(m.group(1))}."
+            return f"{ok()}I clicked {control_name(m.group(1))}."
         m = re.match(r"set volume to (\d+)%", s, re.I) or re.match(r"volume \d+% -> (\d+)%", s, re.I)
         if m:
             return f"{ok()}volume is {m.group(1)} percent."

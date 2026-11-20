@@ -525,6 +525,8 @@ class VoiceLoop:
         """No dead air: after ~2.5 s say "One moment.", after ~8 s "Still working on it." (the mic is already off)."""
         if not self.fillers or self._fillers_said >= 2:
             return
+        if getattr(self.agent, "actions_done", 0) > 0:
+            return                                 # the click, scroll or move already happened: "Let me check." now would be wrong
         if self.st.elapsed < (config.FILLER_AFTER_S if self._fillers_said == 0 else config.FILLER_AGAIN_S):
             return
         if self._filler_future is not None and not self._filler_future.done():
