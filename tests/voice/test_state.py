@@ -85,3 +85,20 @@ def test_turn_timer_summary_shows_where_the_time_went():
     assert "transcribe 2.20s" in line and "agent 0.50s" in line and "first audio 0.30s" in line
     assert "= 3.00s from end of speech" in line and "+0.9s" in line
     assert TurnTimer().summary() == ""
+
+
+def test_every_transition_is_also_reported_as_data_for_the_face():
+    changes = []
+    clock = Clock()
+    m = VoiceState(clock=clock, on_change=lambda old, new, reason: changes.append((old, new, reason)))
+    m.to(State.LISTENING, "hotkey")
+    m.to(State.TRANSCRIBING)
+    assert changes == [(State.IDLE, State.LISTENING, "hotkey"), (State.LISTENING, State.TRANSCRIBING, "")]
+
+
+def test_an_illegal_transition_is_not_reported():
+    changes = []
+    m = VoiceState(clock=Clock(), on_change=lambda *a: changes.append(a))
+    with pytest.raises(IllegalTransition):
+        m.to(State.SPEAKING)
+    assert changes == [] and m.state is State.IDLE

@@ -51,6 +51,7 @@ class StreamingTTS:
     implement `sentences(text)`, which yields int16 mono arrays, one per sentence."""
     name = "tts"
     sample_rate = 22_050
+    on_audio = None                                   # set to a function taking each int16 block as it is played (the face's level meter)
 
     def _init_player(self, device, reference: ReferenceTimeline | None) -> None:
         self.reference = reference     # when set, every block played is also recorded here (16 kHz) for echo cancellation
@@ -127,6 +128,8 @@ class StreamingTTS:
                         interrupted = True
                         break
                     stream.write(audio[i:i + _BLOCK].reshape(-1, 1))
+                    if self.on_audio is not None:
+                        self.on_audio(audio[i:i + _BLOCK])
                     if ref16 is not None:
                         a = round(i * config.SAMPLE_RATE / self.sample_rate)
                         b = round(min(i + _BLOCK, len(audio)) * config.SAMPLE_RATE / self.sample_rate)
@@ -318,6 +321,12 @@ class FallbackTTS:
         for engine in self.engines:
             if hasattr(engine, "set_emotion"):
                 engine.set_emotion(emotion)
+
+    def set_audio_listener(self, listener) -> None:
+        """Hands every played block to `listener` (engines that cannot report their audio, like the Windows voice, never call it)."""
+        for engine in self.engines:
+            if isinstance(engine, StreamingTTS):
+                engine.on_audio = listener
 
     @property
     def reference(self):

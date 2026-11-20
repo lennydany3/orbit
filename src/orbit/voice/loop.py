@@ -25,6 +25,7 @@ from logging.handlers import RotatingFileHandler
 import numpy as np
 
 from . import config
+from ..ipc.bridge import NullBridge
 from .aec import EchoCanceller, ReferenceAligner, ReferenceTimeline
 from .phrasing import Phraser, strip_emoji
 from .state import State, TurnTimer, VoiceState
@@ -161,8 +162,10 @@ class VoiceLoop:
                  out=print, verbose: bool = False, monitor=None, file_log=None, clock=time.monotonic,
                  conversational: bool = config.CONVERSATIONAL, fillers: bool = config.FILLERS, rng: random.Random | None = None,
                  aec: EchoCanceller | None = None, reference: ReferenceTimeline | None = None, barge_in: bool = config.BARGE_IN,
-                 media_check=None):
+                 media_check=None, ui=None):
         self.agent, self.mic, self.transcriber, self.tts = agent, mic, transcriber, tts
+        self.ui = ui or NullBridge()               # the sphere window, if one is connected (python -m orbit --voice --ipc)
+        self._confirm_id = 0
         self.keys, self.wake, self.segmenter, self.check_vad = keys, wake, segmenter, check_vad
         self.follow_up, self.use_ptt, self.wake_name, self.out, self.verbose, self.monitor = follow_up, use_ptt, wake_name, out, verbose, monitor
         self.confirm = VoiceConfirm()
@@ -181,7 +184,7 @@ class VoiceLoop:
         self._fillers_said = 0
         self._last_spoken = ""
         self._follow_window = config.FOLLOW_UP_S
-        self.st = VoiceState(clock=clock, log=self._on_transition)
+        self.st = VoiceState(clock=clock, log=self._on_transition, on_change=self._on_change)
         self.turn = TurnTimer(clock=clock)
         self.turns = 0
         self.killed = False
@@ -202,6 +205,9 @@ class VoiceLoop:
         self._flog(line)
         if self.verbose:
             self.out("  " + line)
+
+    def _on_change(self, old: State, new: State, reason: str) -> None:
+        self.ui.state_changed(old, new, reason, self._follow_window if new is State.FOLLOW_UP else None)
 
     def _pause_mic(self) -> None:
         if not self._mic_paused:
@@ -252,6 +258,7 @@ class VoiceLoop:
                     break
                 item = self.mic.read_timed(timeout=0.05)
                 self._tick(*(item if item else (None, 0.0)))
+                self.ui.tick()
         except KeyboardInterrupt:
             reason = "quit"
         finally:
@@ -273,6 +280,8 @@ class VoiceLoop:
 
     def _tick(self, frame, t: float = 0.0) -> None:
         s = self.st.state
+        if frame is not None:
+            self.ui.mic_frame(frame)               # the face shows the level only while a voice is being heard
         if s is State.IDLE:
             self._tick_idle(frame)
         elif s in (State.LISTENING, State.FOLLOW_UP):
@@ -310,6 +319,8 @@ class VoiceLoop:
         if self._pending_confirm:                      # a waiting risky action gets "no"
             self._pending_confirm["event"].set()
             self._pending_confirm = None
+            self.ui.confirm_done(self._confirm_id, False, "killed")
+        self.ui.killed()
 
     def _on_ptt_down(self) -> None:
         if self.st.is_(State.SPEAKING):
@@ -421,6 +432,7 @@ class VoiceLoop:
         result, error = self._text_of(self.future)
         if error is not None:
             self.out(f"  [stt] speech-to-text failed: {error}")
+            self.ui.outcome(False)
             self._speak("Sorry, I couldn't understand that.", "speech-to-text failed")
             return
         text = strip_wake_phrase(result.text, self.wake_name) if self.mode == "wake" and self.wake else result.text
@@ -436,6 +448,7 @@ class VoiceLoop:
             self._speak("Sorry, I didn't catch that.", "empty transcript")
             return
         self.out(f'You said: "{text}"   [speech-to-text {result.seconds:.1f}s]')
+        self.ui.transcript("you", text)
         if config.LOG_TRANSCRIPTS:
             self._flog(f"transcript: {text}")
         self.request_text, self._fillers_said, self._filler_future = text, 0, None
@@ -462,17 +475,24 @@ class VoiceLoop:
         if self.monitor is not None and "text" in self.turn.marks:
             self.monitor.add_timing("agent", self.turn.marks["reply"] - self.turn.marks["text"])
         self.out(f"Orbit: {reply}")                       # the full reply stays in the CLI; a natural, short version is spoken
-        if getattr(self.agent, "last_kind", "action") == "chat":
+        kind = getattr(self.agent, "last_kind", "action")
+        if error is not None or (kind == "action" and getattr(self.agent, "last_failed", False)):
+            self.ui.outcome(False)                     # a flash before the reply is spoken: something did not work
+        elif kind == "action":
+            self.ui.outcome(True)
+        if kind == "chat":
             # Friend mode: it is already written to be spoken, so it is not rewritten, and it is spoken (almost) whole, with feeling.
             emotion = getattr(self.agent, "last_emotion", "neutral")
             spoken = spoken_summary(strip_emoji(reply), config.CHAT_SPOKEN_MAX_SENTENCES, config.CHAT_SPOKEN_MAX_CHARS)
             self.out(f"  [feeling] {emotion}")
+            self.ui.reply(reply, spoken, "chat", emotion)
             self._speak(spoken, "reply ready", emotion=emotion, chat=True)
             return
         said = self.phraser.say(reply, self.request_text) if self.conversational else reply
         spoken = spoken_summary(said)
         if spoken != reply:
             self.out(f"  [says] {spoken}")
+        self.ui.reply(reply, spoken, "action", "neutral")
         self._speak(spoken, "reply ready")
 
     def _maybe_filler(self) -> None:
@@ -587,6 +607,7 @@ class VoiceLoop:
     # ---- confirming a risky action by voice ----
     def _begin_confirm(self, question: str, reply: dict) -> None:
         self._pending_confirm = reply
+        self._confirm_id = self.ui.confirm_asked(question, describe_action(question)) or 0
         spoken = f"Do you want me to {describe_action(question)}? Say yes or no."
         self.out(f"[confirm] {question}\n  Orbit asks: {spoken}")
         self._pause_mic()
@@ -597,6 +618,17 @@ class VoiceLoop:
 
     def _tick_confirming(self, frame) -> None:
         step = self._confirm_step
+        shown = self.ui.poll_answer()
+        if shown is not None and shown.id == self._confirm_id and self._pending_confirm is not None:
+            self.tts.stop()                            # answered on screen: stop asking out loud
+            if self.future is not None:
+                try:
+                    self.future.result(timeout=1.0)
+                except Exception:  # noqa: BLE001
+                    pass
+            self.out(f"  answered on screen -> {'YES' if shown.yes else 'NO'}")
+            self._answer(shown.yes, "ui")
+            return
         if step == "ask":
             if self.future.done():
                 self._resume_mic()
@@ -615,19 +647,20 @@ class VoiceLoop:
                         return
             if not self.segmenter.speaking and self._clock() - self._confirm_started > config.CONFIRM_TIMEOUT_S:
                 self.out("  (no answer heard: treating that as no)")
-                self._answer(False)
+                self._answer(False, "timeout")
         elif step == "transcribe" and self.future.done():
             result, error = self._text_of(self.future)
             text = "" if error is not None else result.text
             yes = parse_yes_no(text)
             self.out(f'  you said "{text}" -> {"YES" if yes else "NO"}')
-            self._answer(yes)
+            self._answer(yes, "voice")
 
-    def _answer(self, yes: bool) -> None:
+    def _answer(self, yes: bool, by: str = "voice") -> None:
         reply, self._pending_confirm = self._pending_confirm, None
         if reply is not None:
             reply["answer"] = yes
             reply["event"].set()
+            self.ui.confirm_done(self._confirm_id, yes, by)
         self._pause_mic()
         self.st.to(State.THINKING, f"confirmation: {'yes' if yes else 'no'}")
         self.out("[thinking]")
@@ -668,7 +701,7 @@ def privacy_note(transcriber, tts, llm_description: str = "") -> str:
 
 
 def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bool = True, follow_up: bool | None = None,
-              seconds: float | None = None, wav: str | None = None, verbose: bool = False, out=print) -> str:
+              seconds: float | None = None, wav: str | None = None, verbose: bool = False, out=print, ui=None) -> str:
     """Builds everything and runs the loop. Returns "killed" | "quit" | "timeout", or "failed" if voice cannot start
     (no mic, a missing model): the caller then carries on in text mode, so a voice problem never crashes the REPL."""
     from .audio_io import FileMic, MicStream, device_label
@@ -702,8 +735,10 @@ def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bo
 
     loop = VoiceLoop(agent, mic, transcriber, tts, keys, wake, segmenter, check_vad,
                      follow_up=config.FOLLOW_UP if follow_up is None else follow_up, out=out, verbose=verbose, monitor=Monitor(),
-                     aec=EchoCanceller() if reference is not None else None, reference=reference)
+                     aec=EchoCanceller() if reference is not None else None, reference=reference, ui=ui)
     agent.safety.confirm = loop.confirm              # risky actions are confirmed by voice from now on
+    if ui is not None and hasattr(tts, "set_audio_listener"):
+        tts.set_audio_listener(ui.audio_block)         # the face shows Orbit's voice level while it speaks
     loop.monitor.start()
     llm = getattr(agent, "llm", None)
     if llm is not None and hasattr(llm, "warm_up"):

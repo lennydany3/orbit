@@ -53,3 +53,71 @@ def test_piper_makes_one_chunk_per_sentence():
     seconds = sum(len(c) for c in chunks) / tts.sample_rate
     assert 1.5 < seconds < 8
     assert all(c.dtype.name == "int16" and c.ndim == 1 and abs(c).max() > 500 for c in chunks)
+
+
+# ------------------------------------------------------------------ the face's level meter
+def test_every_played_block_is_handed_to_the_audio_listener(monkeypatch):
+    import threading
+
+    import numpy as np
+
+    from orbit.voice import tts as tts_module
+
+    written = []
+
+    class FakeStream:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def write(self, block):
+            written.append(len(block))
+
+        def stop(self):
+            pass
+
+        def abort(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(tts_module.sd, "OutputStream", FakeStream)
+
+    class Engine(tts_module.StreamingTTS):
+        name = "fake"
+
+        def __init__(self):
+            self.reference, self.device = None, None
+            self._stop, self._run = threading.Event(), threading.Event()
+            self._run.set()
+
+        def sentences(self, text):
+            yield np.full(5000, 1000, np.int16)
+
+    engine = Engine()
+    heard = []
+    engine.on_audio = lambda block: heard.append(len(block))
+    stats = engine.speak("hello")
+    assert heard == written and sum(heard) == 5000 and stats.audio_s > 0
+
+    engine.on_audio = None                                   # no listener: nothing changes
+    written.clear()
+    engine.speak("hello")
+    assert sum(written) == 5000
+
+
+def test_the_listener_is_given_to_engines_that_can_play_audio_and_skipped_for_the_rest():
+    from orbit.voice.tts import StreamingTTS
+
+    class Streaming(StreamingTTS):
+        name = "streaming"
+
+        def __init__(self):
+            pass
+
+    streaming, plain = Streaming(), Working()
+    FallbackTTS([plain, streaming]).set_audio_listener(print)
+    assert streaming.on_audio is print and not hasattr(plain, "on_audio")

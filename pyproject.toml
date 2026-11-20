@@ -25,7 +25,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pyyaml"]
+dev = ["pytest", "pyyaml", "websockets>=13"]
+# The link to the sphere window (ui/): `python -m orbit --voice --ipc`.
+ipc = ["websockets>=13"]
 # Local voice, added step by step (V1 shown; later steps add faster-whisper, piper-tts, pynput, openwakeword).
 voice = ["sounddevice", "numpy", "onnxruntime", "psutil", "faster-whisper", "piper-tts", "pyttsx3", "pynput", "openwakeword"]
 

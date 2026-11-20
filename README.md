@@ -104,6 +104,15 @@ openWakeWord ships no "Orbit" model, so `hey_orbit` is trained here, offline, in
 - **Honest numbers (V4, synthetic voices only):** on Windows David and Zira at three speeds, which were not used for training, 22 of 24 "hey orbit" clips woke it and 0 of 84 other clips did. Real rooms, TV and your voice are a different test: use `python -m orbit.voice.run wake` to measure false wakes yourself.
 - Pre-trained stand-ins still work: `--word hey_mycroft` (or `alexa`, `hey_jarvis`; note "Jarvis" alone triggers `hey_jarvis`).
 
+### Desktop face: the sphere window (`ui/`)
+
+`python -m orbit --voice --ipc` lets the sphere window (see `ui/README.md`) show what Orbit is doing: listening, thinking, speaking, your voice level, what was said, and the "are you sure?" question for risky actions, which you can then answer with a click instead of your voice. Install the extra first: `pip install -e ".[ipc]"`.
+
+- **Only this PC, only the window.** The link is a WebSocket on `127.0.0.1` (port 8765, `--ipc-port` or `ORBIT_IPC_PORT`). A connection needs the random token Orbit prints at start (`ORBIT_IPC_TOKEN` to choose one), and a connection from a web page is always refused (a browser always sends its page's origin), so no website can listen to your voice turns or answer a confirmation for you. `ORBIT_IPC_ORIGINS` names pages you want to allow (for example the design's review page).
+- **A face can send exactly one thing:** the yes or no for a question that is open. It cannot send requests or press keys.
+- **What it is told:** the messages are listed at the top of `src/orbit/ipc/protocol.py`. Audio never leaves Orbit: the face gets one loudness number about 20 times a second, only while a voice is being heard (your microphone while you talk, Orbit's voice while it speaks, nothing while only the wake word listens).
+- **Working on the face without a microphone:** `python -m orbit.ipc.demo` (add `--confirm` for the yes/no question) plays a scripted turn on the same link.
+
 ## Known limits (honest list)
 
 - A phone or speaker only shows up as a Spotify device while its Spotify app is open or was used recently (Echo speakers can be slow to wake and sometimes need a second try). Spotify's own "transfer" call sometimes answers HTTP 500 for this PC; Orbit then restarts the current song on the target device instead, and says so.

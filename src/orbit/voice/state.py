@@ -42,8 +42,8 @@ class IllegalTransition(Exception):
 
 class VoiceState:
     def __init__(self, clock: Callable[[], float] = time.monotonic, log: Callable[[str], None] | None = None,
-                 wall: Callable[[], datetime] = datetime.now):
-        self._clock, self._log, self._wall = clock, log, wall
+                 wall: Callable[[], datetime] = datetime.now, on_change: Callable[["State", "State", str], None] | None = None):
+        self._clock, self._log, self._wall, self._on_change = clock, log, wall, on_change
         self.state = State.IDLE
         self._since = clock()
         self.history: list[tuple[str, State, State, str]] = []   # (timestamp, from, to, reason)
@@ -57,6 +57,8 @@ class VoiceState:
         self.state, self._since = new, self._clock()
         if self._log:
             self._log(f"[{stamp}] {old.value} -> {new.value}" + (f" ({reason})" if reason else ""))
+        if self._on_change:
+            self._on_change(old, new, reason)
 
     @property
     def elapsed(self) -> float:

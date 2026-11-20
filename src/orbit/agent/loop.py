@@ -105,6 +105,7 @@ class Agent:
         """Run one user request and return the final reply."""
         start = time.perf_counter()
         self.last_kind, self.last_emotion = "action", "neutral"
+        self._part_failed = False
         try:
             return self._handle(text)
         except LLMError as e:
@@ -112,6 +113,11 @@ class Agent:
             return f"I couldn't reach the model: {e}"
         finally:
             self.log("time", f"request took {time.perf_counter() - start:.1f}s")
+
+    @property
+    def last_failed(self) -> bool:
+        """Did the last request end with a tool call that failed? (The voice face shows it as an error flash.)"""
+        return self._part_failed
 
     def forget(self) -> None:
         """Clear the conversation memory."""

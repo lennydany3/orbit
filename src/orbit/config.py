@@ -66,3 +66,10 @@ ALLOWED_DIRS = [
     Path.home() / "Downloads",
     Path.home() / "Documents" / APP_NAME,
 ]
+
+# --- Link to the face (the sphere window): `python -m orbit --voice --ipc`. Only this PC can connect (127.0.0.1). ---
+IPC_PORT = int(os.environ.get("ORBIT_IPC_PORT", "8765"))
+IPC_TOKEN = os.environ.get("ORBIT_IPC_TOKEN", "")     # empty = a new random token every run, printed at start (the Rust window is handed it)
+# Web pages that may connect (comma-separated origins). Empty = none: a browser always sends its page's origin, and any
+# website could otherwise listen in on your voice turns and answer "are you sure?" for you.
+IPC_ORIGINS = tuple(o.strip() for o in os.environ.get("ORBIT_IPC_ORIGINS", "").split(",") if o.strip())
