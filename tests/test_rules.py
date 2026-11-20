@@ -211,10 +211,17 @@ def test_statement_stripping_does_not_swallow_real_commands():
     assert rules.match("close the clock").tool == "os_close_window"
 
 
-@pytest.mark.parametrize("text", ["click the first video", "tap on the top video", "play the first result", "open the 1st one"])
+@pytest.mark.parametrize("text", ["click the first video", "tap on the top video", "play the first video"])
 def test_the_first_video_is_not_a_control_called_first(text):
     m = rules.match(text)
     assert m and (m.tool, m.args) == ("browser_youtube_play", {"query": ""})
+
+
+@pytest.mark.parametrize("text, n", [("play the first result", 1), ("open the 1st one", 1), ("click the second link", 2), ("open the third result", 3),
+                                     ("click the last result", -1), ("select the top result", 1)])
+def test_the_nth_result_is_picked_on_whatever_page_is_open(text, n):
+    m = rules.match(text)
+    assert m and (m.tool, m.args) == ("browser_click", {"nth": n})
 
 
 @pytest.mark.parametrize("text, tool, args", [

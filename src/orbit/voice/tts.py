@@ -1,12 +1,18 @@
-"""Text-to-speech: Piper (neural, CPU, offline) with the built-in Windows voice (pyttsx3) as a fallback.
+"""Text-to-speech: Sarvam AI (cloud) when a key is set, else Piper (neural, CPU, offline), with the built-in Windows voice (pyttsx3) last.
 
 Piper yields one chunk of audio per sentence. A producer thread synthesizes the next sentence while the
 current one is playing, so the first sentence starts after one sentence's worth of synthesis, not the whole reply.
 `stop()` interrupts speech within about 100 ms (the hotkey barge-in in V6 will call it).
 """
+import base64
+import io
 import queue
+import re
 import threading
 import time
+import wave
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -37,51 +43,32 @@ class SpeakStats:
         return self.synth_s / self.audio_s if self.synth_s is not None and self.audio_s else None
 
 
-class PiperTTS:
-    name = "piper"
+class StreamingTTS:
+    """Plays speech one sentence at a time. A producer thread fetches/synthesizes the next sentence while the current one plays.
 
-    def __init__(self, voice: str = config.PIPER_VOICE, device: str | int | None = config.SPEAKER_DEVICE,
-                 threads: int = 2, length_scale: float = config.PIPER_LENGTH_SCALE, reference: ReferenceTimeline | None = None):
-        model = config.PIPER_DIR / f"{voice}.onnx"
-        if not model.exists():
-            raise FileNotFoundError(
-                f"Piper voice '{voice}' not found in {config.PIPER_DIR}. Download it once with:\n"
-                f"  python -m orbit.voice.fetch_models piper {voice}")
-        import json
+    Every block handed to the sound card is also recorded in `reference` (16 kHz) for the echo canceller, so barge-in and
+    "hey orbit" during speech work the same no matter which engine produced the audio. Subclasses set `sample_rate` and
+    implement `sentences(text)`, which yields int16 mono arrays, one per sentence."""
+    name = "tts"
+    sample_rate = 22_050
+    on_audio = None                                   # set to a function taking each int16 block as it is played (the face's level meter)
 
-        import onnxruntime as ort
-        from piper import PiperVoice, SynthesisConfig
-        from piper.config import PiperConfig
-
-        options = ort.SessionOptions()
-        options.intra_op_num_threads = threads    # Piper's own loader would use every core; keep it to a few
-        options.inter_op_num_threads = 1
-        self.voice_name = voice
-        self._voice = PiperVoice(
-            config=PiperConfig.from_dict(json.loads(Path(f"{model}.json").read_text(encoding="utf-8"))),
-            session=ort.InferenceSession(str(model), sess_options=options, providers=["CPUExecutionProvider"]),
-        )
-        self._length_scale = length_scale
+    def _init_player(self, device, reference: ReferenceTimeline | None) -> None:
         self.reference = reference     # when set, every block played is also recorded here (16 kHz) for echo cancellation
-        self._syn = SynthesisConfig(length_scale=length_scale)
-        self.sample_rate = self._voice.config.sample_rate
         self.device = resolve_device(device, "output")
         self._stop = threading.Event()
         self._run = threading.Event()                 # cleared = speech paused (nothing more is written to the sound card)
         self._run.set()
         self.supports_pause = True
-        list(self.synthesize("Ready."))   # warm-up: the first synthesis pays one-time setup costs
 
-    def synthesize(self, text: str, **style) -> Iterator[np.ndarray]:
-        """Int16 mono audio, one array per sentence. No sound is played (used for tests, timing and wake-word training).
-        `style` may override length_scale (speed), noise_scale and noise_w_scale to vary how the voice sounds."""
-        syn = self._syn
-        if style:
-            from piper import SynthesisConfig
+    def sentences(self, text: str) -> Iterator[np.ndarray]:
+        raise NotImplementedError
 
-            syn = SynthesisConfig(**{"length_scale": self._length_scale, **style})
-        for chunk in self._voice.synthesize(text, syn):
-            yield np.asarray(chunk.audio_int16_array).reshape(-1)
+    emotion = "neutral"
+
+    def set_emotion(self, emotion: str | None) -> None:
+        """How the next reply should sound ("proud", "caring", ...). Unknown names mean neutral."""
+        self.emotion = emotion if emotion in config.EMOTION_STYLE else "neutral"
 
     def stop(self) -> None:
         self._stop.set()
@@ -98,12 +85,12 @@ class PiperTTS:
         self._stop.clear()
         self._run.set()
         start = time.perf_counter()
-        audio_q: queue.Queue = queue.Queue(maxsize=3)   # at most 3 sentences synthesized ahead of playback
+        audio_q: queue.Queue = queue.Queue(maxsize=3)   # at most 3 sentences ready ahead of playback
         synth = {"s": 0.0, "error": None}
 
         def produce() -> None:
             try:
-                sentences = self.synthesize(text)
+                sentences = self.sentences(text)
                 while not self._stop.is_set():
                     t0 = time.perf_counter()
                     audio = next(sentences, None)
@@ -141,6 +128,8 @@ class PiperTTS:
                         interrupted = True
                         break
                     stream.write(audio[i:i + _BLOCK].reshape(-1, 1))
+                    if self.on_audio is not None:
+                        self.on_audio(audio[i:i + _BLOCK])
                     if ref16 is not None:
                         a = round(i * config.SAMPLE_RATE / self.sample_rate)
                         b = round(min(i + _BLOCK, len(audio)) * config.SAMPLE_RATE / self.sample_rate)
@@ -159,9 +148,123 @@ class PiperTTS:
                     worker.join(timeout=0.05)
             (stream.abort if interrupted else stream.stop)()   # stop() lets the buffered audio finish; abort() cuts it
             stream.close()
-        if synth["error"] is not None:
-            raise RuntimeError(f"Piper failed: {synth['error']}")
-        return SpeakStats("piper", time.perf_counter() - start, first_audio, synth["s"], played / self.sample_rate, interrupted)
+        # An error before anything was heard lets the next engine speak the whole reply. After speech has started, repeating
+        # it from the top would be worse than a cut-off sentence, so the stats are returned as they are.
+        if synth["error"] is not None and played == 0:
+            raise RuntimeError(f"{self.name} failed: {synth['error']}")
+        return SpeakStats(self.name, time.perf_counter() - start, first_audio, synth["s"], played / self.sample_rate, interrupted)
+
+
+class PiperTTS(StreamingTTS):
+    name = "piper"
+
+    def __init__(self, voice: str = config.PIPER_VOICE, device: str | int | None = config.SPEAKER_DEVICE,
+                 threads: int = 2, length_scale: float = config.PIPER_LENGTH_SCALE, reference: ReferenceTimeline | None = None):
+        model = config.PIPER_DIR / f"{voice}.onnx"
+        if not model.exists():
+            raise FileNotFoundError(
+                f"Piper voice '{voice}' not found in {config.PIPER_DIR}. Download it once with:\n"
+                f"  python -m orbit.voice.fetch_models piper {voice}")
+        import json
+
+        import onnxruntime as ort
+        from piper import PiperVoice, SynthesisConfig
+        from piper.config import PiperConfig
+
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = threads    # Piper's own loader would use every core; keep it to a few
+        options.inter_op_num_threads = 1
+        self.voice_name = voice
+        self._voice = PiperVoice(
+            config=PiperConfig.from_dict(json.loads(Path(f"{model}.json").read_text(encoding="utf-8"))),
+            session=ort.InferenceSession(str(model), sess_options=options, providers=["CPUExecutionProvider"]),
+        )
+        self._length_scale = length_scale
+        self._syn = SynthesisConfig(length_scale=length_scale)
+        self.sample_rate = self._voice.config.sample_rate
+        self._init_player(device, reference)
+        list(self.synthesize("Ready."))   # warm-up: the first synthesis pays one-time setup costs
+
+    def sentences(self, text: str) -> Iterator[np.ndarray]:
+        return self.synthesize(text)
+
+    def set_emotion(self, emotion: str | None) -> None:
+        super().set_emotion(emotion)
+        from piper import SynthesisConfig
+
+        pace = config.EMOTION_STYLE[self.emotion][0]                # the offline voice can only change its speed
+        self._syn = SynthesisConfig(length_scale=self._length_scale / pace)
+
+    def synthesize(self, text: str, **style) -> Iterator[np.ndarray]:
+        """Int16 mono audio, one array per sentence. No sound is played (used for tests, timing and wake-word training).
+        `style` may override length_scale (speed), noise_scale and noise_w_scale to vary how the voice sounds."""
+        syn = self._syn
+        if style:
+            from piper import SynthesisConfig
+
+            syn = SynthesisConfig(**{"length_scale": self._length_scale, **style})
+        for chunk in self._voice.synthesize(text, syn):
+            yield np.asarray(chunk.audio_int16_array).reshape(-1)
+
+
+class SarvamTTS(StreamingTTS):
+    """Sarvam's Bulbul voices over the network. Sentences are requested a few at a time in parallel, so the next one is usually
+    ready before the current one finishes playing. Raises (so the next engine can speak) if Sarvam cannot be used."""
+    name = "sarvam"
+
+    def __init__(self, session=None, device: str | int | None = config.SPEAKER_DEVICE, reference: ReferenceTimeline | None = None,
+                 speaker: str = config.SARVAM_SPEAKER, model: str = config.SARVAM_TTS_MODEL, rate: int = config.SARVAM_TTS_RATE,
+                 pace: float = config.SARVAM_TTS_PACE, language: str = config.SARVAM_LANGUAGE, prefetch: int = 3):
+        from .cloud import SarvamSession
+
+        self.session = session or SarvamSession()
+        self.speaker, self.model, self.pace, self.prefetch = speaker, model, pace, prefetch
+        self.language = "en-IN" if language == "unknown" else language     # speech needs a concrete language
+        self.sample_rate = rate
+        self._pool = ThreadPoolExecutor(max_workers=prefetch, thread_name_prefix="tts-cloud")
+        self._init_player(device, reference)
+
+    def fetch(self, sentence: str, emotion: str | None = None) -> np.ndarray:
+        """One sentence -> int16 mono audio at self.sample_rate. No sound is played."""
+        pace_mult, temperature = config.EMOTION_STYLE.get(emotion or "neutral", config.EMOTION_STYLE["neutral"])
+        body = {"text": sentence, "target_language_code": self.language, "speaker": self.speaker, "model": self.model,
+                "speech_sample_rate": self.sample_rate, "pace": round(min(2.0, max(0.5, self.pace * pace_mult)), 2)}
+        if temperature is not None:
+            body["temperature"] = temperature                       # how varied and expressive the delivery is (0..1)
+        data = self.session.post("/text-to-speech", json=body)
+        try:
+            raw = base64.b64decode(data["audios"][0])
+            with wave.open(io.BytesIO(raw)) as w:
+                frames, channels, rate, width = w.readframes(w.getnframes()), w.getnchannels(), w.getframerate(), w.getsampwidth()
+        except (KeyError, IndexError, ValueError, wave.Error, EOFError) as e:
+            raise RuntimeError(f"Sarvam sent audio Orbit could not read ({e})") from e
+        if width != 2:
+            raise RuntimeError(f"Sarvam sent {8 * width}-bit audio; only 16-bit is supported")
+        audio = np.frombuffer(frames, dtype=np.int16).reshape(-1, channels)[:, 0]
+        if rate != self.sample_rate:                                      # the stream was opened at self.sample_rate: match it
+            from scipy.signal import resample_poly
+
+            audio = resample_poly(audio.astype(np.float32), self.sample_rate, rate).astype(np.int16)
+        return np.ascontiguousarray(audio)
+
+    def sentences(self, text: str) -> Iterator[np.ndarray]:
+        parts, emotion = split_sentences(text), self.emotion      # the emotion is fixed for the whole reply
+        todo, pending = iter(parts), deque()
+
+        def refill() -> None:
+            while len(pending) < self.prefetch and (part := next(todo, None)) is not None:
+                pending.append(self._pool.submit(self.fetch, part, emotion))
+
+        refill()
+        while pending:
+            audio = pending.popleft().result()
+            refill()
+            yield audio
+
+
+def split_sentences(text: str) -> list[str]:
+    """Sentence-sized pieces (what Piper does internally), so the first one can be requested and played quickly."""
+    return [p for p in re.split(r"(?<=[.!?।])\s+", text.strip()) if p]
 
 
 class WindowsTTS:
@@ -214,6 +317,17 @@ class FallbackTTS:
         if self.supports_pause:
             self.engines[0].resume()
 
+    def set_emotion(self, emotion: str | None) -> None:
+        for engine in self.engines:
+            if hasattr(engine, "set_emotion"):
+                engine.set_emotion(emotion)
+
+    def set_audio_listener(self, listener) -> None:
+        """Hands every played block to `listener` (engines that cannot report their audio, like the Windows voice, never call it)."""
+        for engine in self.engines:
+            if isinstance(engine, StreamingTTS):
+                engine.on_audio = listener
+
     @property
     def reference(self):
         """The echo-cancellation reference of the engine that will speak first (None for the Windows voice: it cannot report it)."""
@@ -235,10 +349,17 @@ class FallbackTTS:
 
 
 def make_tts(voice: str = config.PIPER_VOICE, device: str | int | None = config.SPEAKER_DEVICE, log=print,
-             reference: ReferenceTimeline | None = None) -> FallbackTTS:
-    """Piper first, then the Windows voice. Whatever cannot load is skipped with a printed reason."""
+             reference: ReferenceTimeline | None = None, provider: str = config.TTS_PROVIDER) -> FallbackTTS:
+    """Sarvam first (when a key is set), then Piper, then the Windows voice. Whatever cannot load is skipped with a printed reason."""
+    from .cloud import sarvam_key
+
+    if provider not in ("auto", "sarvam", "local"):
+        raise ValueError(f"Unknown text-to-speech provider '{provider}'. Use auto, sarvam or local.")
+    builders = [lambda: PiperTTS(voice, device, reference=reference), WindowsTTS]
+    if provider == "sarvam" or (provider == "auto" and sarvam_key()):
+        builders.insert(0, lambda: SarvamTTS(device=device, reference=reference))
     engines = []
-    for build in (lambda: PiperTTS(voice, device, reference=reference), WindowsTTS):
+    for build in builders:
         try:
             engines.append(build())
         except Exception as e:

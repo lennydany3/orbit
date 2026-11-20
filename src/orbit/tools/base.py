@@ -72,6 +72,7 @@ class Tool:
     capability: str = ""                  # same capability on several layers = fallbacks of each other
     idempotent: bool = True               # False = running it twice could do harm (a click), so never auto-retry
     needs_confirm: Callable[[Any], bool] | None = None  # per-call risk check on top of `risk`
+    user_text: str = ""                   # name of a parameter whose words must come from the user's own request (never from a web page)
 
     def __post_init__(self) -> None:
         if self.layer not in LAYER_ORDER:

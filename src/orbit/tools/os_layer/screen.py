@@ -11,7 +11,10 @@ from concurrent.futures import ThreadPoolExecutor
 from ctypes import wintypes
 from dataclasses import dataclass
 
-from . import uia
+import numpy as np
+
+from ... import visual
+from . import mouse, uia
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
@@ -94,12 +97,9 @@ def changed_pixels(before: Shot, after: Shot) -> int:
     display is a handful of pixels, so this is a count, not a share of the whole window."""
     if (before.width, before.height) != (after.width, after.height):
         return 10**6  # the window was resized: certainly changed
-    a, b = before.pixels, after.pixels
-    changed = 0
-    for i in range(0, len(a) - 3, 8):  # every second pixel (4 bytes each)
-        if abs(a[i] - b[i]) + abs(a[i + 1] - b[i + 1]) + abs(a[i + 2] - b[i + 2]) > 48:
-            changed += 1
-    return changed
+    a = np.frombuffer(before.pixels, dtype=np.uint8).reshape(-1, 4)[::2, :3].astype(np.int16)    # every second pixel, B G R
+    b = np.frombuffer(after.pixels, dtype=np.uint8).reshape(-1, 4)[::2, :3].astype(np.int16)
+    return int((np.abs(a - b).sum(axis=1) > 48).sum())
 
 
 async def _recognize(bmp: bytes) -> list[Word]:
@@ -164,11 +164,18 @@ def find_text(words: list[Word], query: str) -> tuple[int, int, str] | None:
     return (best[1], best[2], best[3]) if best else None
 
 
+def find_glyph(words: list[Word], glyphs: tuple[str, ...]) -> tuple[int, int, str] | None:
+    """Where a SYMBOL is, when the OCR engine reads it as a character (x, +, a heart, three dots, a play triangle):
+    (centre x, centre y, the character found), or None. Only small standalone marks count, never a letter inside a word."""
+    wanted = {g.lower() for g in glyphs}
+    hits = [w for w in words if w.text.strip().lower() in wanted and w.height <= 90]
+    if not hits:
+        return None
+    best = min(hits, key=lambda w: (w.y // 60, -(w.x + w.width)))     # the top-most, then right-most (a close mark sits in a corner)
+    return best.x + best.width // 2, best.y + best.height // 2, best.text
+
+
 def click_at(x: int, y: int) -> None:
-    """Click at a screen position, then put the pointer back where the user had it."""
-    here = wintypes.POINT()
-    _user32.GetCursorPos(ctypes.byref(here))
-    _user32.SetCursorPos(x, y)
-    _user32.mouse_event(0x0002, 0, 0, 0, 0)  # left down
-    _user32.mouse_event(0x0004, 0, 0, 0, 0)  # left up
-    _user32.SetCursorPos(here.x, here.y)
+    """Click at a screen position (Orbit's pointer glides there first), then put the real pointer back where the user had it."""
+    visual.click_at(x, y)
+    mouse.click(x, y, restore=True)

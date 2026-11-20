@@ -338,6 +338,7 @@ def test_close_two_things_in_one_sentence(logs):
 def test_a_part_without_a_rule_is_handed_to_the_model_on_its_own(logs):
     """"open spotify and tell me what is playing": the first part is a rule, the second is a small request for the model."""
     agent, done = _chain_agent(logs)
+    agent.friend_mode = False              # (in friend mode "tell me a joke" is a chat, tested in test_friend.py)
     agent.llm = ScriptedLLM(LLMResponse(content="I can look that up once you ask for a specific song."))
     reply = agent.handle("open spotify and tell me a joke")
     assert done == [("open", "Spotify")] and len(agent.llm.calls) >= 1
@@ -673,3 +674,12 @@ def test_a_dropped_number_is_reported_so_it_cannot_be_claimed_as_done(logs):
     Agent(llm, reg, Router(log), Safety(), log).handle("put the music on the echo please")
     tool_message = llm.calls[1][-1]["content"]
     assert "NOT applied: volume=30" in tool_message  # the model is told, so it cannot say "volume set to 30%"
+
+
+def test_the_agent_says_whether_the_last_request_failed(make_agent):
+    agent = make_agent(ScriptedLLM(*[call("nope") for _ in range(10)]), max_failures=3)
+    assert agent.last_failed is False
+    agent.handle("do it")
+    assert agent.last_failed is True
+    agent.handle("echo hi")                                   # a rule that works: the flag does not stay stuck
+    assert agent.last_failed is False

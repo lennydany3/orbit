@@ -39,6 +39,8 @@ class FakeBrave:
         self.on_click = {}  # element -> callable that changes the fake page
         self.hrefs = {}     # element -> the address the link points to
         self.typed = []     # addresses typed into the address bar
+        self.has_focus = True   # does a clicked text box get the keyboard?
+        self.ocr = None         # what OCR finds on the page: (x, y, found, "words" | "symbol", picture) or None
 
     def click(self, control, mouse=False):
         self.clicked.append(control.element)
@@ -66,9 +68,16 @@ def brave(monkeypatch, logs):
     monkeypatch.setattr(mine.uia, "link_target", lambda control: fb.hrefs.get(control.element, ""))
     monkeypatch.setattr(mine.uia, "set_address", fb.set_address)
     monkeypatch.setattr(mine, "SETTLE_S", 0.3)
+    monkeypatch.setattr(mine, "FOCUS_WAIT_S", 0.3)
+    monkeypatch.setattr(mine, "NTH_WAIT_S", 0.3)
     monkeypatch.setattr(mine, "RESULTS_WAIT_S", 0.5)
     monkeypatch.setattr(mine, "PAGE_WAIT_S", 0.3)
     monkeypatch.setattr(mine.time, "sleep", lambda s: None)
+    monkeypatch.setattr(mine.windows, "focus", lambda h: True)
+    monkeypatch.setattr(mine.uia, "page_rect", lambda hwnd: (0, 100, 1000, 800))
+    monkeypatch.setattr(mine.uia, "_has_focus", lambda element: fb.has_focus)
+    monkeypatch.setattr(mine.uia, "focused_field", lambda: None)
+    monkeypatch.setattr(mine, "_ocr_spot", lambda win, text: fb.ocr)          # what the page's pixels say (None = nothing found)
     reg = Registry()
     register_browser_tools(reg)
     router = Router(lambda k, m: logs.append((k, m)))
@@ -336,3 +345,221 @@ def test_switch_to_a_tab_that_is_not_open(brave, tabs):
 ])
 def test_the_address_bar_must_show_the_address_asked_for(shown, wanted, same):
     assert mine.same_address(shown, wanted) is same
+
+
+# ---------- clicking a text box, a picture, or the Nth result ----------
+def test_a_text_box_is_found_by_its_name_and_given_the_cursor_not_pressed(brave):
+    brave.controls = [Control("Search", "button", False, "el-button"), Control("Search", "combo box", False, "el-box")]
+    r = brave.run("browser_click", ClickParams(text="search", kind="field"))
+    assert r.ok and r.verified and brave.clicked == ["el-box"] and "cursor in the 'Search' combo box" in r.summary
+
+
+def test_a_text_box_that_did_not_get_the_cursor_is_a_failure(brave):
+    brave.controls = [Control("Search", "combo box", False, "el-box")]
+    brave.has_focus = False
+    r = brave.run("browser_click", ClickParams(text="search", kind="field"))
+    assert not r.ok and "did not get the cursor" in r.error
+
+
+def test_asking_for_a_box_never_presses_a_button_that_has_the_same_name(brave):
+    brave.controls = [Control("Search", "button", False, "el-button")]
+    r = brave.run("browser_click", ClickParams(text="search", kind="field"))
+    assert not r.ok and r.not_found and "no text box" in r.error and brave.clicked == []
+
+
+def test_the_search_icon_presses_the_search_button_not_the_box(brave):
+    brave.controls = [Control("Search", "combo box", False, "el-box"), Control("Search", "button", False, "el-button")]
+
+    def go():
+        brave.win, brave.url = Window(77, "Results - Brave", "brave"), "example.com/search?q=1"
+    brave.on_click["el-button"] = go
+    r = brave.run("browser_click", ClickParams(text="search icon"))
+    assert r.ok and r.verified and brave.clicked == ["el-button"]
+
+
+def test_a_picture_is_pressed_under_the_name_the_page_gives_it(brave):
+    brave.controls = [Control("Home", "link", False, "el-home"), Control("Clear", "button", False, "el-clear")]
+    brave.on_click["el-clear"] = lambda: setattr(brave, "controls", [Control("Home", "link", False, "el-home")])
+    r = brave.run("browser_click", ClickParams(text="x button"))
+    assert r.ok and brave.clicked == ["el-clear"] and "Clear" in r.summary
+
+
+def _results(brave):
+    brave.controls = [
+        Control("Skip to main content", "link", False, "el-skip"), Control("Images", "link", False, "el-images"),
+        Control("Rune: Native UI framework - anomalyco", "link", False, "el-1"),
+        Control("Rune - The easiest way to build with AI agents", "link", False, "el-2"),
+        Control("Rune - The easiest way to build with AI agents", "link", False, "el-2-again"),      # the same address twice
+        Control("Rune is now open source | Hacker News", "link", False, "el-3"),
+        Control("Settings and privacy", "link", False, "el-settings"),
+    ]
+    brave.hrefs = {"el-skip": "#main", "el-images": "https://www.google.com/imghp", "el-1": "https://github.com/anomalyco/rune",
+                   "el-2": "https://rune.gl/", "el-2-again": "https://rune.gl/", "el-3": "https://news.ycombinator.com/item?id=1",
+                   "el-settings": "https://www.google.com/preferences"}
+    for name in ("el-1", "el-2", "el-3"):
+        brave.on_click[name] = lambda n=name: setattr(brave, "url", f"site.example/{n}")
+
+
+def test_the_result_links_are_the_pages_hits_not_its_menus_or_repeats(brave):
+    _results(brave)
+    assert [c.name[:12] for c in mine.result_links(brave.controls)] == ["Rune: Native", "Rune - The e", "Rune is now "]
+
+
+@pytest.mark.parametrize("n, element", [(1, "el-1"), (2, "el-2"), (3, "el-3"), (-1, "el-3")])
+def test_the_nth_result_is_the_nth_hit_on_the_page(brave, n, element):
+    _results(brave)
+    r = brave.run("browser_click", ClickParams(nth=n))
+    assert r.ok and r.verified and brave.clicked == [element]
+
+
+def test_a_result_that_does_not_exist_says_how_many_there_are(brave):
+    _results(brave)
+    r = brave.run("browser_click", ClickParams(nth=9))
+    assert not r.ok and "only 3 results" in r.error and brave.clicked == []
+
+
+def test_a_page_with_no_results_says_so(brave):
+    brave.controls = [Control("Home", "link", False, "el-home")]
+    r = brave.run("browser_click", ClickParams(nth=1))
+    assert not r.ok and "any results" in r.error
+
+
+def test_on_youtube_the_nth_result_is_the_nth_video(brave):
+    brave.url = "youtube.com/results?search_query=lofi"
+    brave.controls = [Control("Home", "link", False, "el-home"), Control("Lofi beats 3 hours, 10 million views, Lofi Girl", "link", False, "el-v1"),
+                      Control("Shorts", "link", False, "el-shorts"), Control("Chill mix 2 hours, 1 million views", "link", False, "el-v2")]
+    brave.on_click["el-v2"] = lambda: setattr(brave, "url", "youtube.com/watch?v=2")
+    r = brave.run("browser_click", ClickParams(nth=2))
+    assert r.ok and r.verified and brave.clicked == ["el-v2"]
+
+
+def test_the_result_you_asked_for_is_not_pressed_if_it_looks_risky(brave):
+    brave.controls = [Control("Delete your account permanently", "link", False, "el-del")]
+    brave.hrefs = {"el-del": "https://example.com/delete"}
+    r = brave.run("browser_click", ClickParams(nth=1))
+    assert not r.ok and "looks risky" in r.error and brave.clicked == []
+
+
+# ---------- when the page names nothing, the pixels are read (OCR) ----------
+def _seen(found, via="words"):
+    from orbit.tools.os_layer.screen import Shot
+    return (640, 420, found, via, Shot(0, 100, 4, 4, bytes(64)))
+
+
+@pytest.fixture
+def drawn(brave, monkeypatch):
+    brave.controls = []
+    clicks = []
+    monkeypatch.setattr(mine.screen, "click_at", lambda x, y: clicks.append((x, y)))
+    monkeypatch.setattr(mine.screen, "capture", lambda l, t, w, h: _seen("x")[4])
+    monkeypatch.setattr(mine.screen, "changed_pixels", lambda a, b: 500)
+    brave.drawn_clicks = clicks
+    return brave
+
+
+def test_text_that_is_only_drawn_on_the_page_is_clicked_where_the_ocr_found_it(drawn):
+    drawn.ocr = _seen("Watch trailer")
+    r = drawn.run("browser_click", ClickParams(text="watch trailer"))
+    assert r.ok and r.verified and drawn.drawn_clicks == [(640, 420)] and "words 'Watch trailer'" in r.summary
+
+
+def test_a_symbol_the_ocr_reads_as_a_character_is_clicked_too(drawn):
+    drawn.ocr = _seen("×", via="symbol")
+    r = drawn.run("browser_click", ClickParams(text="x icon"))
+    assert r.ok and drawn.drawn_clicks == [(640, 420)] and "the symbol" in r.summary
+
+
+def test_an_ocr_click_with_no_visible_effect_is_a_failure(drawn, monkeypatch):
+    drawn.ocr = _seen("Watch trailer")
+    monkeypatch.setattr(mine.screen, "changed_pixels", lambda a, b: 0)
+    r = drawn.run("browser_click", ClickParams(text="watch trailer"))
+    assert not r.ok and "looks the same" in r.error
+
+
+def test_risky_words_found_by_ocr_are_not_clicked_unless_you_named_them(drawn):
+    drawn.ocr = _seen("Delete everything")
+    r = drawn.run("browser_click", ClickParams(text="everything"))
+    assert not r.ok and "look risky" in r.error and drawn.drawn_clicks == []
+
+
+def test_nothing_on_the_page_and_nothing_in_the_pixels_lists_what_is_there(brave):
+    r = brave.run("browser_click", ClickParams(text="purple monkey"))
+    assert not r.ok and r.not_found and "Sign in" in r.error
+
+
+def test_a_text_box_is_never_looked_for_in_the_pixels(drawn):
+    drawn.ocr = _seen("Search")
+    r = drawn.run("browser_click", ClickParams(text="search", kind="field"))
+    assert not r.ok and drawn.drawn_clicks == []
+
+
+# ---------- searching Google ----------
+@pytest.fixture
+def google(brave, monkeypatch):
+    import orbit.tools.browser_layer as layer
+    from orbit.tools.browser_layer import real
+    opened = []
+    monkeypatch.setattr(layer, "find_brave", lambda: "brave.exe")
+    monkeypatch.setattr(real, "profile_folder", lambda name: "Default")
+    monkeypatch.setattr(real, "brave_titles", lambda: {"Old page - Brave"})
+    monkeypatch.setattr(real, "brave_in_front", lambda wait_s=8.0: brave.win)
+    monkeypatch.setattr(layer, "SEARCH_WAIT_S", 0.3)
+    monkeypatch.setattr(layer.time, "sleep", lambda s: None)
+    brave.opened = opened
+    brave.title_after_search = "rune open source project - Google Search - Brave"
+
+    def open_link(url, exe, folder):
+        opened.append(url)
+        brave.win = Window(77, brave.title_after_search, "brave")
+    monkeypatch.setattr(real, "open_link", open_link)
+    return brave
+
+
+def test_a_search_opens_the_google_results_and_is_checked_against_the_new_page(google):
+    from orbit.tools.browser_layer import SearchParams
+    r = google.run("browser_search", SearchParams(query="rune open source project"))
+    assert r.ok and r.verified and google.opened == ["https://www.google.com/search?q=rune+open+source+project"]
+
+
+def test_google_asking_for_consent_is_reported_instead_of_claiming_results(google):
+    from orbit.tools.browser_layer import SearchParams
+    google.title_after_search = "Before you continue to Google - Brave"
+    r = google.run("browser_search", SearchParams(query="cats"))
+    assert not r.ok and "consent or a robot check" in r.error
+
+
+def test_a_page_that_is_not_the_results_is_not_accepted(google):
+    from orbit.tools.browser_layer import SearchParams
+    google.title_after_search = "Some other site - Brave"
+    r = google.run("browser_search", SearchParams(query="rune open source project"))
+    assert not r.ok and "not the Google results" in r.error
+
+
+# ---------- a results page that is still loading ----------
+def test_on_a_google_results_page_googles_own_links_are_never_taken_for_results(brave):
+    """Half a second after Enter only the header links exist: "click the first result" must not click "Go to Google Home"."""
+    brave.url = "google.com/search?q=tamil+news+live"
+    brave.controls = [Control("Go to Google Home", "link", False, "el-home")]
+    brave.hrefs = {"el-home": "https://www.google.com/webhp?hl=en"}
+    r = brave.run("browser_click", ClickParams(nth=1))
+    assert not r.ok and "any results" in r.error and brave.clicked == []
+
+
+def test_it_keeps_looking_while_the_results_arrive(brave, monkeypatch):
+    brave.url = "google.com/search?q=cats"
+    brave.hrefs = {"el-home": "https://www.google.com/webhp", "el-hit": "https://cats.example/"}
+    header = [Control("Go to Google Home", "link", False, "el-home")]
+    loaded = header + [Control("All about cats | Cats Example", "link", False, "el-hit")]
+    looks = iter([header, header])                                   # the first two looks see only the header, then the results appear
+    monkeypatch.setattr(mine.uia, "controls", lambda hwnd, limit=600: next(looks, loaded))
+    brave.on_click["el-hit"] = lambda: setattr(brave, "url", "cats.example/")
+    r = brave.run("browser_click", ClickParams(nth=1))
+    assert r.ok and r.verified and brave.clicked == ["el-hit"]
+
+
+def test_a_site_whose_links_are_all_its_own_still_has_a_first_link(brave):
+    brave.url = "github.com/anomalyco"
+    brave.controls = [Control("anomalyco/rune: a native UI framework", "link", False, "el-repo")]
+    brave.hrefs = {"el-repo": "https://github.com/anomalyco/rune"}
+    brave.on_click["el-repo"] = lambda: setattr(brave, "url", "github.com/anomalyco/rune")
+    assert brave.run("browser_click", ClickParams(nth=1)).ok

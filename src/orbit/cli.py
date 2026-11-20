@@ -3,10 +3,12 @@ import argparse
 import sys
 
 from . import config
+from .agent.custom import CustomCommands
 from .agent.loop import Agent
 from .agent.router import Router
 from .agent.safety import Safety
-from .llm.ollama_llm import OllamaLLM
+from .llm.base import LLMError
+from .llm.factory import make_llm
 from .logging_setup import ActionLog, setup_logging
 from .tools.api_layer import register_api_tools, spotify_auth
 from .tools.base import Registry
@@ -49,7 +51,26 @@ def spotify_status(registry: Registry) -> str:
     return f"Spotify: OFF ({spotify_auth.CLIENT_ID_ENV} is not set), so Spotify requests will not work."
 
 
-def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: bool = False) -> Agent:
+def start_link(port: int):
+    """Opens the link the sphere window connects to. None (with the reason printed) if it cannot start."""
+    try:
+        from .ipc.link import Link
+
+        link = Link(port=port)
+        link.start()
+    except ImportError:
+        print('The face link needs the "websockets" package: pip install -e ".[ipc]"')
+        return None
+    except OSError as e:
+        print(f"Cannot open the face link on port {port} ({e}). Is Orbit already running? Use --ipc-port to pick another.")
+        return None
+    print(f"  Face link: {link.url}")
+    print("  (only this PC can connect, and only with that token: the sphere window is started with it)")
+    return link
+
+
+def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: bool = False, llm_provider: str | None = None,
+                friend: bool = True) -> Agent:
     logger = setup_logging()
     log = ActionLog(logger=logger)
     registry = Registry()
@@ -58,8 +79,14 @@ def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: boo
     register_browser_tools(registry)
     if fake_tools:
         register_fake_tools(registry)  # test tools from Step 1; off by default so the model isn't tempted to use them
-    llm = OllamaLLM(model=model) if use_llm else None
-    return Agent(llm, registry, Router(log), Safety(), log)
+    llm, description = make_llm(llm_provider, ollama_model=model) if use_llm else (None, "rules only")
+    chat_llm = llm.with_temperature(config.CHAT_TEMPERATURE) if hasattr(llm, "with_temperature") else llm
+    agent = Agent(llm, registry, Router(log), Safety(), log, chat_llm=chat_llm, friend_mode=friend and config.FRIEND_MODE,
+                  custom=CustomCommands())
+    agent.llm_description = description   # shown in the start-up banner
+    for problem in agent.custom.problems if agent.custom else []:
+        log("settings", problem)            # a command or key in settings.json that Orbit had to leave out
+    return agent
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -80,25 +107,44 @@ def _main(argv: list[str] | None) -> int:
                         help=f"browser Orbit opens for websites (default {config.BROWSER})")
     parser.add_argument("--browser-mode", choices=["mine", "orbit"], default=config.BROWSER_MODE,
                         help="mine = open sites in your own Brave profile; orbit = Orbit's separate automated window")
-    parser.add_argument("--model", default=config.MODEL, help=f"Ollama model (default {config.MODEL})")
+    parser.add_argument("--model", default=config.MODEL, help=f"Ollama model, when the local model is used (default {config.MODEL})")
+    parser.add_argument("--llm", choices=["auto", "groq", "ollama"], default=None,
+                        help="language model: groq = cloud (needs GROQ_API_KEY), ollama = local, auto = groq if a key is set (default)")
+    parser.add_argument("--no-friend", action="store_true", help="PC commands only: no friendly chat (same as ORBIT_FRIEND=0)")
+    parser.add_argument("--no-visuals", action="store_true",
+                        help="no on-screen animations (the pointer gliding to what Orbit clicks, the working pill); same as ORBIT_VISUALS=0")
     parser.add_argument("--voice", action="store_true", help="talk to Orbit: hold Right Ctrl or say the wake word (all local)")
     parser.add_argument("--mic", default=None, help="with --voice: microphone index or part of its name (default: ORBIT_MIC / Windows default)")
     parser.add_argument("--no-wake", action="store_true", help="with --voice: hold-to-talk only, no wake word")
     parser.add_argument("--no-follow-up", action="store_true", help="with --voice: do not listen for a follow-up after a reply")
+    parser.add_argument("--ipc", action="store_true",
+                        help="with --voice: let the sphere window connect (a WebSocket on this PC only, protected by a token)")
+    parser.add_argument("--ipc-port", type=int, default=config.IPC_PORT, help=f"with --ipc: the port (default {config.IPC_PORT})")
+    parser.add_argument("--exit-with-parent", action="store_true",
+                        help="stop (like Ctrl+C) when standard input ends: set by the sphere window, which keeps it open while it runs")
     args = parser.parse_args(argv)
+    if args.ipc and not args.voice:
+        parser.error("--ipc needs --voice: the sphere shows a voice turn")
 
     if len(args.request) == 2 and args.request[0].lower() == "auth":
         return run_auth(args.request[1].lower())
 
+    if args.no_visuals:
+        config.VISUALS = False
     browser_session.use(args.browser)
     config.BROWSER_MODE = args.browser_mode
-    agent = build_agent(use_llm=not args.no_llm, model=args.model, fake_tools=args.fake_tools)
+    try:
+        agent = build_agent(use_llm=not args.no_llm, model=args.model, fake_tools=args.fake_tools, llm_provider=args.llm,
+                            friend=not args.no_friend)
+    except LLMError as e:
+        print(f"Cannot start the language model: {e}")
+        return 2
 
     if args.request:
         print(agent.handle(" ".join(args.request)))
         return 0
 
-    mode = "rules only" if args.no_llm else f"model {args.model}"
+    mode = "rules only" if args.no_llm else f"model {agent.llm_description}"
     print(f"{config.APP_NAME} ready ({mode}). Type 'help' for hints, 'quit' to exit. Ctrl+C stops a running request.")
     print("  " + spotify_status(agent.registry))
     if args.voice:
@@ -106,9 +152,24 @@ def _main(argv: list[str] | None) -> int:
         from .voice import config as voice_config
         from .voice.loop import run_voice
 
-        result = run_voice(agent, device=args.mic or voice_config.MIC_DEVICE, wake_enabled=not args.no_wake,
-                           follow_up=False if args.no_follow_up else None)
-        if result in ("quit", "timeout"):
+        link = start_link(args.ipc_port) if args.ipc else None
+        if args.ipc and link is None:
+            return 2
+        if args.exit_with_parent:
+            import _thread
+
+            from .ipc.lifetime import watch_parent
+
+            watch_parent(sys.stdin.fileno(), _thread.interrupt_main)
+        try:
+            result = run_voice(agent, device=args.mic or voice_config.MIC_DEVICE, wake_enabled=not args.no_wake,
+                               follow_up=False if args.no_follow_up else None, ui=link.bridge if link else None)
+        except KeyboardInterrupt:                  # the window went away while voice was still loading
+            result = "quit"
+        finally:
+            if link:
+                link.stop()
+        if result in ("quit", "timeout") or args.exit_with_parent:
             return 0
         print("Voice is off. Text mode: type a request ('help' for hints, 'quit' to exit).")
     while True:

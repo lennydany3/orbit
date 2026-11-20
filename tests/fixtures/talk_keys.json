@@ -1,0 +1,5 @@
+{
+  "valid": ["ctrl_r", "ctrl_l", "alt_r", "alt_l", "alt_gr", "shift_r", "shift_l", "caps_lock", "scroll_lock", "num_lock", "pause",
+            "insert", "home", "end", "page_up", "page_down", "menu", "print_screen", "tab", "space", "f1", "f9", "f12", "f24", "z", "5", "é"],
+  "invalid": ["", "banana", "ctrl", "ctrl+r", "f0", "f25", "f01", "ab", " ", "ctrl_right"]
+}

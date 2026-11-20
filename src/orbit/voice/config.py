@@ -30,6 +30,19 @@ PIPER_DIR = MODELS_DIR / "piper"                 # <voice>.onnx + <voice>.onnx.j
 PIPER_VOICE = "en_US-hfc_female-medium"          # a female voice, chosen in V3 (amy and lessac are also downloaded)
 PIPER_LENGTH_SCALE = 1.0                         # below 1.0 = faster speech, above = slower
 
+# --- Cloud speech (Sarvam AI). "auto" = use Sarvam when SARVAM_API_KEY is set, with the local engines above as the fallback ---
+STT_PROVIDER = os.environ.get("ORBIT_STT", "auto").lower()       # auto | sarvam | local
+TTS_PROVIDER = os.environ.get("ORBIT_TTS", "auto").lower()       # auto | sarvam | local
+SARVAM_BASE_URL = "https://api.sarvam.ai"
+SARVAM_TIMEOUT_S = 10.0                          # a slow or missing network must not freeze a voice turn: give up and use the local engine
+SARVAM_COOLDOWN_S = 60.0                         # after a failure, use the local engine for this long before trying the cloud again
+SARVAM_STT_MODEL = os.environ.get("ORBIT_SARVAM_STT_MODEL", "saarika:v2.5")
+SARVAM_LANGUAGE = os.environ.get("ORBIT_LANGUAGE", "en-IN")      # what you speak: en-IN, hi-IN, ta-IN ... or "unknown" to auto-detect
+SARVAM_TTS_MODEL = os.environ.get("ORBIT_SARVAM_TTS_MODEL", "bulbul:v3")
+SARVAM_SPEAKER = os.environ.get("ORBIT_SARVAM_SPEAKER", "ritu")   # the voice Orbit speaks with (bulbul:v3: ritu, priya, neha, kavya, shubh, aditya, rahul, ...)
+SARVAM_TTS_RATE = 22_050                         # Hz of the audio Sarvam returns (it is resampled to 16 kHz for echo cancellation)
+SARVAM_TTS_PACE = 1.0                            # 1.0 = normal speed
+
 # --- Wake word (openWakeWord, CPU, ONNX) and push-to-talk ---
 WAKEWORD_DIR = MODELS_DIR / "openwakeword"
 WAKEWORD_MODEL = "hey_orbit"                     # trained here: python -m orbit.voice.run train-wake  (pre-trained stand-ins: hey_mycroft, alexa)
@@ -79,6 +92,24 @@ FOLLOW_UP_QUESTION_S = 6.0                       # when Orbit asks YOU a questio
 # --- Interrupting Orbit by voice ---
 BARGE_IN = True                                  # say the wake word while Orbit is talking: it stops and listens
 AEC = True                                       # echo cancellation for that (only engages when it measurably helps; headphones need none)
+
+# --- Friend mode: talking with Orbit (see agent/friend.py) ---
+CHAT_SPOKEN_MAX_SENTENCES = 5                    # a chat reply is spoken almost whole (command replies stay at 2 sentences)
+CHAT_SPOKEN_MAX_CHARS = 520
+FOLLOW_UP_CHAT_S = 8.0                           # after a chat reply, the conversation stays open this long without the wake word
+# How each emotion is spoken: (pace multiplier, expressiveness 0..1). Sarvam's bulbul:v3 exposes exactly these two knobs
+# (pace and temperature); the rest of the feeling comes from the words themselves. Piper only uses the pace.
+EMOTION_STYLE = {
+    "neutral": (1.00, None),                     # None = Sarvam's default
+    "happy": (1.05, 0.80),
+    "excited": (1.15, 0.95),
+    "proud": (1.00, 0.80),
+    "caring": (0.92, 0.65),
+    "sad": (0.88, 0.60),
+    "teasing": (1.06, 0.95),
+    "calm": (0.95, 0.55),
+    "serious": (0.95, 0.40),
+}
 
 # --- Not acting on background sound ---
 FOLLOW_UP_WHILE_MEDIA = False                    # False: while music / a video plays, the no-wake follow-up stays closed (lyrics are not commands)
