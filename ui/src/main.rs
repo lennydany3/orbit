@@ -1,24 +1,40 @@
 //! Orbit's face. A particle sphere that shows what Orbit is doing, drawn on the GPU with Rune.
 //!
-//! `cargo run --release` opens the design-review window: the sphere, a panel to put it in each state, a scripted demo turn
-//! and a simulated voice. To show the real Orbit, connect it (the panel's Backend section) or start with:
+//! It lives in the tray. When Orbit is doing something a small orb floats up over your work (bottom right, above the
+//! taskbar, never taking focus, clicks passing through) and goes away when things are quiet. Ctrl+Alt+O, or a click on the
+//! tray icon, pins it on screen. The tray menu opens the full window: the design-review panel, with every state, a scripted
+//! demo, a simulated voice and the connection to Orbit.
 //!
-//!   --spawn          start Orbit (microphone, wake word, model) and connect to it
-//!   --spawn-demo     start a scripted turn with a yes/no question, no microphone needed
-//!   --url ws://127.0.0.1:PORT/?token=...   connect to an Orbit that is already running (`python -m orbit --voice --ipc`)
+//!   (no options)     open the review window, with the tray and the orb ready
+//!   --spawn          start Orbit (microphone, wake word, model) and show it; the window stays in the tray
+//!   --spawn-demo     the same with a scripted turn and a yes/no question, no microphone needed
+//!   --url ws://127.0.0.1:PORT/?token=...   show an Orbit that is already running (`python -m orbit --voice --ipc`)
+//!   --window         open the review window as well as the tray
 //!
 //! Headless, for checking the look without a window:
 //! `cargo run -- --snap out.png --size 1280x800 --scene thinking` (see the scenes below).
 
+use std::time::Duration;
+
 use orbit_ui::app::App;
+use orbit_ui::clock;
+use orbit_ui::face::{self, Face};
 use orbit_ui::link::{Event, Status};
 use orbit_ui::orbit::{OrbState, SphereCompositor};
+use orbit_ui::shell::{self, Shell};
 use orbit_ui::spawn::Kind;
 use orbit_ui::view;
-use rune::{AppSpec, Key, KeyEvent, Waker};
+use rune::{Align, AppSpec, Key, KeyEvent, OverlayInput, OverlayOptions, OverlaySpec, ScreenEdge, Waker, WindowSpec};
+
+fn debug() -> bool {
+    std::env::var_os("ORBIT_UI_DEBUG").is_some()
+}
 
 /// Called once at start with a waker the link thread uses when Orbit sends something, and the command line to act on.
 fn setup(s: &mut App, waker: Waker) {
+    if debug() {
+        eprintln!("[hub] setup ran at {:.2}s", clock::now(0.0));
+    }
     s.set_waker(waker);
     if rune::is_headless() {
         return;                                    // a snapshot starts nothing and connects to nothing
@@ -28,6 +44,7 @@ fn setup(s: &mut App, waker: Waker) {
         match arg.as_str() {
             "--spawn" => s.spawn(Kind::Orbit, 0.0),
             "--spawn-demo" => s.spawn(Kind::Demo, 0.0),
+            "--window" => {}
             "--url" => match args.next() {
                 Some(url) => {
                     s.live.url.replace_text(url.clone());
@@ -40,11 +57,16 @@ fn setup(s: &mut App, waker: Waker) {
     }
 }
 
-/// Called at the start of every frame with the app clock: the link, timers, the demo and the level.
+/// Called at the start of every frame with the app clock: the link, timers, the demo, the level and the orb.
 fn poll(s: &mut App, t: f64, tx: &mut rune::Tx) -> bool {
-    let changed = s.advance(t);
-    if let Some(due) = s.next_due() {
-        tx.wake_at(due);
+    let now = clock::now(t);
+    let changed = s.advance(now);
+    s.sync_shell(now);
+    if debug() && changed {
+        eprintln!("[hub] {now:6.2}s state={:?} pinned={} caption={:?} ask={}", s.orbit.state, s.presence.pinned(), s.caption().map(|c| c.1), s.live.confirm.is_some());
+    }
+    if let Some(due) = s.next_wake(now) {
+        tx.wake_after(Duration::from_secs_f64((due - now).max(0.0)));
     }
     changed
 }
@@ -60,7 +82,7 @@ fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut rune::Tx) -> bool {
     let Key::Text(text) = &ev.key else { return false };
     match OrbState::from_key(text) {
         Some(state) => {
-            s.pick(state, tx.clock());
+            s.pick(state, clock::now(tx.clock()));
             true
         }
         None => false,
@@ -76,8 +98,8 @@ fn live(s: &mut App, state: &str, messages: &[&str]) {
     }
 }
 
-fn main() {
-    let spec = AppSpec::<App> {
+fn spec() -> AppSpec<App> {
+    AppSpec::<App> {
         min_size: Some((900.0, 560.0)),
         families: ("Inter", "Cascadia Mono, Consolas, Inter"),       // the design's monospace, for addresses and messages
         setup: Some(setup),
@@ -112,6 +134,44 @@ fn main() {
             ("live-refused", |s| s.connect("ws://example.com:8765/?token=x", 0.0)),
         ],
         ..AppSpec::new("Orbit", (1280.0, 800.0), App::default, view::view)
-    };
-    rune::run_with(spec, SphereCompositor::default());
+    }
+}
+
+/// The floating orb: bottom right, above the taskbar, over every app, never focused. Clicks pass through everywhere except
+/// the buttons of a question. It gives its GPU memory back when it has been hidden a while.
+fn orb_overlay() -> rune::ConfiguredOverlay<Face> {
+    let mut spec = OverlaySpec::new("orbit-orb", (face::WIDTH, face::HEIGHT), face::view);
+    spec.edge = ScreenEdge::Bottom;
+    spec.margin = 14.0;
+    spec.align = Align::End;
+    spec.inset = 20.0;
+    spec.options(OverlayOptions { input: OverlayInput::Regions, ..Default::default() })
+        .compositor(SphereCompositor::default())
+        .release_gpu_after(Duration::from_secs(30))
+}
+
+fn main() {
+    clock::start();
+    if rune::is_headless() {
+        rune::run_with(spec(), SphereCompositor::default());
+        return;
+    }
+
+    // With no instructions there is nothing else to look at, so the window opens; with --spawn and friends it stays in the tray.
+    let args = rune::extra_args();
+    let starts_orbit = args.iter().any(|a| matches!(a.as_str(), "--spawn" | "--spawn-demo" | "--url"));
+    let open_window = args.iter().any(|a| a == "--window") || !starts_orbit;
+
+    let mut app = rune::App::new(spec()).windowless().compositor(SphereCompositor::default());
+    let hub = app.handle();
+    let orb = app.overlay(orb_overlay(), Face::new(Some(hub.clone())));
+    let tray = shell::make_tray(hub.clone());
+    let hub_in_state = hub.clone();
+    let app = app
+        .global_shortcut("ctrl+alt+o", |s, tx| s.toggle_pin(clock::now(tx.clock())))
+        .init(move || App::default().with_shell(Shell::new(orb, hub_in_state, tray)));
+    if open_window {
+        hub.open();
+    }
+    rune::run_windows(move |_displays| vec![rune::AnyWindowSpec::from(WindowSpec::from_app("hub", app))]);
 }

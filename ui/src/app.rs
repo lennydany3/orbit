@@ -9,10 +9,13 @@ use std::sync::Arc;
 
 use rune::{TextEdit, Waker};
 
+use crate::face::Face;
 use crate::link::message::{self, Incoming};
 use crate::link::{Event, Link, Status};
 use crate::orbit::{HasOrbit, OrbState, Orbit};
 use crate::pacer::Pacer;
+use crate::presence::Presence;
+use crate::shell::Shell;
 use crate::spawn::{Kind, Spawned};
 
 pub struct DemoStep {
@@ -147,11 +150,15 @@ pub struct App {
     pub shown_level: f32,
     last_push: f64,
     pub live: Live,
+    /// When the floating orb is on screen.
+    pub presence: Presence,
+    /// The orb's window and the tray icon (empty until the app has made them).
+    pub shell: Shell,
 }
 
 impl Default for App {
     fn default() -> Self {
-        App { orbit: Orbit::new(), manual: 0.35, voice: false, demo: None, shown_level: 0.35, last_push: -1.0, live: Live::default() }
+        App { orbit: Orbit::new(), manual: 0.35, voice: false, demo: None, shown_level: 0.35, last_push: -1.0, live: Live::default(), presence: Presence::new(), shell: Shell::default() }
     }
 }
 
@@ -162,6 +169,12 @@ impl HasOrbit for App {
 }
 
 impl App {
+    /// The app with the orb's window and the tray it will talk to.
+    pub fn with_shell(mut self, shell: Shell) -> App {
+        self.shell = shell;
+        self
+    }
+
     // ---- by hand ----------------------------------------------------------------------------------------------------
 
     /// Picking a state by hand stops the demo.
@@ -381,6 +394,36 @@ impl App {
             ask.sent = None;
         }
         sent
+    }
+
+    // ---- the floating orb --------------------------------------------------------------------------------------------
+
+    /// Is Orbit doing, or showing, anything the orb should be there for?
+    pub fn active(&self) -> bool {
+        !matches!(self.orbit.state, OrbState::Idle | OrbState::Muted) || self.live.caption.is_some() || self.live.confirm.is_some()
+    }
+
+    /// What the orb's window shows now.
+    pub fn face(&self) -> Face {
+        Face { orbit: self.orbit.clone(), caption: self.caption(), ask: self.live.confirm.clone(), hub: self.shell.hub.clone() }
+    }
+
+    /// Brings the orb's window up to date: its content, whether it is showing, and its size.
+    pub fn sync_shell(&mut self, t: f64) {
+        let visible = self.presence.visible(self.active(), t);
+        let face = self.face();
+        self.shell.apply(face, visible);
+    }
+
+    /// Pins the orb on screen, or lets it go again (the hotkey and the tray icon).
+    pub fn toggle_pin(&mut self, t: f64) {
+        self.presence.toggle_pin();
+        self.sync_shell(t);
+    }
+
+    /// When the app next needs to wake by itself: something timed, or the orb due to leave.
+    pub fn next_wake(&self, now: f64) -> Option<f64> {
+        [self.next_due(), self.presence.leaves_at(now)].into_iter().flatten().reduce(f64::min)
     }
 
     // ---- time -------------------------------------------------------------------------------------------------------

@@ -20,22 +20,22 @@ pub const OVERLAY: SphereConfig = SphereConfig { count: 1400, size: 1.05, scale:
 
 const PANEL_W: f32 = 320.0;
 
-fn hex(s: &str) -> Color {
+pub(crate) fn hex(s: &str) -> Color {
     rune::color::hex(s).unwrap_or(Color::WHITE)
 }
 
 /// The design's few colours.
-struct Ink {
-    fg: Color,
-    soft: Color,
-    muted: Color,
-    panel: Color,
-    hair: Color,
-    hair_strong: Color,
+pub(crate) struct Ink {
+    pub fg: Color,
+    pub soft: Color,
+    pub muted: Color,
+    pub panel: Color,
+    pub hair: Color,
+    pub hair_strong: Color,
 }
 
 impl Ink {
-    fn new() -> Ink {
+    pub(crate) fn new() -> Ink {
         Ink {
             fg: hex("#F2F3F5"),
             soft: hex("#B4B8BF"),
@@ -202,7 +202,7 @@ fn state_button(st: OrbState, on: bool, ink: &Ink) -> El {
         .border(1.0, if on { Color::WHITE.alpha(0.26) } else { ink.hair })
         .hover(Color::WHITE.alpha(0.04))
         .motion(motion::SNAPPY)
-        .on_press_tx(move |s: &mut App, tx| s.pick(st, tx.clock()))
+        .on_press_tx(move |s: &mut App, tx| s.pick(st, crate::clock::now(tx.clock())))
         .child(text(st.label()).font(t(13.0, 400.0)).color(if on { ink.fg } else { ink.soft }).a11y_hidden())
         .child(text(st.key()).font(t(11.0, 400.0).features("'tnum' 1")).color(ink.muted).a11y_hidden())
 }
@@ -339,7 +339,7 @@ fn backend_section(s: &App, ink: &Ink) -> El {
         .min_w(0.0)
         .color(ink.fg)
         .on_edit(|s: &mut App| &mut s.live.url)
-        .on_submit(|s: &mut App, tx| toggle_link(s, tx.clock()));
+        .on_submit(|s: &mut App, tx| toggle_link(s, crate::clock::now(tx.clock())));
     let url_box = row()
         .key("url-box")
         .grow(1.0)
@@ -352,7 +352,7 @@ fn backend_section(s: &App, ink: &Ink) -> El {
         .border(1.0, ink.hair)
         .child(field);
     let connect = small_button("connect", if linked { "Disconnect" } else { "Connect" }, ink)
-        .on_press_tx(|s: &mut App, tx| toggle_link(s, tx.clock()));
+        .on_press_tx(|s: &mut App, tx| toggle_link(s, crate::clock::now(tx.clock())));
 
     let shown = live
         .notice
@@ -377,10 +377,10 @@ fn backend_section(s: &App, ink: &Ink) -> El {
                 .gap(6.0)
                 .child(
                     small_button("start-orbit", "Start Orbit", ink)
-                        .on_press_tx(|s: &mut App, tx| s.spawn(Kind::Orbit, tx.clock())),
+                        .on_press_tx(|s: &mut App, tx| s.spawn(Kind::Orbit, crate::clock::now(tx.clock()))),
                 )
                 .child(
-                    small_button("start-demo", "Start demo", ink).on_press_tx(|s: &mut App, tx| s.spawn(Kind::Demo, tx.clock())),
+                    small_button("start-demo", "Start demo", ink).on_press_tx(|s: &mut App, tx| s.spawn(Kind::Demo, crate::clock::now(tx.clock()))),
                 ),
         );
     }
@@ -483,7 +483,7 @@ fn switch_row(ink: &Ink, key: &str, title: &str, hint: &str, on: bool, flip: fn(
         .items_center()
         .justify_between()
         .gap(12.0)
-        .on_press_tx(move |s: &mut App, tx| flip(s, tx.clock()))
+        .on_press_tx(move |s: &mut App, tx| flip(s, crate::clock::now(tx.clock())))
         .child(
             col()
                 .gap(2.0)

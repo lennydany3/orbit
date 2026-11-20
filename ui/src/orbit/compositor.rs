@@ -45,7 +45,7 @@ impl<S: HasOrbit + 'static> Compositor<S> for SphereCompositor {
         f.ui.prepare(device, queue, &mut f.rt.text.atlas, &f.rt.instances, f.size);
 
         let orbit = f.rt.state.orbit().clone();
-        let t = f.rt.t;
+        let t = crate::clock::now(f.rt.t);        // one clock for every window (see clock.rs)
         let Some((_, gpu)) = self.gpu.as_mut() else { return };
         let slots = &mut self.slots;
         let mut seen: Vec<u32> = Vec::new();
