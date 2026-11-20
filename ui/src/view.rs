@@ -61,11 +61,18 @@ fn stage(s: &App, ink: &Ink) -> El {
 
     let header = row()
         .key("title")
-        .absolute(28.0, 24.0)
+        .absolute(28.0, 20.0)
         .gap(12.0)
-        .items_end()
-        .child(text("Orbit").font(t(14.0, 600.0).tracking(0.56)).color(ink.fg))
-        .child(text("Sphere states, motion review").font(t(12.0, 400.0).tracking(0.72)).color(ink.muted));
+        .items_center()
+        .child(crate::logo::mark(46.0, ink.fg))
+        .child(
+            row()
+                .key("title-text")
+                .gap(12.0)
+                .items_end()
+                .child(text("Orbit").font(t(14.0, 600.0).tracking(0.56)).color(ink.fg))
+                .child(text("Sphere states, motion review").font(t(12.0, 400.0).tracking(0.72)).color(ink.muted)),
+        );
 
     let mut footer = col().key("footer").items_center().gap(18.0);
     if let Some((who, said)) = s.caption() {

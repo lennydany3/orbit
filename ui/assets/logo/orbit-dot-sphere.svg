@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" style="color:#fff">
+  <rect width="1600" height="1000" fill="#000"/>
+  <g fill="#fff" font-family="Arial,Helvetica,sans-serif">
+    <text x="80" y="80" font-size="16" letter-spacing="4.8">ORBIT</text>
+    <text x="80" y="110" font-size="11" letter-spacing="2.3" opacity=".55">DOT SPHERE / REFINED MASTER</text>
+    <text x="1520" y="80" font-size="11" text-anchor="end" letter-spacing="2.3" opacity=".55">MONOCHROME IDENTITY SYSTEM</text>
+  </g>
+  <!-- Primary mark: no enclosing outline; rim density creates the sphere silhouette. -->
+  <g id="orbit-mark" transform="translate(800 373)" fill="currentColor">
+    <!-- controlled outer rim -->
+    <g>
+      <circle cx="0" cy="-214" r="5"/><circle cx="55" cy="-207" r="5"/><circle cx="106" cy="-186" r="5.2"/><circle cx="151" cy="-151" r="5.4"/><circle cx="185" cy="-106" r="5.6"/><circle cx="206" cy="-54" r="5.8"/><circle cx="214" cy="0" r="6"/><circle cx="206" cy="54" r="5.8"/><circle cx="185" cy="106" r="5.6"/><circle cx="151" cy="151" r="5.4"/><circle cx="106" cy="186" r="5.2"/><circle cx="55" cy="207" r="5"/><circle cx="0" cy="214" r="5"/><circle cx="-55" cy="207" r="5"/><circle cx="-106" cy="186" r="5.2"/><circle cx="-151" cy="151" r="5.4"/><circle cx="-185" cy="106" r="5.6"/><circle cx="-206" cy="54" r="5.8"/><circle cx="-214" cy="0" r="6"/><circle cx="-206" cy="-54" r="5.8"/><circle cx="-185" cy="-106" r="5.6"/><circle cx="-151" cy="-151" r="5.4"/><circle cx="-106" cy="-186" r="5.2"/><circle cx="-55" cy="-207" r="5"/>
+    </g>
+    <!-- secondary rim, intentionally irregular phase -->
+    <g opacity=".88"><circle cx="28" cy="-186" r="3.8"/><circle cx="83" cy="-169" r="3.9"/><circle cx="130" cy="-130" r="4"/><circle cx="169" cy="-82" r="4.2"/><circle cx="185" cy="-27" r="4.4"/><circle cx="182" cy="31" r="4.4"/><circle cx="163" cy="86" r="4.2"/><circle cx="125" cy="133" r="4"/><circle cx="77" cy="169" r="3.9"/><circle cx="22" cy="186" r="3.8"/><circle cx="-35" cy="183" r="3.8"/><circle cx="-89" cy="164" r="3.9"/><circle cx="-135" cy="125" r="4"/><circle cx="-169" cy="76" r="4.2"/><circle cx="-185" cy="20" r="4.4"/><circle cx="-181" cy="-38" r="4.4"/><circle cx="-160" cy="-92" r="4.2"/><circle cx="-121" cy="-138" r="4"/><circle cx="-72" cy="-171" r="3.9"/><circle cx="-18" cy="-186" r="3.8"/></g>
+    <!-- sparse inner field; restrained, not noise -->
+    <g opacity=".68"><circle cx="-124" cy="-61" r="3"/><circle cx="-95" cy="-105" r="2.7"/><circle cx="-48" cy="-130" r="2.5"/><circle cx="6" cy="-140" r="2.4"/><circle cx="61" cy="-124" r="2.5"/><circle cx="106" cy="-88" r="2.7"/><circle cx="130" cy="-39" r="3"/><circle cx="-140" cy="-10" r="3"/><circle cx="-113" cy="41" r="2.7"/><circle cx="-70" cy="78" r="2.5"/><circle cx="-18" cy="96" r="2.4"/><circle cx="39" cy="88" r="2.5"/><circle cx="88" cy="58" r="2.7"/><circle cx="119" cy="14" r="3"/><circle cx="-91" cy="-43" r="2.3"/><circle cx="-49" cy="-76" r="2.1"/><circle cx="1" cy="-91" r="2"/><circle cx="53" cy="-71" r="2.1"/><circle cx="84" cy="-29" r="2.3"/><circle cx="-56" cy="-1" r="2.1"/><circle cx="-7" cy="18" r="2"/><circle cx="45" cy="4" r="2.1"/></g>
+    <!-- satellite: deliberately separated from the rim, with a short particulate wake -->
+    <circle cx="165" cy="-145" r="11"/>
+    <circle cx="192" cy="-163" r="3.5" opacity=".6"/><circle cx="207" cy="-173" r="2.4" opacity=".38"/><circle cx="220" cy="-181" r="1.5" opacity=".22"/>
+  </g>
+  <g fill="#fff" font-family="Arial,Helvetica,sans-serif">
+    <text x="800" y="666" font-size="12" text-anchor="middle" letter-spacing="2.8" opacity=".56">PRIMARY SYMBOL — PARTICLE DENSITY DEFINES THE FORM</text>
+  </g>
+  <line x1="80" y1="722" x2="1520" y2="722" stroke="#fff" opacity=".16"/>
+  <!-- horizontal lockup -->
+  <g transform="translate(80 820)" fill="#fff" font-family="Arial,Helvetica,sans-serif">
+    <g transform="translate(44 0) scale(.18)"><use href="#orbit-mark" transform="translate(-800 -373)"/></g>
+    <text x="112" y="16" font-size="54" letter-spacing="1.8">orbit</text>
+    <circle cx="157" cy="-32" r="4"/>
+    <text x="0" y="83" font-size="10" letter-spacing="2.2" opacity=".55">HORIZONTAL LOCKUP</text>
+  </g>
+  <!-- inverse -->
+  <g transform="translate(640 770)"><rect width="390" height="155" rx="4" fill="#fff"/><g transform="translate(75 78) scale(.18)" fill="#000" style="color:#000"><g transform="translate(-800 -373)"><use href="#orbit-mark"/></g></g><text x="132" y="95" font-family="Arial,Helvetica,sans-serif" font-size="48" letter-spacing="1.8" fill="#000">orbit</text><circle cx="173" cy="51" r="3.5" fill="#000"/><text x="20" y="132" font-family="Arial,Helvetica,sans-serif" font-size="10" letter-spacing="2" fill="#000" opacity=".55">INVERSE LOCKUP</text></g>
+  <!-- 16px specification: intentionally simplified rather than miniature particles -->
+  <g transform="translate(1250 770)"><rect width="155" height="155" rx="32" fill="#fff"/><circle cx="78" cy="78" r="39" fill="none" stroke="#000" stroke-width="8" stroke-dasharray="5 5"/><circle cx="111" cy="49" r="9" fill="#000"/><text x="0" y="188" fill="#fff" font-family="Arial,Helvetica,sans-serif" font-size="10" letter-spacing="2.2" opacity=".55">APP TILE / 256</text><rect x="183" y="132" width="24" height="24" fill="#fff"/><circle cx="195" cy="144" r="7" fill="none" stroke="#000" stroke-width="2" stroke-dasharray="2 2"/><circle cx="201" cy="138" r="2.5" fill="#000"/><text x="183" y="188" fill="#fff" font-family="Arial,Helvetica,sans-serif" font-size="10" letter-spacing="2.2" opacity=".55">TASKBAR / 16</text></g>
+</svg>

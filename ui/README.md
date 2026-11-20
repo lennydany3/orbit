@@ -64,6 +64,15 @@ it started stops by itself (see below).
 Keys 1-9, 0 and M put the sphere in a state by hand. While the link is open Orbit drives instead, and Esc answers a question
 with "no".
 
+## The logo
+
+The dot-sphere mark (the refined master) is `assets/logo/orbit-dot-sphere.svg`. `src/logo.rs` puts it in the window's title bar,
+the taskbar and Alt+Tab (the app tile, `orbit-icon-256.png`: a dashed ring and the satellite on white), in the tray (the small
+`orbit-tray-32.rgba`) and beside the title in the window (the primary mark, 70 dots, drawn from Rune elements). Following the
+SVG's own note, the small sizes are simplified rather than miniature particles. `python assets/logo/make_icons.py` makes the two
+icon files and `src/logo_dots.rs` (every dot of the primary mark) from the SVG; run it again if the SVG changes. The `.exe`
+file's own icon in Explorer is not set (that needs a Windows resource file at build time).
+
 ## How the window and Orbit fit together
 
 - **The link** is a WebSocket on `127.0.0.1` with a password in the address. The window refuses to connect anywhere else,

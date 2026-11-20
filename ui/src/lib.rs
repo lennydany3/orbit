@@ -6,6 +6,7 @@ pub mod clock;
 pub mod editor;
 pub mod face;
 pub mod link;
+pub mod logo;
 pub mod orbit;
 pub mod pacer;
 pub mod presence;

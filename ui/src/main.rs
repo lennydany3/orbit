@@ -253,6 +253,7 @@ fn main() {
         std::process::exit(code);
     }
     clock::start();
+    orbit_ui::logo::install();                     // the icon in every window's title bar, the taskbar and Alt+Tab
     if rune::is_headless() {
         rune::run_with(spec(), SphereCompositor::default());
         return;
