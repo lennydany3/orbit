@@ -39,7 +39,7 @@ def _site_url(site: str, mine: bool) -> str:
     if site == "github" and mine and config.GITHUB_USER:
         return f"https://github.com/{config.GITHUB_USER}"
     return SITES[site]
-_VERB = r"(?:please )?(?:open|go to|visit|launch)"
+_VERB = r"(?:please )?(?:open|go to|visit|launch|take me to|head to|jump to)"
 
 
 # Questions about the clock: "what's the time now", "what time is it", "tell me the date", "what day is it", "time and date"
@@ -55,7 +55,7 @@ def _clock_part(m: re.Match) -> str:
 
 
 # --- Spotify devices: "switch playback to echo with 30% volume" = move playback, then set that device's volume ---
-_DEV = r"(?P<dev>(?!(?:again|it|that|this|next|previous|prev|something|music|the music)\b)(?![\w .'-]*\b(?:monitor|screen|display|half|side)\b)[\w .'-]+?)"
+_DEV = r"(?P<dev>(?!(?:again|it|that|this|next|previous|prev|something|music|the music)\b)(?![\w .'-]*\b(?:monitor|screen|display|window|windows|desktop|half|side)\b)[\w .'-]+?)"
 _DEV_TAIL = (
     r"(?:\s+(?:with|at|and)\s+(?:the\s+)?(?:volume\s+(?:at|to|of)\s+)?(?P<n>\d{1,3})\s*(?:%|percent)?(?:\s+volume)?(?:\s+on it)?)?"
     r"(?:\s+instead of [\w .'-]+)?"
@@ -83,7 +83,12 @@ _TRANSFER_CONTEXT = re.compile(
 
 # "move brave to my secondary monitor" / "send spotify to the other screen" / "put chrome on monitor 2"
 _MON = (r"(?:primary|main|secondary|second|other|another|next|external|first|2nd|1st|\d|(?:left|right)\s+(?:monitor|screen|display)"
-        r"|(?:monitor|screen|display)\s+\d)(?:\s+(?:monitor|screen|display))?")
+        r"|(?:monitor|screen|display)\s+\d)(?:\s+(?:monitor|screen|display|window))?")
+
+
+def _mon(m: re.Match) -> str:
+    """The monitor as the tool wants it: "primary window" (what people say for a monitor) is just "primary"."""
+    return re.sub(r"\s+window$", "", m["mon"].strip().lower())
 _ACTIONS = {"max": "maximize", "min": "minimize", "res": "restore"}
 _MOVE_TO_MONITOR = re.compile(
     rf"^(?:move|put|send|shift|drag|take|bring)\s+(?:the\s+|my\s+)?(?!(?:it|that|this|them)\b)(?P<t>[\w .+&'-]+?)(?:\s+(?:app|window))?\s+"
@@ -147,6 +152,18 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
      lambda m: ("browser_open", {"url": _site_url(m["site"].lower(), bool(m["my"]))})),
     ("open-url", re.compile(rf"^{_VERB}\s+(?P<url>(?:https?://)?[\w-]+(?:\.[\w-]+)+(?:/\S*)?)$", re.I),
      lambda m: ("browser_open", {"url": m["url"] if "://" in m["url"] else "https://" + m["url"]})),
+    # "show brave", "bring up spotify": bring an app to the front (os_open_app focuses one that is already open, opens it if not).
+    # Never "show me ..." or the lists and readings people also ask for ("show tabs", "show the volume").
+    ("show-app", re.compile(
+        r"^(?:show|bring up|pull up|take me to|switch over to|jump to|head to)\s+(?:the\s+|my\s+)?(?!(?:the|my|me|us|it|that|this|them|all|everything|something|anything|a|an|some|what|how|tabs?|windows?|"
+        r"devices?|volume|time|date|clock|battery|music|songs?|playing|results?)\b)(?P<name>[\w+&'-]+(?: [\w+&'-]+){0,2}?)(?: (?:app|window))?$", re.I),
+     lambda m: ("browser_open", {"url": _site_url(m["name"].lower(), False)}) if m["name"].lower() in SITES
+     else ("os_open_app", {"name": m["name"].strip().title()})),
+    # "bring brave to the front": the app is named first this time
+    ("front-app", re.compile(
+        r"^(?:bring|put|move|get)\s+(?:the\s+|my\s+)?(?!(?:it|that|this|them|me)\b)(?P<name>[\w+&'-]+(?: [\w+&'-]+){0,2}?)(?: (?:app|window))?\s+"
+        r"(?:to|in|into|on)\s+(?:the\s+)?(?:front|foreground|top|forefront)$", re.I),
+     lambda m: ("os_open_app", {"name": m["name"].strip().title()})),
     ("click-in-app", _CLICK_IN_APP, lambda m: _click_in(m["t"], m["app"])),
     ("in-app-click", _IN_APP_CLICK, lambda m: _click_in(m["t"], m["app"])),
     ("click-first-video", re.compile(r"^(?:click|press|tap|select|hit|open|play)\s+(?:on\s+)?(?:the\s+)?(?:first|top|1st)\s+(?:video|result|one)$", re.I),
@@ -200,7 +217,7 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
      lambda m: ("browser_switch_tab", {"text": m["t"].strip()})),
     ("list-tabs", re.compile(r"^(?:list|show|what are)\s+(?:me\s+)?(?:all\s+)?(?:my\s+|the\s+)?(?:open\s+)?tabs$", re.I),
      lambda m: ("browser_tabs", {})),
-    ("move-window", _MOVE_TO_MONITOR, lambda m: ("os_move_window", {"title": m["t"].strip().title(), "monitor": m["mon"].strip().lower()})),
+    ("move-window", _MOVE_TO_MONITOR, lambda m: ("os_move_window", {"title": m["t"].strip().title(), "monitor": _mon(m)})),
     ("arrange-state", re.compile(r"^(?P<act>maximi[sz]e|minimi[sz]e|restore)\s+(?:the\s+|my\s+)?(?!(?:it|that|this|them|window|app)$)(?P<t>[\w .+&'-]+?)(?: (?:app|window))?$", re.I),
      lambda m: ("os_arrange_window", {"title": m["t"].strip().title(), "action": _ACTIONS[m["act"][:3].lower()]})),
     ("arrange-snap", _SNAP, lambda m: ("os_arrange_window", {"title": m["t"].strip().title(), "action": m["side"].lower()})),
@@ -236,13 +253,22 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
 ]
 
 
-# Polite filler a person puts around a command: "ok can you close the speed test please?"
-_FILLER_HEAD = re.compile(r"^(?:(?:ok(?:ay)?|yo+|yeah|hey|hi|bro|so|now|then|just|please|pls|can you|could you|would you|will you|can u)\b,?\s+)+", re.I)
+# Polite filler a person puts around a command: "ok can you close the speed test please?", "Uh, could you open Brave?",
+# "Orbit, I want you to open Spotify". Spoken hesitations, Orbit's own name, and the frames that turn an order into a question.
+_SPEECH_FILLER = (r"u+h+|u+m+|e+r+m*|a+h+|h+m+|m{2,}|o+h+|well|actually|basically|alright|ok(?:ay)?|yo+|yeah|yep|hey|hi|bro|dude|so|now|then|just|"
+                  r"please|pls|orbit")
+_ASK_FRAME = (r"(?:do|would)\s+you\s+mind|(?:can|could|would|will)\s+(?:you|u)(?:\s+(?:possibly|please|kindly|just))*|(?:i|we)\s+(?:want|need|have|got|gotta)\s+(?:you\s+)?to|(?:i|we)\s+(?:wanna|gotta)|"
+              r"i(?:'d|\s+would)\s+(?:like|love)\s+(?:you\s+)?to|go\s+ahead\s+and|how\s+about\s+you|why\s+don'?t\s+you|let'?s|you\s+(?:can|could|should)(?:\s+just)?|kindly")
+_FILLER_HEAD = re.compile(rf"^(?:(?:{_SPEECH_FILLER}|{_ASK_FRAME})\b[\s,.\u2026!?-]*)+", re.I)
+_GERUND = {"opening": "open", "closing": "close", "launching": "launch", "starting": "start", "minimizing": "minimize", "minimising": "minimise",
+           "maximizing": "maximize", "maximising": "maximise", "playing": "play", "pausing": "pause", "muting": "mute", "quitting": "quit"}
+_LEADING_GERUND = re.compile(rf"^({'|'.join(_GERUND)})\b", re.I)               # "would you mind opening brave" -> "open brave"
+_OPEN_UP = re.compile(r"^(open|launch|start)\s+up\b", re.I)                      # "open up brave" -> "open brave"
 _IN_BROWSER = r"(?:in|on|with|using)\s+(?:the\s+)?(?:brave|chrome|google chrome|my browser|the browser|browser)"
 _ON_PAGE = r"(?:in|on)\s+(?:the\s+)?(?:youtube|github|google|this page|the page|page|this site|the site)"
 _BROWSER_HEAD = re.compile(rf"^(?:{_IN_BROWSER}|{_ON_PAGE}),?\s+(?=(?:click|press|tap|select)\b)|^{_IN_BROWSER},?\s+", re.I)  # "in brave open my github", "in youtube click X"
 _BROWSER_TAIL = re.compile(rf"\s+{_IN_BROWSER}$", re.I)         # "open my github in brave"
-_FILLER_TAIL = re.compile(r"(?:,?\s*(?:please|pls|for me|thanks|thank you))?[\s?.!]*$", re.I)
+_FILLER_TAIL = re.compile(r"(?:,?\s*(?:please|pls|for me|real quick|quickly|right now|asap|if you can|if you could|thanks|thank you|thx|bro|dude|buddy|mate|man|orbit)\b)*[\s?.!]*$", re.I)
 _PRONOUN_MOVE = re.compile(rf"^(?:move|put|send|shift|bring)\s+(?:it|that|this)\s+(?:to|onto|on|over to)\s+(?:the\s+|my\s+)?(?P<mon>{_MON})$", re.I)
 _PRONOUN_ARRANGE = re.compile(r"^(?P<act>maximi[sz]e|minimi[sz]e|restore)\s+(?:it|that|this)$", re.I)
 _PRONOUN_CLOSE = re.compile(r"^close (?:it|that|this)$", re.I)
@@ -272,6 +298,8 @@ def normalize(text: str) -> str:
     text = _STATEMENT_HEAD.sub("", text)
     text = _BROWSER_HEAD.sub("", _FILLER_HEAD.sub("", text))
     text = _FILLER_TAIL.sub("", text).strip()
+    text = _LEADING_GERUND.sub(lambda m: _GERUND[m.group(1).lower()], text)
+    text = _OPEN_UP.sub(lambda m: m.group(1), text)
     return _BROWSER_TAIL.sub("", text).strip()
 
 
@@ -331,7 +359,7 @@ def _match(text: str, subject, closed, spotify_active, subjects) -> RuleMatch | 
     if subject:
         m = _PRONOUN_MOVE.match(text)
         if m:
-            return RuleMatch(rule="move-it", tool="os_move_window", args={"title": subject, "monitor": m["mon"].strip().lower()})
+            return RuleMatch(rule="move-it", tool="os_move_window", args={"title": subject, "monitor": _mon(m)})
         m = _PRONOUN_ARRANGE.match(text)
         if m:
             return RuleMatch(rule="arrange-it", tool="os_arrange_window",

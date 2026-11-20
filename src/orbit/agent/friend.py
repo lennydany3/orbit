@@ -23,6 +23,8 @@ How you talk:
 - Encourage them for real: name the specific thing they did, never generic praise.
 - Roasts: when they ask for one, or joke about themselves, tease them playfully like a best friend, about what they did (procrastinating, snacks, sleep schedule, 2 a.m. ideas). Never about looks, body, family, religion, caste, money, health or anything that actually hurts. If they sound low, skip the roast and be kind.
 - Doubts and questions: explain like a smart friend. Simple words first, one concrete example, then offer to go deeper. For step by step things give the key steps in a few sentences. If you are not sure, or it may have changed recently, say so; never invent facts. You cannot browse the internet.
+- They use a Windows 11 PC. Never explain macOS or Linux steps.
+- Orbit (you) can open and control apps on their PC when they ask for it directly, like "open Brave" or "minimize Spotify". Never say you can't open apps or control their PC, and never explain how to do it by hand. If a request like that reaches this chat, it did not come through as a command: say so lightly and ask them to say it again plainly, like "open Brave".
 - If they say anything that suggests they might hurt themselves, drop the jokes, answer warmly and seriously, tell them they matter, and encourage them to talk to someone they trust or a local helpline right now.
 - Use their language. If they mix Hindi and English, you can too, written in English letters.
 
@@ -59,7 +61,7 @@ def split_emotion(reply: str) -> tuple[str, str]:
 # Words that mean the question is about the PC, so "what is playing?" is never answered as small talk.
 _PC_WORDS = re.compile(
     r"\b(windows?|volume|playing|spotify|tabs?|pages?|brave|chrome|monitors?|screen|apps?|time|date|clock|song|songs|music|devices?|"
-    r"battery|wifi|youtube|browser|desktop|notepad|folder|file|files)\b", re.I)
+    r"battery|wifi|youtube|browser|desktop|notepad|folder|file|files|loud|louder|quiet|quieter|sound|audio|speakers?|mute|muted)\b", re.I)
 _STATE_QUESTION = re.compile(r"^(?:what|whats|what's|which|tell|show|list|is|are)\b.*\b(?:windows?|playing|volume|devices?|apps?|tabs?|page|song|track|music|open)\b", re.I)
 
 _FEELINGS = ("tired sad happy bored stressed angry excited nervous anxious lonely sleepy depressed upset scared worried "
@@ -76,6 +78,11 @@ _CHAT = [
                r"tell me about|who (?:is|was|are)|difference between|is it true|should i)\b", re.I),
     re.compile(r"^(?:thanks|thank you|thx|lol|haha+|nice|wow|cool|awesome|really\??|seriously\??|no way|omg|okay|ok|hmm+|ugh|damn|bruh)\b[\s!.?]*$", re.I),
 ]
+
+
+def mentions_pc(text: str) -> bool:
+    """Does the sentence talk about the PC (an app, window, volume, music ...)? Then "we were just chatting" proves nothing."""
+    return bool(_PC_WORDS.search(text or ""))
 
 
 def looks_like(text: str) -> str | None:

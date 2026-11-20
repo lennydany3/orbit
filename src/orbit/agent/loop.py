@@ -45,12 +45,17 @@ _CLAIMS_ACTION = re.compile(
 # A request that starts like one of these asks for an ACTION: a reply with no tool call is never an answer to it.
 _ACTION_VERBS = (
     "open close click press tap select play pause resume stop next skip mute unmute set turn switch move transfer send cast "
-    "change search go maximize minimize restore snap reload refresh scroll type launch start quit exit put drag").split()
+    "change search go maximize minimize restore snap reload refresh scroll type launch start quit exit put drag focus hide").split()
+
+
+# "show brave" and "bring up spotify" are requests; "show me how a thread works" is a question.
+_SHOW_AN_APP = re.compile(r"^(?:show(?!\s+(?:me|us)\b)|bring up|pull up|take me to|head to|jump to)\b", re.I)
 
 
 def _is_action_request(text: str) -> bool:
-    first = rules.normalize(text).split(None, 1)[0].lower() if rules.normalize(text).split() else ""
-    return first in _ACTION_VERBS or bool(difflib.get_close_matches(first, _ACTION_VERBS, n=1, cutoff=0.8))
+    plain = rules.normalize(text)
+    first = plain.split(None, 1)[0].lower() if plain.split() else ""
+    return first in _ACTION_VERBS or bool(_SHOW_AN_APP.match(plain)) or bool(difflib.get_close_matches(first, _ACTION_VERBS, n=1, cutoff=0.8))
 # "what windows are open?" answered with no tool call is invented data, even though it contains no "action" word.
 _ASKS_STATE = re.compile(
     r"^(?:what|whats|what's|which|tell|show|list|is|are)\b.*\b(?:windows?|playing|volume|devices?|apps?|tabs?|page|song|track|music|open)\b", re.I)
@@ -206,8 +211,8 @@ class Agent:
         guess = friend.looks_like(text)
         if guess is None and _is_action_request(text):
             guess = "action"
-        if guess is None and was_chatting:
-            guess = "chat"                       # "and then?", "really?", "why though" right after chatting
+        if guess is None and was_chatting and not friend.mentions_pc(text):
+            guess = "chat"                       # "and then?", "really?", "why though" right after chatting (never a sentence about the PC)
         if guess is None:
             guess = self._classify(text)
         self.log("friend", f"{guess}: '{text[:50]}'")
