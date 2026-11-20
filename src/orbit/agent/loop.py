@@ -1,4 +1,5 @@
 """The agent: rules first, then the LLM; every tool call goes validate -> safety -> router(verify)."""
+import contextlib
 import difflib
 import re
 import time
@@ -6,8 +7,10 @@ import time
 from pydantic import ValidationError
 
 from .. import config
+from .. import visual
 from ..llm.base import LLM, LLMError
 from ..tools.base import Registry, ToolResult
+from ..tools.os_layer import symbols
 from . import context, friend, rescue, rules
 from . import custom as custom_commands
 from .router import Log, Router
@@ -34,7 +37,9 @@ SYSTEM_PROMPT = (
     "\"what is playing\" -> os_media_status(); "
     "\"what time is it\" -> os_get_time(part=\"time\"); "
     "\"move brave to my secondary monitor\" -> os_move_window(title=\"Brave\", monitor=\"secondary\"); "
-    "\"put spotify on the left half\" -> os_arrange_window(title=\"Spotify\", action=\"left\")."
+    "\"put spotify on the left half\" -> os_arrange_window(title=\"Spotify\", action=\"left\"); "
+    "\"scroll down\" -> browser_scroll(direction=\"down\"); \"click the second link\" -> browser_click(nth=2); "
+    "\"click the search box\" -> browser_click(text=\"search\", kind=\"field\"), then \"type cats\" -> os_type(text=\"cats\")."
 )
 
 _REMEMBERED_RESULT_CHARS = 300
@@ -42,7 +47,7 @@ _CLAIMS_ACTION = re.compile(
     r"\b(playing|played|opened|opening|closed|closing|paused|muted|unmuted|turned|launched|launching|started|"
     r"switched|switching|searching|searched|checking|increased|decreased|done|completed|all set|"
     r"transferring|transferred|moving|moved|changing|changed|setting|sending|casting|adjusting|raising|lowering|asked|has been|have been|is now|are now|i've|i have|i did|successfully|"
-    r"clicked|clicking|pressed|selected|navigated|went|loaded|reloaded|refreshed|typed|snapped|maximized|minimized|restored)\b", re.I)
+    r"clicked|clicking|pressed|selected|navigated|went|loaded|reloaded|refreshed|typed|typing|scrolled|scrolling|snapped|maximized|minimized|restored)\b", re.I)
 # A request that starts like one of these asks for an ACTION: a reply with no tool call is never an answer to it.
 _ACTION_VERBS = (
     "open close click press tap select play pause resume stop next skip mute unmute set turn switch move transfer send cast "
@@ -62,6 +67,22 @@ _ASKS_STATE = re.compile(
     r"^(?:what|whats|what's|which|tell|show|list|is|are)\b.*\b(?:windows?|playing|volume|devices?|apps?|tabs?|page|song|track|music|open)\b", re.I)
 # Tools whose success tells us what "it" means next time, and which argument names the thing.
 _KEY_TO_ACTION = {"play": "play", "pause": "pause", "next": "next", "prev": "previous"}
+# The words on the "working" pill while a tool runs (tools that are instant, like reading the volume, show none).
+_WORKING_LABELS = {
+    "browser_search": "Searching Google\u2026", "browser_open": "Opening the page\u2026", "browser_go_to": "Loading the page\u2026",
+    "browser_click": "Clicking\u2026", "browser_scroll": "Scrolling\u2026", "browser_navigate": "Navigating\u2026",
+    "browser_youtube_play": "Playing the video\u2026", "browser_fullscreen": "Going fullscreen\u2026", "browser_close_tabs": "Closing tabs\u2026",
+    "browser_switch_tab": "Switching tabs\u2026", "browser_page_info": "Reading the page\u2026",
+    "os_click": "Clicking\u2026", "os_type": "Typing\u2026", "os_scroll": "Scrolling\u2026", "os_open_app": "Opening the app\u2026",
+    "os_read_window": "Reading the window\u2026",
+    # (moving, arranging and closing windows need no pill: the pointer carrying or pressing the window is the animation)
+}
+# "second" and "twice" are numbers too: an optional number you said in words was not invented
+_SPOKEN_NUMBERS = {"one": 1, "once": 1, "two": 2, "twice": 2, "three": 3, "thrice": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+                   "nine": 9, "ten": 10, "first": 1, "1st": 1, "top": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3, "fourth": 4, "fifth": 5,
+                   "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10, "last": -1}
+_TYPING_NEXT = re.compile(r"^(?:type|write|input|enter|key in|fill in)\b", re.I)
+_WORDS = re.compile(r"[\w']+")
 _SUBJECT_PARAM = {"os_open_app": "name", "os_focus_window": "title", "os_move_window": "title", "os_arrange_window": "title",
                   "os_click": "window"}
 
@@ -107,6 +128,8 @@ class Agent:
         self._ungrounded = False              # did the model only talk (invent an answer) instead of acting?
         self.last_target_kind = ""            # "browser" or "window": what the last action worked with, so "click X" goes there
         self.recent_subjects: list[str] = []  # everything opened or focused lately that is still open: "close both"
+        self._after_field_click = False       # the last thing done was putting the cursor in a text box: typing replaces a search box's words
+        self._next_part = ""                  # the next request of a multi-request sentence: "click the search" before "type cats" means the box
 
     # ---- public ----
     def handle(self, text: str) -> str:
@@ -185,7 +208,11 @@ class Agent:
             self.log("rule", f"part {i}/{len(parts)}: '{part}'")
             previous, self.last_request = self.last_request, part
             self._part_failed = False
-            replies.append(self._handle_one(part, previous))
+            self._next_part = parts[i] if i < len(parts) else ""
+            try:
+                replies.append(self._handle_one(part, previous))
+            finally:
+                self._next_part = ""
             if self._part_failed and i < len(parts):
                 replies.append(f"(Stopped here: '{part}' did not work, so I did not run the rest.)")
                 break
@@ -265,9 +292,18 @@ class Agent:
             # The sound comes from the speaker/phone, so the PC's volume would change nothing you can hear.
             args = {"change": m.args["delta"]} if m.tool == "os_change_volume" else {"level": m.args["level"]}
             m = rules.RuleMatch(rule=m.rule + "-device", tool="api_spotify_volume", args=args)
-        if m and m.tool == "browser_click" and self._clicks_belong_to_an_app() and self.registry.get_exposed("os_click"):
+        if (m and m.tool == "browser_click" and "kind" not in m.args and not m.args.get("nth") and _TYPING_NEXT.match(self._next_part.strip())
+                and not symbols.wants_a_picture(m.args.get("text", ""))):
+            # "click the search and type cats": the click is for the text box (that is where typing goes), not the button
+            m = rules.RuleMatch(rule=m.rule + "-field", tool=m.tool, args={**m.args, "kind": "field"})
+        if m and m.tool == "browser_click" and self._clicks_belong_to_an_app() and self.registry.get_exposed("os_click") and m.args.get("text"):
             # "click go" right after working with the Speedtest window is about that window, not about a web page.
-            m = rules.RuleMatch(rule=m.rule + "-app", tool="os_click", args={"text": m.args["text"], "window": self.last_subject})
+            args = {"text": m.args["text"], "window": self.last_subject, **({"kind": m.args["kind"]} if "kind" in m.args else {})}
+            m = rules.RuleMatch(rule=m.rule + "-app", tool="os_click", args=args)
+        if m and m.tool == "os_type" and self._after_field_click and m.args.get("text") and "replace" not in m.args:
+            m = rules.RuleMatch(rule=m.rule + "-replace", tool=m.tool, args={**m.args, "replace": True})
+        if m and m.tool == "browser_scroll" and self._clicks_belong_to_an_app() and self.registry.get_exposed("os_scroll"):
+            m = rules.RuleMatch(rule=m.rule + "-app", tool="os_scroll", args={**m.args, "window": self.last_subject})
         return m if m and self.registry.get_exposed(m.tool) else None
 
     def _spotify_is_playing_media(self) -> bool:
@@ -396,6 +432,7 @@ class Agent:
         """A small model fills optional numbers nobody asked for (a transfer "at volume 100" for a speaker in someone's
         living room). An optional number that is not in the user's request is dropped."""
         wanted = set(re.findall(r"\d+", self.last_request))
+        wanted |= {str(_SPOKEN_NUMBERS[w]) for w in _WORDS.findall(self.last_request.lower()) if w in _SPOKEN_NUMBERS}
         kept = {}
         self._dropped = []
         for key, value in args.items():
@@ -410,6 +447,18 @@ class Agent:
             else:
                 kept[key] = value
         return kept
+
+    def _user_said(self, text: str) -> bool:
+        """Are these words (all of them) in what the user asked for? Text that came from a web page or the screen is not."""
+        said = set(_WORDS.findall(self.last_request.lower()))
+        return all(word in said for word in _WORDS.findall(str(text).lower()))
+
+    def _working(self, tool_name: str):
+        """Show the "working" pill while a tool runs (the pill is the animation of Orbit busy in a browser or an app)."""
+        label = _WORKING_LABELS.get(tool_name)
+        if label is None or not visual.enabled():
+            return contextlib.nullcontext()
+        return visual.working(label, lambda: _work_area(tool_name))
 
     def execute(self, name: str, args: dict) -> ToolResult:
         """validate -> print -> safety gate -> router (run + verify + retry + fallback)."""
@@ -433,12 +482,19 @@ class Agent:
             return ToolResult.failure(error)
 
         self.log("act", f"{name}({params.model_dump()})  [risk={tool.risk}]")
+        if tool.user_text and not self._user_said(getattr(params, tool.user_text, "")):
+            error = (f"refused: the words to {name.split('_', 1)[-1]} ('{str(getattr(params, tool.user_text))[:60]}') are not words you said. "
+                     "Orbit only types what you tell it to, never text it found on a page or screen.")
+            self.log("safety", error)
+            self._part_failed = True
+            return ToolResult.failure(error, retryable=False)
         candidates = self.registry.alternatives(tool)
         allowed, why = self.safety.approve(candidates, params)
         if not allowed:
             self.log("safety", f"blocked: {why}")
             return ToolResult.failure(why)
-        result = self.router.run(candidates, params)
+        with self._working(name):
+            result = self.router.run(candidates, params)
         if result.ok and self._dropped:
             # Tell the model (and you) that part of the call was NOT done, so it cannot report it as done.
             result.summary += f" (NOT applied: {', '.join(self._dropped)}, you did not give that number)"
@@ -448,6 +504,7 @@ class Agent:
             via_api = self.execute("api_spotify_control", {"action": _KEY_TO_ACTION[params.key]})
             result = via_api if via_api.ok else result
         self._part_failed = not result.ok
+        self._after_field_click = result.ok and name in ("browser_click", "os_click") and getattr(params, "kind", "any") == "field"
         if result.ok:
             if name.startswith("browser_"):
                 self.last_target_kind = "browser"
@@ -466,3 +523,19 @@ class Agent:
                 self.last_closed, self.last_subject = self.last_subject or params.title, None
                 self.recent_subjects = [n for n in self.recent_subjects if n.lower() != params.title.lower()]
         return result
+
+
+def _work_area(tool_name: str) -> tuple[int, int, int, int] | None:
+    """The window a tool is working in, for the "working" pill: your Brave for browser tools, otherwise the window in front.
+    When Orbit's own terminal is in front (text mode), it is the window behind it that the work happens in."""
+    from ..tools.os_layer import windows
+
+    own = windows.console_hwnd()
+    everything = windows.list_windows()
+    if tool_name.startswith("browser_"):
+        brave = next((w for w in everything if w.exe == "brave"), None)
+        if brave:
+            return windows.visible_rect(brave.hwnd)
+    fg = windows.foreground_window()
+    target = fg if fg and fg.hwnd != own else next((w for w in everything if w.hwnd != own), None)
+    return windows.visible_rect(target.hwnd) if target else None

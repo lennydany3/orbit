@@ -141,3 +141,17 @@ def type_text(text: str, send: Callable[[list[Event]], None] = _send, pause_s: f
         if pause_s:
             time.sleep(pause_s)
     return len(text)
+
+
+def type_naturally(text: str, send: Callable[[list[Event]], None] = _send, per_char_s: float | None = None) -> int:
+    """Type a text one character at a time, at the pace of a quick typist, so you can watch it appear (and pages that react to
+    each key, like a search box's suggestions, keep up). Every character is a Unicode key press, so any language types
+    correctly. A newline is typed as a space: Enter is only ever pressed on request."""
+    if len(text) > MAX_TEXT_CHARS:
+        raise ValueError(f"text is longer than {MAX_TEXT_CHARS} characters")
+    pause = per_char_s if per_char_s is not None else (0.032 if len(text) <= 60 else 0.010)
+    flat = " ".join(text.split())                                 # newlines, tabs and runs of spaces become single spaces
+    for ch in flat:
+        send(text_events(ch))
+        time.sleep(pause)
+    return len(flat)

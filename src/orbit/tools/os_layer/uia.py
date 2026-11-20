@@ -12,6 +12,9 @@ from dataclasses import dataclass
 
 import comtypes.client
 
+from ... import visual
+from . import mouse, symbols
+
 comtypes.client.GetModule("UIAutomationCore.dll")
 from comtypes.gen import UIAutomationClient as UIA  # noqa: E402
 
@@ -28,7 +31,9 @@ _KINDS = {
     UIA.UIA_HyperlinkControlTypeId: "link", UIA.UIA_ButtonControlTypeId: "button", UIA.UIA_TabItemControlTypeId: "tab",
     UIA.UIA_MenuItemControlTypeId: "menu item", UIA.UIA_CheckBoxControlTypeId: "checkbox",
     UIA.UIA_ListItemControlTypeId: "list item", UIA.UIA_RadioButtonControlTypeId: "radio button",
+    UIA.UIA_EditControlTypeId: "text field", UIA.UIA_ComboBoxControlTypeId: "combo box",     # the search box, a form field
 }
+FIELD_KINDS = ("text field", "combo box")
 _WARM_UP_ATTEMPTS = 4  # Chromium only builds a page's accessibility tree once something asks for it: the first looks are empty
 _COM_RETRIES = 3       # the tree is rebuilt while a page changes or goes fullscreen; a call in that moment fails, so try again
 
@@ -127,10 +132,13 @@ def _words(text: str) -> list[str]:
 
 # Words that describe HOW to click rather than WHAT ("the", "video", "button"); typos of them ("viedo", "theh") count too.
 _FILLER = frozenset("the a an video videos link button one please click on my that this it song music channel tab".split())
+# Words that point at a picture or a box ("the search icon", "the search box"): never part of a control's name. Exact words only
+# (no typo matching), because these are short.
+_EXACT_FILLER = frozenset("icon icons symbol symbols glyph logo box bar field input textbox".split())
 
 
 def _is_filler(word: str) -> bool:
-    return word in _FILLER or any(len(f) >= 3 and difflib.SequenceMatcher(None, word, f).ratio() >= 0.8 for f in _FILLER)
+    return word in _FILLER or word in _EXACT_FILLER or any(len(f) >= 3 and difflib.SequenceMatcher(None, word, f).ratio() >= 0.8 for f in _FILLER)
 
 
 def _edit_distance(a: str, b: str) -> int:
@@ -177,35 +185,150 @@ def match_score(query: str, name: str) -> float:
     return 2.0 * share + 0.1 * min(1.0, len(content) / len(n))  # tiny bonus for a tighter name
 
 
-def find(items: list[Control], query: str) -> list[Control]:
-    """Controls that fit `query`, best first (visible ones before off-screen ones at equal quality)."""
-    scored = [(match_score(query, c.name), c) for c in items]
-    good = [(s, c) for s, c in scored if s > 0]
-    good.sort(key=lambda sc: (-sc[0], sc[1].offscreen))
-    return [c for _, c in good]
+def find(items: list[Control], query: str, kind: str = "any") -> list[Control]:
+    """Controls that fit `query`, best first (visible ones before off-screen ones at equal quality).
+
+    `query` may name a control ("sign in") or a PICTURE ("the search icon", "magnifying glass", "three dots"): a picture is
+    looked up under the names it usually has (see symbols.py). `kind` "field" keeps only text boxes ("click the search box
+    and type ..."); "button" prefers buttons over text boxes and links."""
+    symbol = symbols.identify(query)
+    picture = symbol is not None or symbols.wants_a_picture(query)
+    wants_field = kind == "field" or (kind == "any" and symbols.wants_a_field(query))
+    scored = []
+    for c in items:
+        score = match_score(query, c.name)
+        if symbol is not None:
+            alias = max((match_score(name, c.name) - 0.05 * rank for rank, name in enumerate(symbol.names)), default=0.0)
+            score = max(score, alias * 0.97)
+        if score <= 0:
+            continue
+        is_field = c.kind in FIELD_KINDS
+        if kind == "field" and not is_field:
+            continue
+        if wants_field and is_field:
+            score += 0.5
+        elif (picture or kind == "button") and c.kind in ("button", "menu item"):
+            score += 0.4                                        # a picture on screen is almost always a button
+        if kind == "button" and is_field:
+            score -= 0.6
+        scored.append((score, c))
+    scored.sort(key=lambda sc: (-sc[0], sc[1].offscreen))
+    return [c for _, c in scored]
 
 
-def click(control: Control, mouse: bool = False) -> str:
-    """Press a control. Returns how it was done: "invoke" (the accessible way) or "mouse" (a real click, which moves the
-    pointer: used when asked to, or when the control cannot be invoked)."""
+def center(control: Control) -> tuple[int, int] | None:
+    """The middle of a control on screen, or None when it has no real position (scrolled away, or hidden)."""
+    try:
+        rect = control.element.CurrentBoundingRectangle
+    except Exception:
+        return None
+    if rect.right - rect.left < 2 or rect.bottom - rect.top < 2:
+        return None
+    return (rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2
+
+
+def _has_focus(el) -> bool:
+    try:
+        return bool(el.CurrentHasKeyboardFocus)
+    except Exception:
+        return False
+
+
+def click(control: Control, use_mouse: bool = False) -> str:
+    """Press a control, with Orbit's animated pointer gliding to it first. Returns how it was done: "invoke" (the accessible
+    way), "focus" (a text box was given the keyboard), or "mouse" (a real click: used when asked to, or when the control
+    cannot be invoked)."""
     el = control.element
     try:
         el.GetCurrentPattern(UIA.UIA_ScrollItemPatternId).QueryInterface(UIA.IUIAutomationScrollItemPattern).ScrollIntoView()
     except Exception:
         pass  # not scrollable, or already in view
-    if not mouse:
+    point = center(control)
+    if point:
+        visual.click_at(*point)                                 # the pointer arrives and presses; the real action follows at once
+    if control.kind in FIELD_KINDS and not use_mouse:
+        try:
+            el.SetFocus()
+        except Exception:
+            pass
+        time.sleep(0.08)
+        if _has_focus(el):
+            return "focus"
+        if point:                                               # a page that ignores SetFocus: a real click puts the caret in the box
+            mouse.click(*point)
+            return "mouse"
+        return "focus"
+    if not use_mouse:
         try:
             el.GetCurrentPattern(UIA.UIA_InvokePatternId).QueryInterface(UIA.IUIAutomationInvokePattern).Invoke()
             return "invoke"
         except Exception:
             pass
-    import ctypes
-    rect = el.CurrentBoundingRectangle
-    x, y = (rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2
-    ctypes.windll.user32.SetCursorPos(x, y)
-    ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # left down
-    ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # left up
+    if point:
+        mouse.click(*point)
     return "mouse"
+
+
+@dataclass
+class Field:
+    """The control that has the keyboard right now."""
+    name: str
+    kind: str                # "text field", "combo box", "document" or "other"
+    value: str | None        # what is in it; None = this control cannot be read
+    password: bool
+    read_only: bool | None
+
+
+_FOCUS_KINDS = {UIA.UIA_EditControlTypeId: "text field", UIA.UIA_ComboBoxControlTypeId: "combo box",
+                UIA.UIA_DocumentControlTypeId: "document"}
+
+
+def read_text(el, limit: int = 4000) -> str | None:
+    """The text of a control (a text box, or a document such as Notepad's), or None if it exposes none."""
+    try:
+        pattern = el.GetCurrentPattern(UIA.UIA_ValuePatternId).QueryInterface(UIA.IUIAutomationValuePattern)
+        return pattern.CurrentValue or ""
+    except Exception:
+        pass
+    try:
+        text = el.GetCurrentPattern(UIA.UIA_TextPatternId).QueryInterface(UIA.IUIAutomationTextPattern)
+        return (text.DocumentRange.GetText(limit) or "").rstrip("\r\n")
+    except Exception:
+        return None
+
+
+def focused_field() -> Field | None:
+    """What has the keyboard focus: a text box, a document, or something else. None if Windows cannot say."""
+    try:
+        el = _retrying(lambda: _uia().GetFocusedElement())
+    except comtypes.COMError:
+        return None
+    if el is None:
+        return None
+    try:
+        read_only = bool(el.GetCurrentPattern(UIA.UIA_ValuePatternId).QueryInterface(UIA.IUIAutomationValuePattern).CurrentIsReadOnly)
+    except Exception:
+        read_only = None
+    try:
+        password = bool(el.CurrentIsPassword)
+    except Exception:
+        password = False
+    return Field((el.CurrentName or "").strip(), _FOCUS_KINDS.get(el.CurrentControlType, "other"), read_text(el), password, read_only)
+
+
+def page_rect(hwnd: int) -> tuple[int, int, int, int] | None:
+    """Where the web page itself sits on screen (below the browser's toolbar): (left, top, right, bottom)."""
+    def look():
+        page = _uia().ElementFromHandle(hwnd).FindFirst(UIA.TreeScope_Descendants, _type_condition([UIA.UIA_DocumentControlTypeId]))
+        if not page:                                  # a page that is still loading comes back as a NULL pointer, not None
+            return None
+        r = page.CurrentBoundingRectangle
+        return (r.left, r.top, r.right, r.bottom) if r.right - r.left > 20 and r.bottom - r.top > 20 else None
+
+    try:
+        return _retrying(look)
+    except comtypes.COMError:
+        return None
 
 
 def toolbar_button(hwnd: int, name: str) -> Control | None:

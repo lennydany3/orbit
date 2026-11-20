@@ -13,10 +13,12 @@ from pydantic import BaseModel, Field
 
 from ... import config
 from ..base import Registry, Tool, ToolResult, VerifyResult, read_only_verify
+from ..os_layer import scrolling
 from . import mine, real
 from .session import BrowserUnavailable, find_brave, session
 
 SETTLE_TIMEOUT_S = 4.0
+SEARCH_WAIT_S = 8.0            # how long a new Google results page gets to appear
 _ALLOWED_SCHEMES = {"http", "https"}
 _COMMON_SECOND_LEVEL = {"co", "com", "org", "net", "gov", "ac", "edu"}
 # Clicking something with one of these words may spend money, send something or destroy data: ask first.
@@ -231,8 +233,46 @@ def verify_open(p: OpenParams, r: ToolResult) -> VerifyResult:
     return VerifyResult(True, f"on {page.url}, title '{page.title()}'")
 
 
+SEARCH_URL = "https://www.google.com/search?q="
+
+
 def search_web(p: SearchParams) -> ToolResult:
-    return open_url(OpenParams(url="https://duckduckgo.com/?q=" + quote_plus(p.query)))
+    """Search Google: the results page opens in the browser, ready to scroll and click."""
+    titles_before = real.brave_titles() if _use_my_browser() else set()
+    result = open_url(OpenParams(url=SEARCH_URL + quote_plus(p.query)))
+    if result.ok:
+        result.context.update(query=p.query, titles_before=titles_before)
+    return result
+
+
+def verify_search(p: SearchParams, r: ToolResult) -> VerifyResult:
+    """The page must really be the results (not Google's consent page or a "are you a robot" check)."""
+    verdict = verify_open(OpenParams(url=SEARCH_URL), r)
+    if not verdict.ok:
+        return verdict
+    words = [w for w in re.findall(r"\w+", p.query.lower()) if len(w) > 2]
+    if r.context.get("mine"):
+        hwnd = real.brave_in_front().hwnd
+        old = r.context.get("titles_before", set())
+
+        def results_title():
+            """The window title once the page is a NEW one that looks like results (the old tab's title does not count)."""
+            title = mine.wait_until_loaded(hwnd, 1.0)
+            looks_right = "google search" in title.lower() or any(w in title.lower() for w in words)
+            return title if looks_right and title not in old else None
+
+        title = _wait_for(results_title, timeout=SEARCH_WAIT_S, interval=0.4) or mine.wait_until_loaded(hwnd, 1.0)
+        shown = title.lower()
+    else:
+        page, err = _page_or_error()
+        if err:
+            return VerifyResult(False, err.error)
+        shown = f"{page.title()} {page.url}".lower()
+    if "unusual traffic" in shown or "/sorry/" in shown or "before you continue" in shown:
+        return VerifyResult(False, "Google is asking for a consent or a robot check instead of showing results: look at the browser window")
+    if "google search" in shown or any(w in shown for w in words):
+        return VerifyResult(True, f"Google results are showing ('{shown[:60]}')")
+    return VerifyResult(False, f"the browser shows '{shown[:60]}', not the Google results for '{p.query}'")
 
 
 # ---------------------------------------------------------------- read the page
@@ -251,7 +291,11 @@ def page_info(p: NoParams) -> ToolResult:
 
 # ---------------------------------------------------------------- click
 class ClickParams(BaseModel):
-    text: str = Field(description="visible text of the button or link to click")
+    text: str = Field(default="", description="visible text of the button, link or text box to click, or the picture on it "
+                                               "('search icon', 'magnifying glass', 'three dots', 'menu'); empty when using nth")
+    kind: Literal["any", "field", "button"] = Field(
+        default="any", description="field = a text box (it gets the cursor: use before typing), button = prefer a button/icon over a link or box")
+    nth: int = Field(default=0, ge=-1, le=20, description="click the Nth result link on the page (1 = first, 2 = second ... -1 = last); 0 = use text")
 
 
 def _snapshot(page) -> tuple:
@@ -260,15 +304,22 @@ def _snapshot(page) -> tuple:
 
 
 def click_text(p: ClickParams) -> ToolResult:
+    if not p.text.strip() and not p.nth:
+        return ToolResult.failure("say what to click (its name, or 'the first result')", retryable=False)
     if _use_my_browser():
-        return mine.click(p.text)
+        return mine.click(p.text.strip(), p.kind, p.nth)
+    if p.nth:
+        return ToolResult.failure("picking the Nth result works in your own Brave window (the default mode), not in Orbit's separate browser",
+                                  retryable=False)
     page, err = _page_or_error()
     if err:
         return err
     try:
         before = _snapshot(page)
         target = None
-        for locator in (
+        field_roles = ([page.get_by_role("searchbox", name=p.text), page.get_by_role("textbox", name=p.text),
+                        page.get_by_role("combobox", name=p.text)] if p.kind == "field" else [])
+        for locator in field_roles or (
             page.get_by_role("button", name=p.text),
             page.get_by_role("link", name=p.text),
             page.get_by_text(p.text),
@@ -292,6 +343,10 @@ def verify_click(p: ClickParams, r: ToolResult) -> VerifyResult:
     page, err = _page_or_error()
     if err:
         return VerifyResult(False, err.error)
+    if p.kind == "field":
+        in_a_box = _wait_for(lambda: page.evaluate(
+            "() => { const a = document.activeElement; return !!a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable); }"))
+        return VerifyResult(bool(in_a_box), "the text box has the cursor" if in_a_box else "the text box did not get the cursor")
 
     def changed():
         try:
@@ -304,6 +359,45 @@ def verify_click(p: ClickParams, r: ToolResult) -> VerifyResult:
     if now:
         return VerifyResult(True, "the page changed after the click")
     return VerifyResult(False, "the page looks the same after the click (it may have had no visible effect)")
+
+
+# ---------------------------------------------------------------- scroll
+class ScrollParams(BaseModel):
+    direction: Literal["down", "up", "top", "bottom"] = Field(description="down or up by part of a screen, or all the way to the top or bottom of the page")
+    amount: Literal["little", "normal", "lot"] = Field(default="normal", description="how far: a little, normal (most of a screen), or a lot (two screens)")
+    times: int = Field(default=1, ge=1, le=10, description="how many times to repeat the scroll")
+
+
+_SCROLL_Y_JS = "() => Math.round(window.scrollY)"
+
+
+def scroll_page(p: ScrollParams) -> ToolResult:
+    """Scroll the open page: with the mouse wheel in your own Brave, or through the page itself in Orbit's browser."""
+    if _use_my_browser():
+        return mine.scroll(p.direction, p.amount, p.times)
+    page, err = _page_or_error()
+    if err:
+        return err
+    try:
+        before = page.evaluate(_SCROLL_Y_JS)
+        height = page.evaluate("() => window.innerHeight")
+        page.bring_to_front()
+        if p.direction == "top":
+            page.evaluate("() => window.scrollTo({top: 0, behavior: 'instant'})")
+        elif p.direction == "bottom":
+            page.evaluate("() => window.scrollTo({top: document.documentElement.scrollHeight, behavior: 'instant'})")
+        else:
+            share = scrolling.AMOUNT_SCREENS[p.amount] * p.times
+            page.mouse.move(page.viewport_size["width"] / 2, height * 0.55)
+            page.mouse.wheel(0, (1 if p.direction == "down" else -1) * round(height * share))
+        moved = bool(_wait_for(lambda: page.evaluate(_SCROLL_Y_JS) != before, timeout=1.5, interval=0.1))
+    except PlaywrightError as e:
+        return ToolResult.failure(f"could not scroll: {_first_line(e)}")
+    return scrolling.result_for(scrolling.Outcome(moved, 0), p.direction, p.amount, p.times, 0)
+
+
+def verify_scroll(p: ScrollParams, r: ToolResult) -> VerifyResult:
+    return scrolling.verify(r)
 
 
 # ---------------------------------------------------------------- youtube
@@ -421,10 +515,13 @@ def register_browser_tools(registry: Registry) -> None:
         CloseTabsParams, close_tabs, verify_close_tabs, idempotent=False,
         needs_confirm=lambda p: p.scope != "this" and _use_my_browser() and mine.count_targets(p.scope, p.match.strip()) >= 4)
     add("browser_switch_tab", "Switch to an open browser tab by part of its title.", SwitchTabParams, switch_tab, verify_switch_tab)
-    add("browser_search", "Search the web for a phrase in the browser.", SearchParams, search_web, verify_open)
+    add("browser_search", "Search Google for a phrase: the results page opens in the browser.", SearchParams, search_web, verify_search)
     add("browser_page_info", "Read the title, address and text of the page now open in the browser.", NoParams, page_info, read_only_verify)
-    add("browser_click", "Click a button or link on the open page by its visible text.", ClickParams, click_text, verify_click,
-        idempotent=False, needs_confirm=lambda p: bool(_RISKY_CLICK.search(p.text)))
+    add("browser_click", "Click a button, link or text box on the open page by its visible text or its icon (search icon, menu, three dots), "
+        "or the Nth result link (nth=1 is the first result). A clicked text box gets the cursor, ready for typing.",
+        ClickParams, click_text, verify_click, idempotent=False, needs_confirm=lambda p: bool(_RISKY_CLICK.search(p.text)))
+    add("browser_scroll", "Scroll the open web page down or up, or to its top or bottom.", ScrollParams, scroll_page, verify_scroll,
+        idempotent=False)
     add("browser_youtube_play", "Search YouTube for something and play the first video.", YoutubeParams, youtube_play, verify_youtube_play,
         idempotent=False)  # a retry would click another video
     add("browser_fullscreen", "Make the video on the open page fullscreen, or leave fullscreen.", FullscreenParams, set_fullscreen, verify_fullscreen)

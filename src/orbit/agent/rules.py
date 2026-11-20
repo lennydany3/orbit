@@ -10,6 +10,7 @@ from typing import Callable
 from urllib.parse import quote_plus
 
 from .. import config
+from ..tools.os_layer import symbols
 
 
 @dataclass
@@ -135,6 +136,66 @@ _DEV_VOLUME_SET = [  # three ways people say it, each with its own groups
 _DEV_VOLUME_STEP = re.compile(
     rf"^(?P<verb>{_DOWN}|{_UP})\s+(?:the\s+)?(?:volume|sound)\s+(?:of|on|in|for)\s+{_DEV_NAME}{_BY}$", re.I)
 
+# --- clicking: "click the first result", "click the search box", "click the search icon" ---
+_ORDINALS = {"first": 1, "1st": 1, "top": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3, "fourth": 4, "4th": 4, "fifth": 5, "5th": 5,
+             "sixth": 6, "6th": 6, "seventh": 7, "7th": 7, "eighth": 8, "8th": 8, "ninth": 9, "9th": 9, "tenth": 10, "10th": 10, "last": -1}
+_ORD = "|".join(_ORDINALS)
+_BOX_WORDS = ("box", "bar", "field", "input", "textbox")
+
+
+def _click_args(m: re.Match) -> dict:
+    """"click the search box" -> a text box; "click the search icon" keeps the word icon (so the picture is looked up by the
+    names it usually has); a plain "click go button" stays exactly {"text": "go"}."""
+    text, what = m["text"].strip(), (m["what"] or "").lower()
+    if what in _BOX_WORDS:
+        return {"text": text, "kind": "field"}
+    if what in ("icon", "symbol"):
+        return {"text": f"{text} {what}"}
+    if what == "button" and symbols.identify(f"{text} button") is not None and symbols.identify(text) is None:
+        return {"text": f"{text} button"}                   # "the x button", "the plus button": the picture, not a word on a page
+    return {"text": text}
+
+
+# --- scrolling: "scroll down", "scroll up a little", "scroll down 3 times", "scroll to the bottom", "page down" ---
+_SCROLL_TAIL = (r"(?:\s+(?:the\s+)?(?:page|results?|screen|list|window|a (?:little|bit|lot|touch)|slightly|more|further|again|all the way|"
+                r"\d{1,2}\s*(?:times|x|pages|screens?)|twice|thrice|(?:one|a)\s+(?:page|screen)|(?:full|whole|big)\s+(?:page|screen)))*")
+_NUMBER_WORDS = {"twice": 2, "thrice": 3}
+
+
+def _edge_direction(word: str) -> str:
+    """"top", "start", "up" (as in "all the way up") -> the top of the page; "bottom", "end", "down" -> the bottom."""
+    return "top" if word.lower() in ("top", "start", "beginning", "up") else "bottom"
+
+
+def _scroll_args(direction: str, tail: str) -> dict:
+    tail = (tail or "").lower()
+    args: dict = {"direction": direction.lower()}
+    if re.search(r"a lot|all the way|full|whole|big", tail):
+        args["amount"] = "lot"
+    elif re.search(r"a little|a bit|a touch|slightly", tail):
+        args["amount"] = "little"
+    n = re.search(r"(\d{1,2})\s*(?:times|x|pages|screens?)", tail)
+    times = int(n.group(1)) if n else next((v for k, v in _NUMBER_WORDS.items() if k in tail), 1)
+    if times > 1:
+        args["times"] = min(times, 10)
+    return args
+
+
+# --- typing: "type tamil news live", "type cats in the search box", "press enter" ---
+def _clean_text(text: str) -> str:
+    """The words to type, without the quotation marks a person puts round them."""
+    return text.strip().strip("\"'\u201c\u201d\u2018\u2019").strip()
+
+
+_TYPE_VERB = r"(?:type|write|input|enter|key in|fill in)"
+_PRESS_ENTER = r"(?:(?:and\s+|then\s+)?(?:press|hit|push)\s+(?:the\s+)?(?:enter|return)(?:\s+key)?|(?:and\s+)?(?:then\s+)?search(?:\s+it)?|(?:and\s+)?submit(?:\s+it)?)"
+
+
+def _box_name(box: str) -> str:
+    name = re.sub(r"\b(?:box|bar|field|input|textbox|the|that|a)\b", " ", box.lower())
+    return " ".join(name.split()) or "search"
+
+
 # (rule name, pattern, builder). Patterns are matched against the whole sentence, case-insensitively.
 # Anything with extra clauses ("open X and play Y") deliberately does not match and goes to the model.
 RULES: list[tuple[str, re.Pattern, Builder]] = [
@@ -148,6 +209,8 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
     ("spotify-transfer-device", _TRANSFER_EXPLICIT, _transfer),
     ("spotify-transfer-kind", _TRANSFER_KIND, _transfer),
     # --- browser layer (before open-app: "open github" is a website, not an installed app) ---
+    ("click-nth-result", re.compile(rf"^(?:click|open|press|tap|select|hit|visit|play|watch)\s+(?:on\s+)?(?:the\s+)?(?P<ord>{_ORD})\s+(?:search\s+)?(?:result|link|site|website|page|one|hit)s?$", re.I),
+     lambda m: ("browser_click", {"nth": _ORDINALS[m["ord"].lower()]})),
     ("open-site", re.compile(rf"^{_VERB}\s+(?:(?P<my>my )|the )?(?P<site>{_SITE_NAMES})(?: (?:website|site|page|account|profile))?$", re.I),
      lambda m: ("browser_open", {"url": _site_url(m["site"].lower(), bool(m["my"]))})),
     ("open-url", re.compile(rf"^{_VERB}\s+(?P<url>(?:https?://)?[\w-]+(?:\.[\w-]+)+(?:/\S*)?)$", re.I),
@@ -164,12 +227,25 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
         r"^(?:bring|put|move|get)\s+(?:the\s+|my\s+)?(?!(?:it|that|this|them|me)\b)(?P<name>[\w+&'-]+(?: [\w+&'-]+){0,2}?)(?: (?:app|window))?\s+"
         r"(?:to|in|into|on)\s+(?:the\s+)?(?:front|foreground|top|forefront)$", re.I),
      lambda m: ("os_open_app", {"name": m["name"].strip().title()})),
+    ("press-enter", re.compile(r"^(?:(?:press|hit|push|tap)\s+)?(?:the\s+)?(?:enter|return)(?:\s+(?:key|button))?$", re.I),
+     lambda m: ("os_type", {"text": "", "enter": True})),
+    ("type-into-box", re.compile(
+        rf"^{_TYPE_VERB}\s+(?P<text>.+?)\s+(?:in|into|in to|inside|on)\s+(?:the\s+|that\s+)?(?P<box>(?:\w+\s+){{0,2}}(?:box|bar|field|input|textbox))(?P<go>\s+{_PRESS_ENTER})?$", re.I),
+     lambda m: ("os_type", {"text": _clean_text(m["text"]), "into": _box_name(m["box"]), **({"enter": True} if m["go"] else {})})),
+    ("type", re.compile(rf"^{_TYPE_VERB}\s+(?P<text>.+?)(?P<go>\s+{_PRESS_ENTER})?$", re.I),
+     lambda m: ("os_type", {"text": _clean_text(m["text"]), **({"enter": True} if m["go"] else {})})),
+    ("scroll-edge", re.compile(r"^(?:please\s+)?(?:scroll|go|jump|move|take me|head|get)\s+(?:all the way\s+)?(?:back\s+)?(?:up\s+|down\s+)?(?:to\s+)?(?:the\s+)?"
+                               r"(?P<edge>top|bottom|end|start|beginning)(?:\s+of\s+(?:the\s+)?(?:page|results?|screen|list|site))?$|^(?:scroll|go)\s+all the way\s+(?P<way>down|up)$", re.I),
+     lambda m: ("browser_scroll", {"direction": _edge_direction(m["way"] or m["edge"])})),
+    ("scroll", re.compile(rf"^(?:please\s+)?(?:scroll|roll|move|go|swipe)(?:\s+the\s+(?:page|results?|screen|list|window))?\s+(?P<dir>down|up)(?P<tail>{_SCROLL_TAIL})$", re.I),
+     lambda m: ("browser_scroll", _scroll_args(m["dir"], m["tail"]))),
+    ("page-down", re.compile(r"^page\s+(?P<dir>down|up)$", re.I), lambda m: ("browser_scroll", {"direction": m["dir"].lower()})),
     ("click-in-app", _CLICK_IN_APP, lambda m: _click_in(m["t"], m["app"])),
     ("in-app-click", _IN_APP_CLICK, lambda m: _click_in(m["t"], m["app"])),
-    ("click-first-video", re.compile(r"^(?:click|press|tap|select|hit|open|play)\s+(?:on\s+)?(?:the\s+)?(?:first|top|1st)\s+(?:video|result|one)$", re.I),
+    ("click-first-video", re.compile(r"^(?:click|press|tap|select|hit|open|play)\s+(?:on\s+)?(?:the\s+)?(?:first|top|1st)\s+video$", re.I),
      lambda m: ("browser_youtube_play", {"query": ""})),
-    ("click", re.compile(r"^(?:click|press|tap|select|hit)\s+(?:on\s+)?(?:the\s+)?(?!(?:it|that|this)$)(?P<text>.+?)(?: (?:button|link|video))?$", re.I),
-     lambda m: ("browser_click", {"text": m["text"].strip()})),
+    ("click", re.compile(r"^(?:click|press|tap|select|hit)\s+(?:on\s+)?(?:the\s+)?(?!(?:it|that|this)$)(?P<text>.+?)(?: (?P<what>button|link|video|icon|symbol|box|bar|field|input|textbox))?$", re.I),
+     lambda m: ("browser_click", _click_args(m))),
     # --- browser history and home pages: "go back" is the browser's Back button, not the previous song ---
     ("browser-back", re.compile(r"^(?:go |navigate |take me |step )?back(?: (?:a page|one page|to the previous page|to the last page|to the page before))?$", re.I),
      lambda m: ("browser_navigate", {"action": "back"})),
@@ -191,7 +267,9 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
      lambda m: ("browser_fullscreen", {"on": False})),
     ("fullscreen-on", re.compile(r"^(?:go |make (?:it|the video) )?full ?screen(?: (?:it|the video))?$", re.I),
      lambda m: ("browser_fullscreen", {"on": True})),
-    ("web-search", re.compile(r"^(?:search|google)\s+(?:for\s+)?(?!.*\b(?:and|then)\b)(?P<q>.+)$", re.I),
+    ("search-in-box", re.compile(r"^(?:search|look up)\s+(?:for\s+)?(?P<q>.+?)\s+(?:in|on|using|with|into)\s+(?:the\s+)?(?:page'?s?\s+)?search\s+(?:box|bar|field)$", re.I),
+     lambda m: ("os_type", {"text": _clean_text(m["q"]), "into": "search", "enter": True})),
+    ("web-search", re.compile(r"^(?:search|google|look up)\s+(?:(?:the\s+)?(?:web|internet|google)\s+)?(?:for\s+)?(?!.*\b(?:and|then)\b)(?P<q>.+?)(?:\s+(?:on|in|with|using|via)\s+(?:google|the web|the internet))?$", re.I),
      lambda m: ("browser_search", {"query": m["q"]})),
     # --- OS layer ---
     ("open-app", re.compile(r"^(?:please )?(?:open|launch|start)\s+(?:the |my )?(?!.*\b(?:and|then)\b)(?!(?:it|that|this|them|again)$)(?P<name>[\w .+&'-]+?)(?: app)?$", re.I),
@@ -303,13 +381,15 @@ def normalize(text: str) -> str:
     return _BROWSER_TAIL.sub("", text).strip()
 
 
-_SPLIT = re.compile(r"\s*,\s*(?:and\s+|then\s+)?|\s+(?:and\s+then|then|and|&)\s+", re.I)
+# ("an" is "and" mistyped: "click the search an type cats")
+_SPLIT = re.compile(r"\s*,\s*(?:and\s+|then\s+)?|\s+(?:and\s+then|then|and|&)\s+|\s+an\s+(?=(?:type|click|press|scroll|enter)\b)", re.I)
 
 
 COMMAND_WORDS = frozenset(
     "open launch start close quit exit play pause resume stop next skip previous prev mute unmute set turn volume "
     "switch move transfer send cast change search google go visit show list tell what whats what's who how "
-    "fullscreen full minimize maximize put make increase decrease raise lower find watch look try use say read check bring".split())
+    "fullscreen full minimize maximize put make increase decrease raise lower find watch look try use say read check bring "
+    "click press tap hit select type write enter scroll".split())
 _SHARE_VERB = frozenset({"open", "close", "launch", "start", "quit"})  # "close the clock and the calculator"
 _NOT_A_NAME = frozenset("do it that this them tell show what how why please also maybe then".split())
 

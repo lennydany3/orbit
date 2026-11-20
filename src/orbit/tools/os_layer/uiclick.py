@@ -5,7 +5,7 @@ import time
 from typing import Callable
 
 from ..base import ToolResult, VerifyResult
-from . import screen, uia, windows
+from . import screen, symbols, uia, windows
 
 _RISKY = re.compile(
     r"\b(buy|purchase|pay|checkout|order|send|post|publish|delete|remove|submit|confirm|unsubscribe|subscribe|"
@@ -41,7 +41,7 @@ def _shot_of(win: windows.Window) -> screen.Shot:
     return screen.capture(left, top, right - left, bottom - top)
 
 
-def click(text: str, window: str) -> ToolResult:
+def click(text: str, window: str, kind: str = "any") -> ToolResult:
     win = target_window(window)
     if win is None:
         what = f"a window called '{window}'" if window else "a window to work in"
@@ -54,7 +54,7 @@ def click(text: str, window: str) -> ToolResult:
     try:
         before = _shot_of(win)
         names = [c for c in uia.window_controls(win.hwnd)]
-        hits = uia.find(names, text)
+        hits = uia.find(names, text, kind)
         how, matched = "", ""
         if hits:
             target = hits[0]
@@ -65,6 +65,11 @@ def click(text: str, window: str) -> ToolResult:
         else:
             words = screen.read_words(before)
             spot = screen.find_text(words, text)
+            symbol = symbols.identify(text)
+            by_symbol = False
+            if spot is None and symbol is not None:
+                spot = screen.find_glyph(words, symbol.glyphs)      # a picture the OCR engine reads as a character: x, +, a heart...
+                by_symbol = spot is not None
             if spot is None:
                 seen = "; ".join(c.name[:40] for c in names[:10]) or "no named controls"
                 on_screen = " ".join(w.text for w in words[:25]) or "no readable text"
@@ -75,10 +80,11 @@ def click(text: str, window: str) -> ToolResult:
             if _RISKY.search(matched) and not _RISKY.search(text):
                 return ToolResult.failure(f"the words I found there ('{matched}') look risky and you did not name them", retryable=False)
             screen.click_at(before.left + x, before.top + y)
-            how = "ocr"
+            how = "symbol" if by_symbol else "ocr"
     except (screen.ScreenError, OSError) as e:
         return ToolResult.failure(f"could not look at the window: {e}", retryable=False)
-    means = {"invoke": "pressed its control", "mouse": "clicked it", "ocr": "clicked the words on screen"}.get(how, how)
+    means = {"invoke": "pressed its control", "focus": "put the cursor in it", "mouse": "clicked it",
+             "ocr": "clicked the words on screen", "symbol": "clicked the symbol on screen"}.get(how, how)
     result = ToolResult.success(f"clicked '{matched[:60]}' in '{win.title[:40]}' ({means})")
     result.context.update(hwnd=win.hwnd, before=before, title=win.title, how=how)
     return result

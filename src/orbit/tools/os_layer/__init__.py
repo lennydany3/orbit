@@ -6,7 +6,7 @@ from typing import Callable, Literal
 from pydantic import BaseModel, Field
 
 from ..base import Registry, Tool, ToolResult, VerifyResult, read_only_verify
-from . import apps, media, monitors, processes, uiclick, volume, windows
+from . import apps, glide, media, monitors, processes, scrolling, textinput, uiclick, volume, windows
 
 APP_START_TIMEOUT_S = 12.0
 SETTLE_TIMEOUT_S = 3.0
@@ -137,6 +137,7 @@ def close_window(p: CloseParams) -> ToolResult:
     if blocked:
         return blocked
     exe_path = processes.window_exe_path(target.hwnd)          # read before closing: the process may be gone afterwards
+    glide.press_caption_button(target.hwnd, "close")           # (the animated pointer presses the window's X; the real close follows)
     error = windows.close(target.hwnd)
     if error not in (None, 0):
         return ToolResult.failure(f"Windows refused the request to close '{target.title[:40]}' (error {error}). "
@@ -253,7 +254,7 @@ def move_window(p: MoveParams) -> ToolResult:
     rel_y = (top - st) / max(1, sb - st)
     new_l = min(max(dl + round(rel_x * (dr - dl)), dl), dr - new_w)
     new_t = min(max(dt + round(rel_y * (db - dt)), dt), db - new_h)
-    windows.set_rect(win.hwnd, new_l, new_t, new_w, new_h)
+    glide.glide_window(win.hwnd, (new_l, new_t, new_w, new_h))      # the pointer grabs the title bar and carries the window across
     if was_maximized:
         windows.maximize(win.hwnd)
     result.summary = f"moved '{win.title[:40]}' to {names[dst.handle]}" + (" (still maximized)" if was_maximized else "")
@@ -281,10 +282,14 @@ def arrange_window(p: ArrangeParams) -> ToolResult:
     result = ToolResult.success(f"{p.action}: '{win.title[:40]}'")
     result.context.update(hwnd=win.hwnd, action=p.action)
     if p.action == "maximize":
+        glide.press_caption_button(win.hwnd, "restore" if windows.is_maximized(win.hwnd) else "maximize")
         windows.maximize(win.hwnd)
     elif p.action == "minimize":
+        glide.press_caption_button(win.hwnd, "minimize")
         windows.minimize(win.hwnd)
     elif p.action == "restore":
+        if not windows.is_minimized(win.hwnd):
+            glide.press_caption_button(win.hwnd, "restore" if windows.is_maximized(win.hwnd) else "maximize")
         windows.restore(win.hwnd)
     else:
         if windows.is_maximized(win.hwnd) or windows.is_minimized(win.hwnd):
@@ -298,7 +303,7 @@ def arrange_window(p: ArrangeParams) -> ToolResult:
             "top": (wl, wt, w, h // 2), "bottom": (wl, wt + h // 2, w, h // 2),
             "center": (wl + (w - (cur[2] - cur[0])) // 2, wt + (h - (cur[3] - cur[1])) // 2, cur[2] - cur[0], cur[3] - cur[1]),
         }[p.action]
-        windows.set_rect(win.hwnd, *target)
+        glide.glide_window(win.hwnd, target)
         result.context["target_rect"] = (target[0], target[1], target[0] + target[2], target[1] + target[3])
     return result
 
@@ -322,8 +327,9 @@ def verify_arrange_window(p: ArrangeParams, r: ToolResult) -> VerifyResult:
 
 
 class ClickParams(BaseModel):
-    text: str = Field(description="the name or words of the button/control to click, e.g. GO or Start")
+    text: str = Field(description="the name or words of the button/control to click, e.g. GO or Start, or the picture on it (search icon, gear, three dots)")
     window: str = Field(default="", description="the app window it is in, e.g. Speedtest (empty = the window in front)")
+    kind: Literal["any", "field", "button"] = Field(default="any", description="field = a text box (it gets the cursor: use before typing), button = prefer a button")
 
 
 class ReadWindowParams(BaseModel):
@@ -331,7 +337,7 @@ class ReadWindowParams(BaseModel):
 
 
 def ui_click(p: ClickParams) -> ToolResult:
-    return uiclick.click(p.text.strip(), p.window.strip())
+    return uiclick.click(p.text.strip(), p.window.strip(), p.kind)
 
 
 def verify_ui_click(p: ClickParams, r: ToolResult) -> VerifyResult:
@@ -340,6 +346,32 @@ def verify_ui_click(p: ClickParams, r: ToolResult) -> VerifyResult:
 
 def read_window(p: ReadWindowParams) -> ToolResult:
     return uiclick.read_window(p.window.strip())
+
+
+class ScrollParams(BaseModel):
+    direction: Literal["down", "up", "top", "bottom"] = Field(description="down or up by part of a screen, or all the way to the top or bottom")
+    amount: Literal["little", "normal", "lot"] = Field(default="normal", description="how far: a little, normal (most of a screen), or a lot (two screens)")
+    times: int = Field(default=1, ge=1, le=10, description="how many times to repeat the scroll")
+    window: str = Field(default="", description="the app window to scroll (empty = the window in front)")
+
+
+def scroll_window(p: ScrollParams) -> ToolResult:
+    win = uiclick.target_window(p.window.strip())
+    if win is None:
+        what = f"a window called '{p.window}'" if p.window.strip() else "a window to scroll"
+        return ToolResult.failure(f"I can't find {what}", retryable=False, not_found=True)
+    if windows.is_minimized(win.hwnd):
+        windows.restore(win.hwnd)
+    windows.focus(win.hwnd)
+    left, top, right, bottom = windows.visible_rect(win.hwnd)
+    scale = glide.dpi_scale()
+    region = (left, top + round(48 * scale), right, bottom)                 # below the title bar
+    outcome = scrolling.scroll_region(region, p.direction, p.amount, p.times, scale)
+    return scrolling.result_for(outcome, p.direction, p.amount, p.times, win.hwnd)
+
+
+def verify_scroll_window(p: ScrollParams, r: ToolResult) -> VerifyResult:
+    return scrolling.verify(r)
 
 
 def list_windows(p: NoParams) -> ToolResult:
@@ -493,6 +525,15 @@ def register_os_tools(registry: Registry) -> None:
         params=ClickParams, layer="os", risk="low", run=ui_click, verify=verify_ui_click, idempotent=False,
         needs_confirm=lambda p: bool(uiclick._RISKY.search(p.text))))
     add("os_read_window", "Read the buttons and text of a desktop app's window.", ReadWindowParams, read_window, read_only_verify)
+    registry.register(Tool(
+        name="os_scroll", description="Scroll a desktop app's window down or up (or to its top or bottom) with the mouse wheel. For a web page use browser_scroll.",
+        params=ScrollParams, layer="os", risk="low", run=scroll_window, verify=verify_scroll_window, idempotent=False))
+    registry.register(Tool(
+        name="os_type",
+        description="Type words into the text box that has the cursor (a search box, Notepad), optionally clicking a named box first, "
+                    "and optionally pressing Enter. Only for words the user actually said; use after the user asks to type.",
+        params=textinput.TypeParams, layer="os", risk="low", run=textinput.type_into, verify=textinput.verify_type, idempotent=False,
+        user_text="text"))
     add("os_list_windows", "List the open windows.", NoParams, list_windows, read_only_verify)
     add("os_media_key", "Play, pause, skip to next or go to previous track of the current media.", MediaKeyParams, media_key, verify_media_key)
     add("os_media_status", "Say what media is playing now and whether it is paused.", NoParams, media_status, read_only_verify)

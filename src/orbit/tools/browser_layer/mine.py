@@ -7,9 +7,10 @@ frames. Everything read from a page is untrusted data.
 import re
 import time
 from typing import Callable
+from urllib.parse import urlparse
 
 from ..base import ToolResult, VerifyResult
-from ..os_layer import media, uia, windows
+from ..os_layer import glide, media, screen, scrolling, symbols, uia, windows
 from . import real
 
 _VIDEO_LINK = re.compile(r"\b\d+ (?:seconds?|minutes?|hours?)\b", re.I)
@@ -19,6 +20,8 @@ _RISKY = re.compile(
 SETTLE_S = 5.0
 RESULTS_WAIT_S = 15.0
 LINK_GRACE_S = 2.5  # how long a clicked link gets to change the address before we try a real mouse click
+NTH_WAIT_S = 6.0    # how long "click the first result" keeps looking while a results page is still loading
+FOCUS_WAIT_S = 2.5  # how long a clicked text box gets to take the keyboard
 PAGE_WAIT_S = 12.0  # "open youtube and play some video": how long to wait for the page to be YouTube
 
 
@@ -74,21 +77,130 @@ def _page_controls(hwnd: int) -> list[uia.Control]:
     return _wait(lambda: uia.controls(hwnd) or None, PAGE_WAIT_S, interval=1.0) or []
 
 
-def click(text: str) -> ToolResult:
+def _bring_to_front(win: windows.Window) -> None:
+    """Orbit's pointer is drawn over the screen, so the page it points at must really be the one in front."""
+    fg = windows.foreground_window()
+    if fg is None or fg.hwnd != win.hwnd:
+        windows.focus(win.hwnd)
+
+
+_NOT_A_RESULT = re.compile(r"^(skip to|accessibility|sign in|log in|images?|videos?|news|maps|shopping|books|flights|finance|more|tools|"
+                           r"settings|privacy|terms|feedback|help|advertising|about|search tools|all filters)\b", re.I)
+
+
+def _site(host: str) -> str:
+    labels = host.lower().removeprefix("www.").split(".")
+    return labels[-2] if len(labels) >= 2 else labels[0]
+
+
+def result_links(items: list[uia.Control], strict: bool = False) -> list[uia.Control]:
+    """The links that are the page's actual results (a search page's hits), in page order: real web addresses with a title-like
+    name, each address once, and the search engine's own menu links left out. Off a search page, if every link is the site's own
+    (a GitHub page, say), those are used; on a search page (`strict`) they never are: no hits yet means the page is still loading."""
+    chosen: list[tuple[uia.Control, str]] = []
+    seen: set[str] = set()
+    for c in items:
+        if c.kind != "link" or len(c.name) < 10 or _NOT_A_RESULT.match(c.name):
+            continue
+        href = uia.link_target(c)
+        if not href.startswith(("http://", "https://")):
+            continue
+        key = href.split("#")[0]
+        if key in seen:
+            continue
+        seen.add(key)
+        chosen.append((c, _site(urlparse(href).hostname or "")))
+    outside = [c for c, site in chosen if site != "google"]
+    return outside if strict else (outside or [c for c, _ in chosen])
+
+
+def _nth_link(items: list[uia.Control], n: int, hwnd: int) -> tuple[uia.Control | None, str]:
+    """The `n`th result on the page (1 = first, -1 = last) as (control, '') or (None, why not)."""
+    address = uia.address_bar(hwnd).lower()
+    on_youtube = "youtube.com" in address
+    pool = ([c for c in items if c.kind == "link" and not c.offscreen and "shorts" not in c.name.lower() and _VIDEO_LINK.search(c.name)]
+            if on_youtube else result_links(items, strict="google." in address and "/search" in address))
+    if not pool:
+        return None, f"I don't see any results on this page to pick from. Some things I can see: {_some_names(items)}"
+    index = n - 1 if n > 0 else len(pool) + n
+    if not 0 <= index < len(pool):
+        return None, f"there are only {len(pool)} results I can see on this page, so there is no number {abs(n)}"
+    return pool[index], ""
+
+
+def _fields_on_page(items: list[uia.Control], n: int = 8) -> str:
+    names = [c.name[:40] for c in items if c.kind in uia.FIELD_KINDS and not c.offscreen]
+    return "; ".join(names[:n]) or "no text boxes (is the page still loading?)"
+
+
+def _ocr_spot(win: windows.Window, text: str) -> tuple[int, int, str, str, screen.Shot] | None:
+    """Read the page's pixels with OCR and find the words, or the symbol (a character OCR reads: x, +, a heart...), that were asked
+    for: (screen x, screen y, what was found, "words" | "symbol", the picture). None when nothing matches."""
+    left, top, right, bottom = uia.page_rect(win.hwnd) or windows.visible_rect(win.hwnd)
+    try:
+        picture = screen.capture(left, top, right - left, bottom - top)
+        words = screen.read_words(picture)
+    except (screen.ScreenError, OSError):
+        return None
+    spot, via = screen.find_text(words, text), "words"
+    if spot is None:
+        symbol = symbols.identify(text)
+        spot, via = (screen.find_glyph(words, symbol.glyphs) if symbol else None), "symbol"
+    if spot is None:
+        return None
+    x, y, found = spot
+    return left + x, top + y, found, via, picture
+
+
+def _click_what_is_drawn(win: windows.Window, text: str, seen: tuple[int, int, str, str, screen.Shot]) -> ToolResult:
+    """Click where OCR found the words or the symbol (a real mouse click: the page does not name it, so it cannot be pressed
+    the accessible way). Checked afterwards by whether the page changed."""
+    x, y, found, via, picture = seen
+    if _RISKY.search(found) and not _RISKY.search(text):
+        return ToolResult.failure(f"the words I found on the page ('{found[:40]}') look risky and you did not name them", retryable=False)
+    _bring_to_front(win)
+    before = _snapshot(win.hwnd)
+    screen.click_at(x, y)
+    what = "the symbol" if via == "symbol" else "the words"
+    result = ToolResult.success(f"clicked {what} '{found[:50]}' that I read on your Brave page")
+    result.context.update(mine=True, hwnd=win.hwnd, before=before, how="ocr", clicked=found, kind="ocr", picture=picture)
+    return result
+
+
+def click(text: str, kind: str = "any", nth: int = 0) -> ToolResult:
+    """Click a control by its name or picture ("the search icon"), a text box by its name (it gets the cursor), or the Nth result."""
     win, err = _window_or_error()
     if err:
         return err
     items = _page_controls(win.hwnd)
-    hits = uia.find(items, text)
-    if not hits:
-        return ToolResult.failure(
-            f"nothing in your Brave window is called '{text}'. Some things I can see: {_some_names(items)}",
-            retryable=False, not_found=True)
-    target = hits[0]
+    if nth:
+        target, problem = _nth_link(items, nth, win.hwnd)
+        if target is None:                                  # a results page that is still loading: look again for a few seconds
+            def results_arrived():
+                found, _ = _nth_link(uia.controls(win.hwnd), nth, win.hwnd)
+                return found
+            target = _wait(results_arrived, NTH_WAIT_S, interval=0.6)
+        if target is None:
+            return ToolResult.failure(problem, retryable=False, not_found=True)
+    else:
+        hits = uia.find(items, text, kind)
+        if not hits and kind != "field":
+            seen = _ocr_spot(win, text)            # the page names nothing like it: read what is drawn on screen (words in images, symbols)
+            if seen is not None:
+                return _click_what_is_drawn(win, text, seen)
+        if not hits:
+            if kind == "field":
+                return ToolResult.failure(f"no text box on your Brave page is called '{text}'. Text boxes I can see: {_fields_on_page(items)}",
+                                          retryable=False, not_found=True)
+            return ToolResult.failure(
+                f"nothing in your Brave window is called '{text}'. Some things I can see: {_some_names(items)}",
+                retryable=False, not_found=True)
+        target = hits[0]
     if _RISKY.search(target.name) and not _RISKY.search(text):
         return ToolResult.failure(
             f"the closest match is '{target.name[:60]}', which looks risky and you did not name it. "
             "Say its exact name if you really mean it.", retryable=False)
+    _bring_to_front(win)
     before = _snapshot(win.hwnd)
     how = uia.click(target)
     if target.kind == "link" and not _wait(lambda: uia.address_bar(win.hwnd) != before[1], LINK_GRACE_S):
@@ -99,15 +211,40 @@ def click(text: str) -> ToolResult:
             windows.focus(win.hwnd)
             if uia.set_address(win.hwnd, href):
                 how = "address"
-    result = ToolResult.success(f"clicked '{target.name[:70]}' ({target.kind}) in your Brave")
-    result.context.update(mine=True, hwnd=win.hwnd, before=before, how=how, clicked=target.name, kind=target.kind)
+    if target.kind in uia.FIELD_KINDS:
+        summary = f"put the cursor in the '{target.name[:50]}' {target.kind} in your Brave"
+    else:
+        summary = f"clicked '{target.name[:70]}' ({target.kind}) in your Brave"
+    result = ToolResult.success(summary)
+    result.context.update(mine=True, hwnd=win.hwnd, before=before, how=how, clicked=target.name, kind=target.kind, element=target.element)
     return result
 
 
 def verify_click(r: ToolResult) -> VerifyResult:
-    """Success = the page (title/address) changed, or the control we pressed changed or went away (a toggle flips its label)."""
+    """Success = the page (title/address) changed, or the control we pressed changed or went away (a toggle flips its label).
+    For a text box: it has the cursor now."""
     hwnd, before, clicked = r.context["hwnd"], r.context["before"], r.context["clicked"]
     is_link = r.context.get("kind") == "link"
+    if r.context.get("kind") in uia.FIELD_KINDS:
+        def has_cursor():
+            if uia._has_focus(r.context["element"]):
+                return True
+            field = uia.focused_field()
+            return field is not None and field.kind in uia.FIELD_KINDS and field.name == clicked
+        ok = _wait(has_cursor, FOCUS_WAIT_S, interval=0.2)
+        return VerifyResult(bool(ok), "the text box has the cursor" if ok else "the text box did not get the cursor")
+
+    if r.context.get("kind") == "ocr":
+        def moved_on():
+            title, url = _snapshot(hwnd)
+            if (title, url) != before:
+                return f"the page changed: now '{title[:60]}' {url}"
+            left, top, right, bottom = uia.page_rect(hwnd) or windows.visible_rect(hwnd)
+            if screen.changed_pixels(r.context["picture"], screen.capture(left, top, right - left, bottom - top)) >= 40:
+                return "the page changed on screen"
+            return None
+        why = _wait(moved_on, SETTLE_S)
+        return VerifyResult(True, why) if why else VerifyResult(False, "the page looks the same after the click (it may have had no visible effect)")
 
     def changed():
         title, url = _snapshot(hwnd)
@@ -121,6 +258,25 @@ def verify_click(r: ToolResult) -> VerifyResult:
 
     why = _wait(changed, SETTLE_S)
     return VerifyResult(True, why) if why else VerifyResult(False, "the page looks the same after the click (it may have had no visible effect)")
+
+
+# ---------------------------------------------------------------- scroll
+def scroll(direction: str, amount: str, times: int) -> ToolResult:
+    """Scroll the page in your Brave with the mouse wheel, Orbit's pointer gliding over it first."""
+    win, err = _window_or_error()
+    if err:
+        return err
+    _bring_to_front(win)
+    region = uia.page_rect(win.hwnd) or windows.visible_rect(win.hwnd)
+    outcome = scrolling.scroll_region(region, direction, amount, times, glide.dpi_scale())
+    result = scrolling.result_for(outcome, direction, amount, times, win.hwnd)
+    result.summary += " in your Brave"
+    result.context["mine"] = True
+    return result
+
+
+def verify_scroll(r: ToolResult) -> VerifyResult:
+    return scrolling.verify(r)
 
 
 # ---------------------------------------------------------------- read

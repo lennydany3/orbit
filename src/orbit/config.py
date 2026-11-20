@@ -43,9 +43,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # --- Browser layer ---
 BROWSER = os.environ.get("ORBIT_BROWSER", "brave").lower()  # "brave" or "chrome": which installed browser Orbit drives
-# Where "open <website>" goes: "mine" = a link opened in your own Brave profile (your logins work, but Orbit cannot read or
-# click in that page); "orbit" = Orbit's separate automated window (Orbit can read and click, but sites that distrust
-# automated browsers, like Google sign-in, refuse to log you in there).
+# Where "open <website>" goes: "mine" = a link opened in your own Brave profile (your logins work; Orbit reads, clicks, scrolls and
+# types in that page through Windows UI Automation and the mouse wheel); "orbit" = Orbit's separate automated window (driven
+# with Playwright, but sites that distrust automated browsers, like Google sign-in, refuse to log you in there).
 BROWSER_MODE = os.environ.get("ORBIT_BROWSER_MODE", "mine").lower()
 BRAVE_PROFILE = os.environ.get("ORBIT_BRAVE_PROFILE", "Personal")  # the Brave profile name shown in Brave's profile menu
 BROWSER_HEADLESS = False        # visible window: you can watch it work, and fullscreen is real
@@ -58,6 +58,10 @@ BRAVE_PATHS = [
 
 # "open my github" opens this profile (github.com/<name>). Change it with the ORBIT_GITHUB_USER environment variable.
 GITHUB_USER = os.environ.get("ORBIT_GITHUB_USER", "lennydany3")
+
+# --- On-screen animations: Orbit's pointer gliding to what it clicks, the click ripple, the "working" pill ---
+VISUALS = os.environ.get("ORBIT_VISUALS", "1").lower() not in ("0", "off", "false", "no")   # --no-visuals turns them off for one run
+VISUALS_SPEED = float(os.environ.get("ORBIT_VISUALS_SPEED", "1"))                            # 2 = twice as fast, 0.5 = half as fast
 
 # --- Safety ---
 LOG_DIR = PROJECT_ROOT / "logs"

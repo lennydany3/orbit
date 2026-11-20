@@ -14,12 +14,14 @@ only while Orbit is doing something.
   to the cloud on its own, for much lower latency.
 - **Safe by design.** Risky actions (closing a window, quitting an app, buying, sending, deleting) ask you yes or no first, by
   voice, by clicking, or with a key chord. Everything Orbit does is printed first and logged with secrets redacted.
-- **Tested.** 1172 Python tests and 193 Rust tests pass.
+- **You can watch it work.** Orbit's own pointer glides to what it is about to click, presses it with a ripple, carries a window
+  across monitors by its title bar, and a small "working" pill shows while a job runs ([details](#seeing-what-orbit-does)).
+- **Tested.** 1361 Python tests and 193 Rust tests pass.
 
 ## Contents
 
-[What it can do](#what-it-can-do) · [Setup](#setup-windows-11) · [How it works](#how-it-works) · [The desktop app](#the-desktop-app) ·
-[Voice](#voice) · [Spotify](#spotify-api-layer) · [Browser](#browser-layer) · [Friend mode](#friend-mode) ·
+[What it can do](#what-it-can-do) · [Setup](#setup-windows-11) · [How it works](#how-it-works) · [Seeing what Orbit does](#seeing-what-orbit-does) ·
+[The desktop app](#the-desktop-app) · [Voice](#voice) · [Spotify](#spotify-api-layer) · [Browser](#browser-layer) · [Friend mode](#friend-mode) ·
 [Privacy](#privacy) · [Known limits](#known-limits-honest-list)
 
 ## What it can do
@@ -27,8 +29,8 @@ only while Orbit is doing something.
 | Layer | What Orbit can do |
 |---|---|
 | **API** (best, tried first) | Spotify: play a song, artist, album, playlist or your liked songs; transfer playback to a speaker or phone; per-device volume; play, pause, next, previous; now playing. |
-| **OS** (Windows itself) | Open and close apps ("quit" ends every process of an app), list, focus, move and arrange windows across monitors, volume and mute, media keys, the time and date, click UI controls in any app (UI Automation, or OCR as a fallback) and read what a window shows. |
-| **Browser** | Open sites and searches, read and click inside your own Brave page, navigation (back, forward, reload, home), tabs (list, switch, close), YouTube play and fullscreen. |
+| **OS** (Windows itself) | Open and close apps ("quit" ends every process of an app), list, focus, move and arrange windows across monitors, volume and mute, media keys, the time and date, click UI controls in any app by name or by picture ("the gear icon"; UI Automation, with OCR as a fallback), type into the box that has the cursor, scroll a window, and read what a window shows. |
+| **Browser** | Search Google, scroll the results, click a link by its words, by its picture ("the search icon") or by number ("the second result"), click a text box, type and press Enter, navigation (back, forward, reload, home), tabs (list, switch, close), YouTube play and fullscreen. |
 | **Chat** | Talk about your day, ask a doubt, get encouragement or a roast. Anything that is not a PC command is chat. |
 | **Your own commands** | Make a phrase that runs a list of steps: open apps, websites and folders, press keys, type text, wait. |
 
@@ -78,6 +80,27 @@ text or voice -> fast rules (no model) --match--> tool call
 - Ctrl+C stops a running request. Step cap: 8 model round-trips. It stops after 3 failed tool calls in a row.
 - An action is only reported as done when Orbit checked the effect (a window closed, a track changed, a page changed).
 - The name lives in `src/orbit/config.py` (`APP_NAME`), with the limits and model names.
+
+## Seeing what Orbit does
+
+Orbit draws its own animations over your screen, so you can follow what it is doing instead of watching things happen by themselves:
+
+<p align="center">
+  <img src="docs/screenshots/pointer-and-pill.png" alt="Orbit's pointer with a blue click ripple on a search box, and the working pill below it, on a light and a dark page" width="860">
+</p>
+
+- **Orbit's pointer** glides along a curved path to the thing it is about to click (arriving from where your own mouse is), presses
+  it, and leaves a ripple. It is Orbit's own pointer: your real mouse is not taken over (it only moves briefly to turn a scroll
+  wheel, then goes back).
+- **Moving a window to another monitor:** the pointer grabs the window's title bar and the window slides across, carried by it.
+  Maximize, minimize, restore and close press the window's own buttons the same way.
+- **The "working" pill** (a spinner and a few words: "Searching Google...", "Typing...", "Scrolling...") sits at the bottom of the
+  window Orbit is working in, and only appears if the job takes more than a moment.
+- **Safe by design:** the animations are click-through, never take the focus, and are excluded from screen capture (Windows 10
+  2004 or newer), so they can never confuse Orbit's own OCR or its "did the page change?" checks. If they cannot start, or
+  anything goes wrong, Orbit carries on without them.
+- **Switch off or tune:** `--no-visuals`, or `ORBIT_VISUALS=0`; `ORBIT_VISUALS_SPEED=2` for twice as fast. See them without
+  clicking anything: `python -m orbit.visual.demo`.
 
 ## The desktop app
 
@@ -287,9 +310,25 @@ Two ways to use a browser, chosen with `--browser-mode` (or `ORBIT_BROWSER_MODE`
   - **Tabs:** "list my tabs", "close this tab", "close all other youtube tabs", "switch to the github tab". Closing keeps the tab
     you are on, asks first when 4 or more tabs would close, and refuses to close every tab (that is the window: say "close
     brave").
+  - **Search Google and work the results:** "search rune open source project on google" opens the Google results (checked against
+    the new page, so Google's consent or robot check is reported instead of claimed as results). Then "scroll down", "scroll
+    up a little", "scroll down 3 times", "scroll to the bottom", "page down" turn the mouse wheel over the page (Orbit's pointer
+    glides there first; the page must visibly move, otherwise it says it did not). "click the first result", "open the third
+    link", "click the last result" pick a hit by number, leaving out the search engine's own menu links and repeats.
+  - **Click by picture:** "click the search icon", "the magnifying glass", "the three dots", "the hamburger menu", "the gear",
+    "the x button", "the heart", "the plus sign" and about thirty more are looked up under the names pages give those icons
+    (the search icon is the button called Search or Google Search, the three dots are "More options", the x is "Clear" or
+    "Close"). If the page names nothing like it, Orbit reads the page's pixels with OCR and clicks where it finds the words (even
+    words drawn inside an image) or a symbol character such as x, +, a heart or a play triangle.
+  - **Click a box, type, press Enter:** "click the search box and type tamil news live", then "press enter" (or "type cats and
+    press enter", or "search for cats in the search box"). Clicking a box puts the cursor in it; typing goes into the box that has
+    the cursor and is read back to check it; on a search box that already holds words, the new words replace them. Orbit never
+    types into a password field, never types when no text box has the cursor (it would only trigger the page's keyboard
+    shortcuts), and only types words **you** said: text found on a page or screen is never typed, even if the language model
+    were tricked into asking.
   - **Typo-tolerant clicks:** "clcik theh traver walles viedo" finds "Trevor Wallace Making ...", but Orbit never invents a
     match: if nothing on the page is close, it says so and lists what it can see.
-  - **Limits:** it sees links, buttons and fields by their names, not images or video frames; it works on the Brave window in
+  - **Limits:** it sees links, buttons and fields by their names (plus the OCR fallback above); it works on the Brave window in
     front; a click is confirmed by the page, address or the control's own label changing, so a click with no visible effect
     is reported as failed; clicking something risky-looking (buy, send, delete, pay...) asks you first, and Orbit refuses to press
     a risky-looking control you did not name.
@@ -299,7 +338,7 @@ Two ways to use a browser, chosen with `--browser-mode` (or `ORBIT_BROWSER_MODE`
   with `--browser chrome`.
 
 "open my github" opens `github.com/lennydany3` (change with `ORBIT_GITHUB_USER`); "open github" opens the site. Only http(s)
-links are opened. Web search uses DuckDuckGo.
+links are opened. Web search uses Google.
 
 ## Privacy
 
@@ -325,8 +364,9 @@ src/orbit/
   llm/            Ollama (local) and Groq (cloud)
   voice/          microphone, wake word, VAD, echo cancellation, speech-to-text, voice, the voice loop
   ipc/            the WebSocket link to the desktop app
+  visual/         the on-screen animations: Orbit's pointer, the click ripple, the working pill
 ui/               orbit-ui: the tray app and sphere (Rust + Rune)
-tests/            1172 Python tests, plus shared fixtures the Rust side is tested against
+tests/            1361 Python tests, plus shared fixtures the Rust side is tested against
 docs/screenshots/ the pictures in this file
 ```
 
@@ -379,6 +419,19 @@ The screenshots are real renders of the window, made headless with
 - Memory is short-term: the model sees your last 6 requests (capped at about 5,000 characters) so "close it" works. It is
   forgotten when you quit; type `clear` to forget sooner.
 - Ctrl+C during a model call takes effect when that call returns (at most the 120 s timeout).
+
+**Animations, typing and scrolling**
+- Orbit's pointer and the "working" pill are drawn on top of the screen and are hidden from screen capture only on Windows 10
+  2004 and newer. They are a picture of what Orbit does: the action itself is still done the accessible way (or with a real click
+  or wheel turn when it must be), and verified from what changed on screen.
+- A symbol (an icon with no words) is found by the name the app gives it, or by OCR when it is a character OCR can read. A
+  drawn icon that has no name and is not a character (a custom logo, a bare arrow) cannot be found: Orbit says so instead of guessing.
+- Scrolling turns the real mouse wheel over the page, so the mouse pointer jumps there for a moment and back. A page that is
+  shorter than the window cannot scroll and is reported as "did not move".
+- Typing is only for a box that has the cursor, and replaces the old words only in search-like boxes (so it cannot wipe a
+  document). A box that cannot be read back (a custom-drawn app) is checked by the window visibly changing instead.
+- Google may show a consent page or a robot check instead of results (more often in Orbit's own automated window than in your own
+  Brave); Orbit reports it rather than saying it searched.
 
 **Desktop app**
 - The floating orb is a separate overlay window, so the screenshots above show the main window only.

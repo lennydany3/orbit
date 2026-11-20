@@ -1,4 +1,7 @@
+import os
 from pathlib import Path
+
+os.environ["ORBIT_VISUALS"] = "0"   # the tests must never draw animations over the desktop (set before orbit.config is read)
 
 import pytest
 import yaml
