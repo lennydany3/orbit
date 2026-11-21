@@ -16,12 +16,13 @@ only while Orbit is doing something.
   voice, by clicking, or with a key chord. Everything Orbit does is printed first and logged with secrets redacted.
 - **You can watch it work.** Orbit's own pointer glides to what it is about to click, presses it with a ripple, carries a window
   across monitors by its title bar, and a small "working" pill shows while a job runs ([details](#seeing-what-orbit-does)).
-- **Tested.** 1559 Python tests and 193 Rust tests pass.
+- **Tested.** 1719 Python tests and 318 Rust tests pass.
 
 ## Contents
 
 [What it can do](#what-it-can-do) · [Setup](#setup-windows-11) · [How it works](#how-it-works) · [Seeing what Orbit does](#seeing-what-orbit-does) ·
-[The desktop app](#the-desktop-app) · [Voice](#voice) · [Spotify](#spotify-api-layer) · [Browser](#browser-layer) · [Friend mode](#friend-mode) ·
+[The desktop app](#the-desktop-app) · [Reminders, notes and music](#reminders-notes-tasks-and-music) · [Voice](#voice) · [Spotify](#spotify-api-layer) ·
+[Browser](#browser-layer) · [Friend mode](#friend-mode) ·
 [Ask about your screen](#ask-about-your-screen) · [Privacy](#privacy) · [Known limits](#known-limits-honest-list)
 
 ## What it can do
@@ -33,6 +34,7 @@ only while Orbit is doing something.
 | **Browser** | Search Google, scroll the results, click a link by its words, by its picture ("the search icon") or by number ("the second result"), click a text box, type and press Enter, navigation (back, forward, reload, home), tabs (list, switch, close), YouTube play and fullscreen. |
 | **Chat** | Talk about your day, ask a doubt, get encouragement or a roast. Anything that is not a PC command is chat. |
 | **Your own commands** | Make a phrase that runs a list of steps: open apps, websites and folders, press keys, type text, wait. |
+| **Your own things** | Reminders and timers ("remind me to call mom at 5"), notes and a task list ("note down the wifi is on the router", "add milk to my tasks"), and your saved Spotify playlists ("play my gym playlist"): said in plain words, made in the window, answered with no language model. |
 
 Several requests in one sentence work ("open Spotify, then play my favourite music on the speaker"). Simple commands are handled
 by fast rules with no model call.
@@ -104,10 +106,25 @@ Orbit draws its own animations over your screen, so you can follow what it is do
 
 ## The desktop app
 
-Orbit's face is `orbit-ui` (in `ui/`, see [ui/README.md](ui/README.md) for everything): a particle sphere drawn on the GPU. It
-lives in the tray. When Orbit does something, a small orb floats up at the bottom right, above the taskbar, showing what it is
-doing and how loud the voice is; a few seconds after things go quiet it fades away. The orb never takes focus and clicks pass
-through it, so it never gets in your way.
+Orbit's face is `orbit-ui` (in `ui/`, see [ui/README.md](ui/README.md) for everything): a particle sphere drawn on the GPU, and a
+window with a sidebar of pages. It lives in the tray. When Orbit does something, a small orb floats up at the bottom right, above
+the taskbar, showing what it is doing and how loud the voice is; a few seconds after things go quiet it fades away. The orb never
+takes focus and clicks pass through it, so it never gets in your way.
+
+The window's sidebar has **Home** (the big sphere, and what was last said), **Commands**, **Reminders**, **Notes** (with tasks),
+**Music** and, at the bottom, **Settings**. The bell at the top shows how many reminders have gone off since you last looked, and
+the box at the bottom says whether Orbit is connected and what it is doing.
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/page-reminders.png" alt="The Reminders page" width="420"><br><sub><b>Reminders</b></sub></td>
+    <td align="center"><img src="docs/screenshots/page-notes.png" alt="The Notes page with a note open" width="420"><br><sub><b>Notes</b> and <b>tasks</b></sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/page-music.png" alt="The Music page with saved playlists" width="420"><br><sub><b>Music</b>: your Spotify playlists</sub></td>
+    <td align="center"><img src="docs/screenshots/settings-general.png" alt="Settings, General: audio and the hold-to-talk key" width="420"><br><sub><b>Settings</b>: audio and how you talk</sub></td>
+  </tr>
+</table>
 
 ```
 cd ui
@@ -140,17 +157,34 @@ rest of the time). Esc says no.
 
 Every change is saved the moment you make it, to `settings.json` in the project folder (git-ignored; `ORBIT_SETTINGS` moves it).
 A hand-edited file Orbit cannot fully read does not stop anything: the bad entry is left out, the page lists what, and the first
-save keeps the old file as `settings.json.bak`.
+save keeps the old file as `settings.json.bak`. The page has four tabs: General, Shortcuts, Sounds and Orb. (Your own commands
+have a page of their own in the sidebar.)
 
-**Hotkeys.** Click a chord and press the new keys (Esc cancels). The orb, yes and no chords take effect at once; one Windows
-will not give Orbit is refused with a reason and nothing changes. The hold-to-talk key is picked from a list and Orbit follows
-it within a second, with no restart.
+**General.** *Audio:* the microphone and the output device (pick from the list, or the Windows default; the refresh button looks
+again), and the speaking volume, how loud Orbit's own voice is (0 to 100; your PC's volume is separate). Orbit follows each of
+these between turns, with no restart. *Talk to Orbit:* the hotkey you hold to speak (**Change**, then press a key or click a mouse
+button; **More...** picks from a list), whether the **wake word** "Hey Orbit" is listened for, and whether Orbit **keeps listening
+after a reply** so you can carry on without it. A choice made on the command line (`--mic`, `--no-wake`, `--no-follow-up`) or in
+the environment (`ORBIT_MIC`, `ORBIT_SPEAKER`) wins over the page.
+
+<p align="center">
+  <img src="docs/screenshots/settings-talk-key.png" alt="Recording the hold-to-talk key: press a key or click a mouse button" width="620">
+</p>
+
+**The hold-to-talk key can be a mouse button.** While it is being recorded, a click of any mouse button on the page is taken:
+Mouse 1 (left), Mouse 2 (right), Mouse 3 (the wheel), and Mouse 4 (back) and Mouse 5 (forward) on the side of the mouse; or a key
+(Right Ctrl, an F key, Pause...). A key that types something (a letter, Enter, an arrow) is refused with the reason, since holding
+it to talk would type it into every app. A mouse button is also what you click with, so Orbit only starts listening once it has
+been held for about a quarter of a second: an ordinary click does nothing, and the button still clicks as it always does.
+
+**Shortcuts.** Click a chord and press the new keys (Esc cancels). The orb, yes and no chords take effect at once; one Windows
+will not give Orbit is refused with a reason and nothing changes.
 
 <p align="center">
   <img src="docs/screenshots/settings-hotkeys.png" alt="The Hotkeys settings page" width="760">
 </p>
 
-**Commands.** Say a phrase and Orbit runs a list of steps in order, without asking the language model. Say it exactly
+**Commands** (its own page). Say a phrase and Orbit runs a list of steps in order, without asking the language model. Say it exactly
 (filler like "please" and a leading "run" are fine). A command that presses keys or types asks one yes or no first, listing
 everything it will do. Steps that open a folder only open it: nothing is ever run, and the language model never sees these
 commands and cannot press keys or type. Switch a command off without deleting it.
@@ -173,6 +207,32 @@ Only a real show or hide makes a sound, and it costs nothing at rest.
 pick Small, Medium or Large. The real orb shows while the page is open so you see where it lands. It stays inside the usable
 screen (above the taskbar), and a question's card opens above it, or below it when the orb is in the top half.
 
+## Reminders, notes, tasks and music
+
+Say it, or make it in the window; either way it is the same file, so each shows up on the other at once. They are plain JSON files
+next to `settings.json` (`reminders.json`, `notes.json`, `music.json`; git-ignored), written whole or not at all, and read again
+whenever the other side changes them. None of this needs the language model.
+
+**Reminders.** "Remind me to call mom at 5pm", "remind me in 10 minutes to stretch", "remind me tomorrow at 9 to submit the form",
+"remind me every weekday morning to drink water", "set a timer for ten minutes", "set an alarm for 7 am", "what are my reminders",
+"cancel the reminder about mom", "cancel all my reminders" (that one asks yes or no first). When one is due Orbit says it
+("Reminder: call mom.") and the window shows it on the bell; one that came due while Orbit was off is still said if it was in the
+last six hours. The page has the list (switch off, edit, delete), a form with quick buttons ("In 10 min", "This evening"...) and
+repeats (every day, weekdays, week, month), and a list of what went off lately. A time with no am or pm is the next one that comes
+round ("at 5" is the afternoon if that is still ahead); an alarm is always the morning.
+
+**Notes and tasks.** "Note down the wifi is on the router", "take a note that I parked on level 3", "what notes do I have", "read my
+last note"; "add milk to my tasks", "what's on my to do list", "mark milk as done", "I finished the eggs" (only when that is one of
+your tasks: otherwise it is just chat), "clear my completed tasks". On the page: a search box, the Notes and Tasks tabs, a note
+editor that saves a moment after you stop typing (Ctrl+K makes a new note), and a checklist.
+
+**Music.** Paste a Spotify link (a playlist, album, artist, track or podcast; `open.spotify.com/...` or a `spotify:` address) on the
+Music page and Orbit keeps it by name. It asks Spotify's public page what it is called (nothing about you is sent, and no login is
+needed for that), or you can rename it. Then "play my gym playlist" plays it, "what playlists do I have" lists them, and the Play
+button on the page asks Orbit to play it (the one other thing the window may send over the link: it names a playlist you saved, and
+nothing else). Playing needs the Spotify login like the rest of the Spotify tools. Links from Apple Music, YouTube or Deezer are
+refused with the reason.
+
 ### Tray, cost and safety of the link
 
 - **Tray menu** (right-click): show or hide the orb, open the Orbit window, Settings, quit (which also stops the Orbit it started).
@@ -183,7 +243,8 @@ screen (above the taskbar), and a question's card opens above it, or below it wh
   needs a random token that the app hands Orbit itself. A connection from a web page is always refused (a browser always sends
   its page's origin), so no website can listen to your voice turns or answer a question for you. `ORBIT_IPC_ORIGINS` names pages
   you want to allow.
-- **A face can send exactly one thing:** the yes or no for an open question. It cannot send requests or press keys. Audio never
+- **A face can send exactly two things:** the yes or no for an open question, and the Play button on a saved playlist (which names
+  a playlist from `music.json`; an id that is not in that file plays nothing). It cannot send requests or press keys. Audio never
   leaves Orbit: the face gets one loudness number about 20 times a second, only while a voice is being heard.
 - **Clean shutdown.** The app keeps a pipe open to the Orbit it started, so closing or crashing it stops Orbit cleanly: there is
   never an Orbit listening with nobody to show it.
@@ -194,8 +255,8 @@ screen (above the taskbar), and a question's card opens above it, or below it wh
 
 Voice lives in `src/orbit/voice/` (test bench: `python -m orbit.voice.run --help`). Start it with `python -m orbit --voice`.
 
-Start a turn by **holding Right Ctrl** (changeable in Settings) while you speak, or by saying **"hey orbit"** (`--no-wake` for
-hold-to-talk only; `--mic "<name>"` picks the microphone). Orbit transcribes what you said, runs the same `agent.handle(text)`
+Start a turn by **holding Right Ctrl** (changeable in Settings: any key, or a mouse button) while you speak, or by saying **"hey orbit"**
+(`--no-wake`, or the Wake word switch in Settings, for hold-to-talk only; `--mic "<name>"` picks the microphone). Orbit transcribes what you said, runs the same `agent.handle(text)`
 as the text prompt, and speaks a short reply.
 
 - **Short, natural spoken replies.** The agent's terse tool reports are rephrased for speech ("asked 'Spotify Premium' to close"
@@ -331,6 +392,8 @@ when `SPOTIFY_CLIENT_ID` is set.
 - **Volume follows the sound.** When Spotify plays on a speaker or phone, "reduce the volume", "make it louder" and "volume 40"
   change THAT device (relative or absolute); when it plays on this PC or something else is playing, they change the PC volume.
   Name a device to be explicit ("echo pop volume 50", "set the volume of the speaker to 30").
+- **Your saved playlists** (the Music page) play by name ("play my gym playlist") through their own tool, which only Orbit's code can
+  run (the language model is never offered it): it plays exactly the address you saved, never a search.
 - **Pause, play, next, previous** go through Spotify itself whenever it is the current media player (a speaker cannot be reached
   by the PC media keys); if a media key does nothing and Spotify is involved, Orbit asks Spotify directly. Right after a Spotify
   request, "switch to echo" also means Spotify.
@@ -392,13 +455,13 @@ links are opened. Web search uses Google.
 - **Logs** go to `logs/` (git-ignored). Every state change is logged with a timestamp; what you said is only written if
   `LOG_TRANSCRIPTS = True` in `voice/config.py`.
 - **Nothing is downloaded behind your back.** `fetch_models` is the only voice code that uses the network, and only when you run
-  it. `.env`, `settings.json`, `models/` and `.browser-profile/` are git-ignored.
+  it. `.env`, `settings.json`, `reminders.json`, `notes.json`, `music.json`, `models/` and `.browser-profile/` are git-ignored.
 
 ## Project layout
 
 ```
 src/orbit/
-  agent/          rules, router, safety gate, friend mode, screen questions, rescue, custom commands, the loop
+  agent/          rules, router, safety gate, friend mode, screen questions, rescue, custom commands, reminders/notes/playlists by voice, the loop
   tools/
     api_layer/    Spotify (PKCE login, Credential Manager)
     os_layer/     apps, windows, monitors, volume, media keys, UI Automation + OCR clicks, processes
@@ -406,9 +469,10 @@ src/orbit/
   llm/            Ollama (local) and Groq (cloud)
   voice/          microphone, wake word, VAD, echo cancellation, speech-to-text, voice, the voice loop, ending a conversation
   ipc/            the WebSocket link to the desktop app
+  reminders.py, notes.py, playlists.py, userdata.py   the files the window and Orbit share, and understanding "remind me ... at 5"
   visual/         the on-screen animations: Orbit's pointer, the click ripple, the working pill
 ui/               orbit-ui: the tray app and sphere (Rust + Rune)
-tests/            1559 Python tests, plus shared fixtures the Rust side is tested against
+tests/            1719 Python tests, plus shared fixtures the Rust side is tested against
 docs/screenshots/ the pictures in this file
 ```
 

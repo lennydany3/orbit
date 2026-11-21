@@ -18,6 +18,8 @@ pub enum Incoming {
     Reply { text: String, spoken: String, kind: String, emotion: String },
     Confirm { id: i64, question: String, action: String },
     ConfirmDone { id: i64, answer: bool, by: String },
+    /// A reminder just came due (Orbit says it aloud itself; the window shows it and re-reads the list).
+    Reminder { id: String, title: String, text: String },
     Error(String),
 }
 
@@ -60,14 +62,21 @@ pub fn parse(raw: &str) -> Vec<Incoming> {
         })()),
         Some("confirm") => one((|| Some(Incoming::Confirm { id: v.get("id")?.as_i64()?, question: text(&v, "question").unwrap_or_default(), action: text(&v, "action")? }))()),
         Some("confirm_done") => one((|| Some(Incoming::ConfirmDone { id: v.get("id")?.as_i64()?, answer: v.get("answer")?.as_bool()?, by: text(&v, "by").unwrap_or_default() }))()),
+        Some("reminder") => one((|| Some(Incoming::Reminder { id: text(&v, "id")?, title: text(&v, "title")?, text: text(&v, "text").unwrap_or_default() }))()),
         Some("error") => one(text(&v, "message").map(Incoming::Error)),
         Some(_) => Vec::new(),
     }
 }
 
-/// The yes or no for an open question: the only thing the window ever sends.
+/// The yes or no for an open question.
 pub fn confirm_answer(id: i64, yes: bool) -> String {
     json!({"type": "confirm", "id": id, "yes": yes}).to_string()
+}
+
+/// The Play button on one of the saved playlists: the other thing the window may send. It names the playlist by the id it has in
+/// `music.json`, nothing else, so it can only ever start something the user saved.
+pub fn play_request(playlist_id: &str) -> String {
+    json!({"type": "play", "id": playlist_id}).to_string()
 }
 
 #[cfg(test)]
@@ -139,5 +148,20 @@ mod tests {
     fn the_answer_is_exactly_what_orbit_expects() {
         let v: Value = serde_json::from_str(&confirm_answer(7, false)).unwrap();
         assert_eq!(v, json!({"type": "confirm", "id": 7, "yes": false}));
+    }
+
+    #[test]
+    fn the_play_button_names_a_saved_playlist_and_nothing_else() {
+        let v: Value = serde_json::from_str(&play_request("p-3f9a1c2b")).unwrap();
+        assert_eq!(v, json!({"type": "play", "id": "p-3f9a1c2b"}));
+    }
+
+    #[test]
+    fn a_reminder_that_came_due() {
+        assert_eq!(
+            parse(r#"{"type":"reminder","id":"r-1","title":"Call mom","text":"Reminder: Call mom."}"#),
+            [Incoming::Reminder { id: "r-1".into(), title: "Call mom".into(), text: "Reminder: Call mom.".into() }]
+        );
+        assert!(parse(r#"{"type":"reminder","title":"no id"}"#).is_empty() && parse(r#"{"type":"reminder","id":"r-1"}"#).is_empty());
     }
 }

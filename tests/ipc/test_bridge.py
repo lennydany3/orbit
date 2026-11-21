@@ -209,3 +209,32 @@ def test_the_null_bridge_accepts_every_call_and_never_has_an_answer():
     b.confirm_done(0, True, "ui")
     b.killed()
     assert b.confirm_asked("q", "a") == 0 and b.poll_answer() is None
+
+
+def test_a_play_request_waits_for_orbit_to_pick_it_up_and_too_many_are_refused():
+    sent = []
+    bridge = UiBridge(sent.append)
+    assert bridge.poll_request() is None
+    assert bridge.on_command(protocol.PlayRequest("p-1")) is None
+    assert bridge.poll_request() == protocol.PlayRequest("p-1") and bridge.poll_request() is None
+    results = [bridge.on_command(protocol.PlayRequest(f"p-{i}")) for i in range(12)]
+    assert results[:8] == [None] * 8 and all("already working" in r for r in results[8:])
+
+
+def test_a_reminder_is_published_and_a_dead_face_cannot_break_it():
+    sent = []
+    UiBridge(sent.append).reminder("r-1", "Call mom", "Reminder: Call mom.")
+    assert sent == [{"type": "reminder", "id": "r-1", "title": "Call mom", "text": "Reminder: Call mom."}]
+
+    def broken(message):
+        raise OSError("the face went away")
+
+    UiBridge(broken).reminder("r-1", "x", "y")                      # never raises into the voice loop
+
+
+def test_the_null_bridge_has_the_new_calls_too():
+    from orbit.ipc.bridge import NullBridge
+
+    n = NullBridge()
+    n.reminder("r", "t", "x")
+    assert n.poll_request() is None

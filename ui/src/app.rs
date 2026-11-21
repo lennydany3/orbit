@@ -5,21 +5,29 @@
 //! link. While the link is open Orbit drives: its states are paced (see `pacer`), its level replaces the simulated one, and the
 //! sphere's own hand-over timers are off.
 
+use std::path::Path;
 use std::sync::Arc;
 
-use rune::{KeyEvent, TextEdit, Waker};
+use rune::{KeyEvent, PointerButton, TextEdit, Waker};
 
-use crate::editor::{self, Field, Recorded, Section, SettingsState};
+use crate::datetime::Stamp;
+use crate::devices::{self, Devices, Scan};
+use crate::editor::{self, Field, Recorded, Section, SettingsState, TalkRecorded};
 use crate::face::Face;
 use crate::layout;
 use crate::link::message::{self, Incoming};
 use crate::link::{Event, Link, Status};
+use crate::music::MusicState;
+use crate::notes::NotesState;
 use crate::orbit::{HasOrbit, OrbState, Orbit};
 use crate::pacer::Pacer;
 use crate::presence::Presence;
+use crate::reminders::RemindersState;
 use crate::settings;
 use crate::shell::Shell;
 use crate::spawn::{Kind, Spawned};
+use crate::userdata;
+use crate::watcher::{self, Watcher};
 
 pub struct DemoStep {
     pub state: OrbState,
@@ -143,13 +151,31 @@ impl Default for Live {
     }
 }
 
-/// What the window shows.
+/// What the window shows: one page at a time, chosen in the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Page {
     /// The big sphere.
     #[default]
-    Stage,
+    Home,
+    /// Your own commands: a phrase that runs a list of steps.
+    Commands,
+    Reminders,
+    Notes,
+    Music,
     Settings,
+}
+
+impl Page {
+    pub fn label(self) -> &'static str {
+        match self {
+            Page::Home => "Home",
+            Page::Commands => "Commands",
+            Page::Reminders => "Reminders",
+            Page::Notes => "Notes",
+            Page::Music => "Music",
+            Page::Settings => "Settings",
+        }
+    }
 }
 
 pub struct App {
@@ -167,13 +193,43 @@ pub struct App {
     /// The orb's window and the tray icon (empty until the app has made them).
     pub shell: Shell,
     pub page: Page,
-    /// The Settings page: the hotkeys and the user's own commands.
+    /// The Settings page and the Commands page: the hotkeys, the audio and voice choices, and the user's own commands.
     pub prefs: SettingsState,
+    /// Reminders, notes and tasks, and saved playlists: each its own file next to the settings.
+    pub reminders: RemindersState,
+    pub notes: NotesState,
+    pub music: MusicState,
+    /// The microphones and speakers the Audio card offers, and where the asking stands.
+    pub devices: Devices,
+    pub scan: Scan,
+    /// Notices when the other side (Orbit) changes one of those files.
+    watcher: Option<Watcher>,
+    /// What Orbit last said about a reminder, to show a moment.
+    pub reminder_said: Option<String>,
 }
 
 impl Default for App {
     fn default() -> Self {
-        App { orbit: Orbit::new(), manual: 0.35, voice: false, demo: None, shown_level: 0.35, last_push: -1.0, live: Live::default(), presence: Presence::new(), shell: Shell::default(), page: Page::Stage, prefs: SettingsState::default() }
+        App {
+            orbit: Orbit::new(),
+            manual: 0.35,
+            voice: false,
+            demo: None,
+            shown_level: 0.35,
+            last_push: -1.0,
+            live: Live::default(),
+            presence: Presence::new(),
+            shell: Shell::default(),
+            page: Page::Home,
+            prefs: SettingsState::default(),
+            reminders: RemindersState::default(),
+            notes: NotesState::default(),
+            music: MusicState::default(),
+            devices: Devices::default(),
+            scan: Scan::Idle,
+            watcher: None,
+            reminder_said: None,
+        }
     }
 }
 
@@ -196,21 +252,166 @@ impl App {
         self
     }
 
-    // ---- the settings page ------------------------------------------------------------------------------------------
+    /// The app with reminders, notes and playlists read from (and saved to) the files that sit next to the settings file.
+    pub fn with_data(mut self, settings_file: &Path) -> App {
+        self.reminders = RemindersState::open(userdata::beside(settings_file, userdata::REMINDERS_FILE));
+        self.notes = NotesState::open(userdata::beside(settings_file, userdata::NOTES_FILE));
+        self.music = MusicState::open(userdata::beside(settings_file, userdata::MUSIC_FILE));
+        self
+    }
+
+    /// Starts what runs beside the window: a look at the data files for changes Orbit makes, and the first look at the audio devices.
+    pub fn start_background(&mut self) {
+        let files: Vec<(u32, std::path::PathBuf)> = [(watcher::REMINDERS, &self.reminders.path), (watcher::NOTES, &self.notes.path), (watcher::MUSIC, &self.music.path)]
+            .into_iter()
+            .filter_map(|(bit, path)| path.clone().map(|p| (bit, p)))
+            .collect();
+        self.watcher = Some(Watcher::start(files, self.live.waker.clone(), watcher::EVERY));
+        self.scan_devices();
+    }
+
+    /// Uses this watcher (a test's, whose changes it marks itself) instead of starting one.
+    pub fn with_watcher(mut self, watcher: Watcher) -> App {
+        self.watcher = Some(watcher);
+        self
+    }
+
+    // ---- pages -------------------------------------------------------------------------------------------------------------
+
+    /// Goes to a page (saving what was being typed on the one it leaves).
+    pub fn go(&mut self, page: Page) {
+        if self.page == Page::Notes && page != Page::Notes {
+            self.notes.flush();
+        }
+        if self.page == Page::Settings || self.page == Page::Commands {
+            self.prefs.cancel_record();
+            if page != Page::Commands {
+                self.prefs.cancel_draft();
+            }
+        }
+        self.page = page;
+        match page {
+            Page::Reminders => {
+                self.reminders.mark_seen(&Stamp::now());
+            }
+            Page::Settings if self.devices.inputs.is_empty() && self.devices.outputs.is_empty() => self.scan_devices(),
+            _ => {}
+        }
+    }
 
     pub fn open_settings(&mut self, section: Section) {
-        self.page = Page::Settings;
+        self.go(Page::Settings);
         self.prefs.select(section);
     }
 
+    /// Back to the sphere.
     pub fn close_settings(&mut self) {
-        self.page = Page::Stage;
-        self.prefs.cancel_record();
-        self.prefs.cancel_draft();
+        self.go(Page::Home);
+    }
+
+    /// How many reminders have gone off that you have not looked at yet: the number on the bell.
+    pub fn unread(&self) -> usize {
+        self.reminders.data.unread()
+    }
+
+    // ---- the audio devices ---------------------------------------------------------------------------------------------------
+
+    /// Asks Orbit's Python for the microphones and speakers, in the background (the lists fill in when it answers).
+    pub fn scan_devices(&mut self) {
+        if matches!(self.scan, Scan::Scanning(_)) || rune::is_headless() {
+            return;
+        }
+        self.scan = Scan::Scanning(devices::scan_in_background(self.live.waker.clone()));
+    }
+
+    pub fn scanning(&self) -> bool {
+        matches!(self.scan, Scan::Scanning(_))
+    }
+
+    /// What came back from the background: changed files read again, a finished device scan taken. True if anything changed.
+    fn drain_background(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(bits) = self.watcher.as_ref().map(Watcher::take).filter(|b| *b != 0) {
+            changed |= bits & watcher::REMINDERS != 0 && self.reminders.reload_if_changed();
+            changed |= bits & watcher::NOTES != 0 && self.notes.reload_if_changed();
+            changed |= bits & watcher::MUSIC != 0 && self.music.reload_if_changed();
+        }
+        if let Scan::Scanning(rx) = &self.scan {
+            match rx.try_recv() {
+                Ok(Ok(found)) => {
+                    self.devices = found;
+                    self.scan = Scan::Idle;
+                    changed = true;
+                }
+                Ok(Err(why)) => {
+                    self.scan = Scan::Failed(why);
+                    changed = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.scan = Scan::Failed("the device scan stopped".into());
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    // ---- music ---------------------------------------------------------------------------------------------------------------
+
+    /// The Play button: asks Orbit to play one of the saved playlists. False (with the reason on the page) if it cannot.
+    pub fn play_playlist(&mut self, id: &str) -> bool {
+        let Some(title) = self.music.get(id).map(|p| p.title()) else { return false };
+        let sent = self.live_open() && self.live.link.as_ref().is_some_and(|link| link.send(message::play_request(id)));
+        if sent {
+            self.music.good(format!("Asked Orbit to play \u{201c}{title}\u{201d}."));
+        } else {
+            self.music.bad("Orbit is not running, so it cannot play that. Start it from the tray, or run orbit-ui --spawn.");
+        }
+        sent
+    }
+
+    /// Opens a saved playlist in the Spotify app (or the browser, if the app is not there).
+    pub fn open_in_spotify(&mut self, id: &str) -> bool {
+        let Some(uri) = self.music.get(id).map(|p| p.link().uri()) else { return false };
+        match crate::openers::open_uri(&uri) {
+            Ok(()) => true,
+            Err(why) => {
+                self.music.bad(why);
+                false
+            }
+        }
+    }
+
+    // ---- the settings page ------------------------------------------------------------------------------------------
+
+    /// While the hold-to-talk key is being recorded a mouse button pressed on the page is it. True if this press was used.
+    pub fn record_button(&mut self, button: PointerButton) -> bool {
+        if !self.prefs.recording_talk {
+            return false;
+        }
+        match editor::talk_from_button(button) {
+            Some(name) => {
+                self.prefs.set_talk(name);
+            }
+            None => self.prefs.fail("Orbit cannot use that mouse button. Use mouse 1 to 5, or a key."),
+        }
+        true
     }
 
     /// While a hotkey is being recorded every key is for it. True if this key was used.
     pub fn record_key(&mut self, ev: &KeyEvent, base: Option<char>) -> bool {
+        if self.prefs.recording_talk {
+            match editor::talk_from_event(ev) {
+                TalkRecorded::Ignore => {}
+                TalkRecorded::Cancel => self.prefs.cancel_record(),
+                TalkRecorded::Refused(why) => self.prefs.fail(why),
+                TalkRecorded::Key(name) => {
+                    self.prefs.set_talk(&name);
+                }
+            }
+            return true;
+        }
         let Some(field) = self.prefs.recording else { return false };
         match editor::chord_from_event(ev, base) {
             Recorded::Ignore => {}
@@ -469,6 +670,10 @@ impl App {
                 self.live.feeling = emotion;
                 self.say("Orbit", &text, t);
             }
+            Incoming::Reminder { text, .. } => {
+                self.reminders.reload_if_changed();                    // the list has moved on: show it at once
+                self.reminder_said = Some(text);
+            }
             Incoming::Confirm { id, question, action } => self.live.confirm = Some(Ask { id, action, question, sent: None }),
             Incoming::ConfirmDone { id, .. } => {
                 if self.live.confirm.as_ref().is_some_and(|ask| ask.id == id) {
@@ -552,7 +757,8 @@ impl App {
 
     /// When the app next needs to wake by itself: something timed, or the orb due to leave.
     pub fn next_wake(&self, now: f64) -> Option<f64> {
-        [self.next_due(), self.presence.leaves_at(now)].into_iter().flatten().reduce(f64::min)
+        let saving = (self.page == Page::Notes).then(|| self.notes.save_due()).flatten();
+        [self.next_due(), self.presence.leaves_at(now), saving].into_iter().flatten().reduce(f64::min)
     }
 
     // ---- time -------------------------------------------------------------------------------------------------------
@@ -572,7 +778,10 @@ impl App {
     /// Runs everything due by `t`, in order, then sets the level for this frame. True when something
     /// the panel shows changed.
     pub fn advance(&mut self, t: f64) -> bool {
-        let mut changed = self.drain_link(t);
+        let mut changed = self.drain_link(t) | self.drain_background();
+        if self.page == Page::Notes {
+            changed |= self.notes.save_if_due(t);                   // what is typed is saved a moment after the typing stops
+        }
         for _ in 0..64 {
             let Some(due) = self.next_due().filter(|d| *d <= t) else { break };
             if self.demo.map(|d| d.due) == Some(due) {

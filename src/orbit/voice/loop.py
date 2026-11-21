@@ -20,6 +20,7 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import Future
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
 import numpy as np
@@ -66,6 +67,8 @@ def describe_action(question: str) -> str:
         params = {}
     if words == ["custom", "command"] and params.get("name"):
         return f"run your {params['name']} command: {params.get('steps', '')}"[:240]
+    if words == ["delete", "mine"] and params.get("what"):
+        return f"delete {params['what']}"[:240]
     if words == ["quit", "app"] and params.get("name"):
         return f"quit {params['name']} completely"
     detail = " ".join(str(v) for v in params.values() if isinstance(v, (str, int, float)) and not isinstance(v, bool) and str(v).strip())
@@ -131,6 +134,15 @@ def media_is_playing() -> bool:
         return False
 
 
+def _device_name(index) -> str:
+    try:
+        from .audio_io import device_label
+
+        return device_label(index)
+    except Exception:  # noqa: BLE001
+        return str(index)
+
+
 def _keep_model_warm(llm, out, every_s: float = 20 * 60) -> None:
     """Load the language model now and touch it every 20 minutes, so no request ever pays the ~20 s cold start."""
     first = True
@@ -165,8 +177,15 @@ class VoiceLoop:
                  out=print, verbose: bool = False, monitor=None, file_log=None, clock=time.monotonic,
                  conversational: bool = config.CONVERSATIONAL, fillers: bool = config.FILLERS, rng: random.Random | None = None,
                  aec: EchoCanceller | None = None, reference: ReferenceTimeline | None = None, barge_in: bool = config.BARGE_IN,
-                 media_check=None, ui=None):
+                 media_check=None, ui=None, prefs=None, reminders=None, wake_enabled: bool = True, lock: frozenset = frozenset()):
+        """`prefs` (voice.prefs.LivePrefs) lets the Settings page change the volume, devices, wake word and follow-up while Orbit runs;
+        `lock` names what the command line chose and the page must not change ("wake", "follow_up", "mic", "speaker").
+        `reminders` (reminders.ReminderStore) is what is said aloud when a reminder comes due."""
         self.agent, self.mic, self.transcriber, self.tts = agent, mic, transcriber, tts
+        self.prefs, self.reminders, self.wake_enabled, self._locked = prefs, reminders, wake_enabled, lock
+        self._wanted = None                        # settings read from the file and not applied yet (devices change between turns)
+        self._announce: deque = deque()            # reminders due and waiting to be said
+        self._reminders_at = 0.0
         self.ui = ui or NullBridge()               # the sphere window, if one is connected (python -m orbit --voice --ipc)
         self._confirm_id = 0
         self.keys, self.wake, self.segmenter, self.check_vad = keys, wake, segmenter, check_vad
@@ -258,6 +277,7 @@ class VoiceLoop:
                     reason = "timeout"
                     break
                 self._handle_keys()
+                self._follow_prefs()
                 if self.killed:
                     reason = "killed"
                     break
@@ -377,10 +397,11 @@ class VoiceLoop:
         self.out("[listening]")
 
     def _tick_idle(self, frame) -> None:
-        if frame is None:
+        if frame is not None:
+            self.preroll.append(frame)
+        if self._say_reminder() or self._start_window_request():
             return
-        self.preroll.append(frame)
-        if not self.wake:
+        if frame is None or not self.wake or not self.wake_enabled:
             return
         result = self.wake.process(frame)
         if result.rejected:
@@ -418,6 +439,87 @@ class VoiceLoop:
             if self.st.is_(State.LISTENING):
                 self.out(f"  (nothing heard for {limit:.1f}s after the wake word, going back to sleep)")
             self._idle("no speech heard")
+
+    # ---- what changes while Orbit runs: the Settings page, reminders, the window's Play button ----
+    def _follow_prefs(self) -> None:
+        """Applies the Settings page's choices as they change. Between turns only: a microphone is never swapped mid-sentence."""
+        if self.prefs is None:
+            return
+        new = self.prefs.poll()
+        if new is not None:
+            self._wanted = new
+        if self._wanted is None or not self.st.is_(State.IDLE):
+            return
+        wanted, self._wanted = self._wanted, None
+        self.apply_prefs(wanted)
+
+    def apply_prefs(self, s) -> None:
+        """Makes the loop follow settings `s` (a `settings.Settings`)."""
+        want_wake = s.voice.wake_word and "wake" not in self._locked
+        if "wake" not in self._locked and want_wake != self.wake_enabled and self.wake is not None:
+            self.wake_enabled = want_wake
+            if want_wake:
+                self.wake.reset()
+            self.out(f'Wake word {"on" if want_wake else "off"}: ' + (f'say "{self.wake_name.replace("_", " ")}".' if want_wake else "hold the talk key."))
+        if "follow_up" not in self._locked and s.voice.keep_listening != self.follow_up:
+            self.follow_up = s.voice.keep_listening
+            self.out(f"Keep listening after a reply: {'on' if self.follow_up else 'off'}.")
+        set_volume = getattr(self.tts, "set_volume", None)
+        if set_volume is not None:
+            set_volume(s.audio.volume / 100)
+        if "mic" not in self._locked and hasattr(self.mic, "switch"):
+            try:
+                if self.mic.switch(s.audio.mic):
+                    self._reset_listeners()
+                    self.out(f"Microphone: {_device_name(getattr(self.mic, 'device', None))}")
+            except Exception as e:  # noqa: BLE001 - not plugged in, or busy: the one that works keeps working
+                self.out(f"  (cannot use the microphone '{s.audio.mic}': {e}; keeping the current one)")
+        if "speaker" not in self._locked and hasattr(self.tts, "set_device"):
+            try:
+                if self.tts.set_device(s.audio.speaker):
+                    self.out(f"Speaker: {s.audio.speaker or 'the Windows default'}")
+            except Exception as e:  # noqa: BLE001
+                self.out(f"  (cannot use the speaker '{s.audio.speaker}': {e}; keeping the current one)")
+
+    def _say_reminder(self) -> bool:
+        """Between turns: says a reminder that has come due. True if it started speaking."""
+        if self.reminders is not None and not self._announce and self._clock() - self._reminders_at >= 1.0:
+            self._reminders_at = self._clock()
+            try:
+                self._announce.extend(self.reminders.take_due(datetime.now()))
+            except Exception as e:  # noqa: BLE001 - a reminders file problem must never stop the voice
+                self._flog(f"reminders: {type(e).__name__}")
+        if not self._announce:
+            return False
+        from .. import reminders as reminder_text
+
+        reminder, late = self._announce.popleft()
+        said = reminder_text.announcement(reminder, late)
+        self.out(f"[reminder] {said}")
+        self.ui.reminder(reminder.id, reminder.title, said)
+        self.ui.reply(said, said, "action", "calm")
+        self.mode = "reminder"
+        self._speak(said, "a reminder came due", emotion="calm", chat=False)
+        return True
+
+    def _start_window_request(self) -> bool:
+        """The window's Play button on a saved playlist: runs it as if you had asked, and tells you the result."""
+        play = getattr(self.agent, "play_saved", None)
+        if play is None:
+            return False
+        request = self.ui.poll_request()
+        if request is None:
+            return False
+        self.out(f"[window] play a saved playlist ({request.id})")
+        self.mode, self.heard, self._spec = "window", False, None
+        self.turn = TurnTimer(self._clock)
+        self.turn.mark("speech_end")
+        self.request_text, self._fillers_said, self._filler_future = "play a saved playlist", 0, None
+        self._pause_mic()
+        self.st.to(State.THINKING, "a request from the window")
+        self.out("[thinking]")
+        self.agent_future = spawn(play, request.id)
+        return True
 
     # ---- transcribing -> thinking ----
     def _begin_transcribe(self, clip: np.ndarray) -> None:
@@ -548,7 +650,7 @@ class VoiceLoop:
     # ---- speaking ----
     def _can_barge_in(self, text: str) -> bool:
         """May the wake word interrupt this reply? Not if Orbit might say its own wake word, or cannot be paused."""
-        return (self.barge_in_enabled and self.wake is not None and bool(getattr(self.tts, "supports_pause", False))
+        return (self.barge_in_enabled and self.wake is not None and self.wake_enabled and bool(getattr(self.tts, "supports_pause", False))
                 and "orbit" not in text.lower())
 
     def _set_emotion(self, emotion: str) -> None:
@@ -599,6 +701,8 @@ class VoiceLoop:
         self.turns += 1
         if self._closing:
             self._idle("conversation ended by you: waiting for the wake word")
+        elif self.mode in ("reminder", "window"):                   # nobody was talking: no follow-up window for an announcement or a button
+            self._idle("finished")
         elif self.follow_up and not config.FOLLOW_UP_WHILE_MEDIA and self._media_check():
             self.out('  (music is playing, so no follow-up without the wake word: say "'
                      + self.wake_name.replace("_", " ") + '" or hold the key)')
@@ -734,14 +838,23 @@ def privacy_note(transcriber, tts, llm_description: str = "") -> str:
 def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bool = True, follow_up: bool | None = None,
               seconds: float | None = None, wav: str | None = None, verbose: bool = False, out=print, ui=None) -> str:
     """Builds everything and runs the loop. Returns "killed" | "quit" | "timeout", or "failed" if voice cannot start
-    (no mic, a missing model): the caller then carries on in text mode, so a voice problem never crashes the REPL."""
+    (no mic, a missing model): the caller then carries on in text mode, so a voice problem never crashes the REPL.
+
+    What the Settings page chooses (microphone, speaker, speaking volume, wake word, keep listening) is used from the start and followed
+    while Orbit runs. A choice made on the command line (`--mic`, `--no-wake`, `--no-follow-up`) or in the environment wins over the page."""
+    from ..reminders import ReminderStore
     from .audio_io import FileMic, MicStream, device_label
     from .hotkey import Hotkeys
     from .monitor import Monitor, lower_priority
     from .cloud import build_transcriber
+    from .prefs import LivePrefs
     from .tts import make_tts
     from .vad import SileroVAD, SpeechSegmenter
 
+    prefs = LivePrefs()
+    chosen = prefs.current
+    locked = frozenset(name for name, taken in (("wake", not wake_enabled), ("follow_up", follow_up is not None),
+                                                 ("mic", bool(device)), ("speaker", bool(config.SPEAKER_DEVICE))) if taken)
     try:
         lower_priority()
         out("Loading voice (speech-to-text, wake word, voice) ...")
@@ -749,24 +862,36 @@ def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bo
         segmenter = SpeechSegmenter(SileroVAD(), pause_s=config.SPECULATIVE_PAUSE_S if config.SPECULATIVE_STT else None)
         check_vad = SileroVAD()
         wake = None
-        if wake_enabled:
+        if "wake" not in locked:
             try:
                 from .wakeword import WakeWord
 
-                wake = WakeWord(config.WAKEWORD_MODEL)
+                wake = WakeWord(config.WAKEWORD_MODEL)      # loaded even when the page has the wake word off: switching it on needs no restart
             except FileNotFoundError as e:
                 out(f"  wake word unavailable ({str(e).splitlines()[0]}); hold-to-talk only")
-        mic = FileMic(wav) if wav else MicStream(device)
+        try:
+            mic = FileMic(wav) if wav else MicStream(device or chosen.audio.mic or None)
+        except ValueError as e:                              # the microphone chosen on the page is not there now: the default one
+            out(f"  (cannot use the microphone '{chosen.audio.mic}': {e}; using the Windows default)")
+            mic = MicStream(None)
         keys = Hotkeys()
         reference = ReferenceTimeline() if config.AEC and config.BARGE_IN else None
-        tts = make_tts(log=out, reference=reference)
+        try:
+            tts = make_tts(device=config.SPEAKER_DEVICE or chosen.audio.speaker or None, log=out, reference=reference)
+        except ValueError as e:
+            out(f"  (cannot use the speaker '{chosen.audio.speaker}': {e}; using the Windows default)")
+            tts = make_tts(log=out, reference=reference)
+        if hasattr(tts, "set_volume"):
+            tts.set_volume(chosen.audio.volume / 100)
     except Exception as e:  # noqa: BLE001 - any setup problem: fall back to text
         out(f"Voice could not start ({type(e).__name__}: {e}). Falling back to text mode.")
         return "failed"
 
+    use_follow_up = follow_up if follow_up is not None else (config.FOLLOW_UP and chosen.voice.keep_listening)
     loop = VoiceLoop(agent, mic, transcriber, tts, keys, wake, segmenter, check_vad,
-                     follow_up=config.FOLLOW_UP if follow_up is None else follow_up, out=out, verbose=verbose, monitor=Monitor(),
-                     aec=EchoCanceller() if reference is not None else None, reference=reference, ui=ui)
+                     follow_up=use_follow_up, out=out, verbose=verbose, monitor=Monitor(),
+                     aec=EchoCanceller() if reference is not None else None, reference=reference, ui=ui,
+                     prefs=prefs, reminders=ReminderStore(), wake_enabled=wake is not None and chosen.voice.wake_word, lock=locked)
     agent.safety.confirm = loop.confirm              # risky actions are confirmed by voice from now on
     if ui is not None and hasattr(tts, "set_audio_listener"):
         tts.set_audio_listener(ui.audio_block)         # the face shows Orbit's voice level while it speaks
@@ -774,7 +899,7 @@ def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bo
     llm = getattr(agent, "llm", None)
     if llm is not None and hasattr(llm, "warm_up"):
         threading.Thread(target=_keep_model_warm, args=(llm, out), daemon=True, name="llm-warm").start()
-    triggers = [f"hold {keys.ptt_name}"] + ([f'say "{config.WAKEWORD_MODEL.replace("_", " ")}"'] if wake else [])
+    triggers = [f"hold {keys.ptt_name}"] + ([f'say "{config.WAKEWORD_MODEL.replace("_", " ")}"'] if loop.wake_enabled else [])
     out(f"Mic: {getattr(mic, 'label', None) or device_label(mic.device)}")
     out(f"Voice is on. Start a turn: {' or '.join(triggers)}.  Kill switch: {config.KILL_COMBO}.  Ctrl+C quits.")
     out(privacy_note(transcriber, tts, getattr(agent, "llm_description", "")))

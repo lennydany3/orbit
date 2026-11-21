@@ -1,5 +1,7 @@
 {
   "valid": ["ctrl_r", "ctrl_l", "alt_r", "alt_l", "alt_gr", "shift_r", "shift_l", "caps_lock", "scroll_lock", "num_lock", "pause",
-            "insert", "home", "end", "page_up", "page_down", "menu", "print_screen", "tab", "space", "f1", "f9", "f12", "f24", "z", "5", "é"],
-  "invalid": ["", "banana", "ctrl", "ctrl+r", "f0", "f25", "f01", "ab", " ", "ctrl_right"]
+            "insert", "home", "end", "page_up", "page_down", "menu", "print_screen", "tab", "space", "f1", "f9", "f12", "f24", "z", "5", "é",
+            "mouse1", "mouse2", "mouse3", "mouse4", "mouse5"],
+  "invalid": ["", "banana", "ctrl", "ctrl+r", "f0", "f25", "f01", "ab", " ", "ctrl_right", "mouse0", "mouse6", "Mouse1", "mouse", "mouse10"],
+  "mouse": {"mouse1": "left", "mouse2": "right", "mouse3": "middle", "mouse4": "x1", "mouse5": "x2"}
 }

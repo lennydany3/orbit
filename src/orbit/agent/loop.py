@@ -15,6 +15,7 @@ from ..tools.os_layer import symbols
 from ..voice import farewell
 from . import context, friend, rescue, rules, screen_help
 from . import custom as custom_commands
+from . import personal as personal_mod
 from .router import Log, Router
 from .safety import Safety
 
@@ -112,8 +113,10 @@ class Agent:
         chat_llm: LLM | None = None,
         friend_mode: bool = config.FRIEND_MODE,
         custom: custom_commands.CustomCommands | None = None,
+        personal: personal_mod.Personal | None = None,
     ):
         self.custom = custom                  # the user's own commands from the Settings page (None = none)
+        self.personal = personal              # reminders, notes, tasks and saved playlists, said in plain words (None = none)
         self.llm = llm
         self.chat_llm = chat_llm or llm       # the model for friend-mode conversation (a warmer temperature than the command model)
         self.friend_mode = friend_mode
@@ -157,6 +160,18 @@ class Agent:
             return f"I couldn't reach the model: {e}"
         finally:
             self.log("time", f"request took {time.perf_counter() - start:.1f}s")
+
+    def play_saved(self, playlist_id: str) -> str:
+        """Plays one of the saved playlists (the Play button in the window). Like `handle`, but the request is already exact."""
+        self.last_kind, self.last_emotion = "action", "neutral"
+        self._part_failed = False
+        self.actions_done = 0
+        if self.personal is None:
+            self._part_failed = True
+            return "Saved playlists are not available."
+        said = self.personal.play_by_id(playlist_id, self)
+        self._part_failed = not said.ok
+        return said.text
 
     @property
     def last_failed(self) -> bool:
@@ -211,6 +226,13 @@ class Agent:
             command = self.custom.match(text)
             if command is not None:
                 return self._run_custom(command, text)
+        if self.personal is not None:
+            said = self.personal.handle(text, self)
+            if said is not None:                      # "remind me ...", "note down ...", "add ... to my tasks", "play my gym playlist"
+                self.log("personal", f"handled without the model: '{text[:50]}'")
+                self.last_request = text
+                self._part_failed = not said.ok
+                return self._finish([{"role": "user", "content": text}], said.text)
         goodbye = farewell.detect(text)
         if goodbye is not None:                       # "nothing", "leave it", "let's talk later", "bye": the chat is over, no model call
             self.end_conversation()

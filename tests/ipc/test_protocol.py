@@ -105,3 +105,23 @@ def test_an_oversized_command_is_refused_before_it_is_parsed():
         parse_command('{"type":"confirm","id":1,"yes":true,"pad":"' + "x" * protocol.MAX_COMMAND_BYTES + '"}')
     with pytest.raises(ProtocolError):
         parse_command(b"\xff\xfe")
+
+
+# ------------------------------------------------------------------ the second command: play one of the saved playlists
+def test_the_play_button_is_understood():
+    assert parse_command('{"type":"play","id":"p-3f9a1c2b"}') == protocol.PlayRequest("p-3f9a1c2b")
+
+
+@pytest.mark.parametrize("raw", [
+    '{"type":"play"}', '{"type":"play","id":""}', '{"type":"play","id":3}', '{"type":"play","id":"a b"}', '{"type":"play","id":"x/../y"}',
+    '{"type":"play","id":"' + "x" * 41 + '"}', '{"type":"play","query":"anything on spotify"}', '{"type":"play","uri":"spotify:playlist:abc"}',
+])
+def test_a_play_request_names_a_saved_playlist_by_its_id_and_nothing_else(raw):
+    with pytest.raises(ProtocolError):
+        parse_command(raw)
+
+
+def test_a_reminder_message_is_plain_json_and_clipped():
+    msg = protocol.reminder("r-1", "Call mom", "Reminder: Call mom.")
+    assert msg == {"type": "reminder", "id": "r-1", "title": "Call mom", "text": "Reminder: Call mom."}
+    assert len(protocol.reminder("r-1", "x" * 9000, "y")["title"]) <= protocol.MAX_TEXT_CHARS

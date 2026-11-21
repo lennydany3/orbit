@@ -1,21 +1,35 @@
-//! The Settings page's state and the rules that move it: recording a hotkey, editing a command, saving. No drawing and no
-//! windowing, so all of it is tested; `settings_view` only draws it.
+//! The Settings page's state and the rules that move it: recording a hotkey, the audio and voice choices, editing a command, saving. No
+//! drawing and no windowing, so all of it is tested; `settings_view` and `commands_view` only draw it.
 //!
 //! Every change is saved the moment it is made (a hotkey picked, a command saved, switched on or off, deleted), as one whole
 //! file written in one go. If the save fails the change is not made, and the page says why.
 
 use std::path::PathBuf;
 
-use rune::{Key, KeyEvent, TextEdit};
+use rune::{Key, KeyEvent, Modifier, PointerButton, TextEdit};
 
 use crate::settings::{self, Command, Hotkeys, MAX_COMMANDS, MAX_NAME, MAX_PHRASE, MAX_PHRASES, MAX_STEPS, OrbLook, OrbSize, Settings, Sounds, Step};
 
+/// The tabs of the Settings page. (Commands is a page of its own, in the sidebar.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
+    General,
     Hotkeys,
-    Commands,
     Sounds,
     Customization,
+}
+
+impl Section {
+    pub const ALL: [Section; 4] = [Section::General, Section::Hotkeys, Section::Sounds, Section::Customization];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Section::General => "General",
+            Section::Hotkeys => "Shortcuts",
+            Section::Sounds => "Sounds",
+            Section::Customization => "Orb",
+        }
+    }
 }
 
 /// How far the volume's + and - buttons move it.
@@ -234,6 +248,68 @@ impl Draft {
     }
 }
 
+/// What pressing a key while recording the hold-to-talk key means.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TalkRecorded {
+    /// Something not worth a reaction (a key going up, Fn): keep listening.
+    Ignore,
+    /// Esc.
+    Cancel,
+    /// The key, by the name Orbit uses.
+    Key(String),
+    /// A key that cannot be the talk key, and why.
+    Refused(String),
+}
+
+/// A key press as the hold-to-talk key. Any single key held down works (Right Ctrl, F9, Pause...), but one that types something is
+/// refused: holding a letter to talk would type it into every app.
+pub fn talk_from_event(ev: &KeyEvent) -> TalkRecorded {
+    let refused = |what: &str| TalkRecorded::Refused(format!("{what} would be typed into every app while you talk. Use Right Ctrl, a function key or a mouse button."));
+    let name = match &ev.key {
+        Key::Modifier { pressed: false, .. } => return TalkRecorded::Ignore,
+        Key::Modifier { modifier, .. } => match modifier {
+            Modifier::ControlRight => "ctrl_r",
+            Modifier::ControlLeft => "ctrl_l",
+            Modifier::AltRight => "alt_r",
+            Modifier::AltLeft => "alt_l",
+            Modifier::ShiftRight => "shift_r",
+            Modifier::ShiftLeft => "shift_l",
+            Modifier::SuperLeft | Modifier::SuperRight => return TalkRecorded::Refused("The Windows key opens the Start menu, so it cannot be used to talk.".to_owned()),
+            _ => return TalkRecorded::Ignore,
+        }
+        .to_owned(),
+        Key::Escape => return TalkRecorded::Cancel,
+        Key::Function(n) if (1..=24).contains(n) => format!("f{n}"),
+        Key::Insert => "insert".to_owned(),
+        Key::Home => "home".to_owned(),
+        Key::End => "end".to_owned(),
+        Key::PageUp => "page_up".to_owned(),
+        Key::PageDown => "page_down".to_owned(),
+        Key::Pause => "pause".to_owned(),
+        Key::ScrollLock => "scroll_lock".to_owned(),
+        Key::PrintScreen => "print_screen".to_owned(),
+        Key::ContextMenu => "menu".to_owned(),
+        Key::Text(_) | Key::Command(_) => return refused("A letter, a number or a symbol"),
+        Key::Enter | Key::Backspace | Key::Delete | Key::Tab => return refused("That key"),
+        Key::Left | Key::Right | Key::Up | Key::Down => return refused("An arrow key"),
+        _ => return TalkRecorded::Ignore,
+    };
+    TalkRecorded::Key(name)
+}
+
+/// A mouse button as the hold-to-talk key, by the name Orbit uses (the left button is mouse1, the right mouse2, the wheel mouse3, the
+/// two on the side mouse4, back, and mouse5, forward).
+pub fn talk_from_button(button: PointerButton) -> Option<&'static str> {
+    match button {
+        PointerButton::Primary => Some("mouse1"),
+        PointerButton::Secondary => Some("mouse2"),
+        PointerButton::Middle => Some("mouse3"),
+        PointerButton::Back => Some("mouse4"),
+        PointerButton::Forward => Some("mouse5"),
+        _ => None,
+    }
+}
+
 /// What pressing a key while recording a hotkey means.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Recorded {
@@ -343,6 +419,8 @@ pub struct SettingsState {
     pub section: Section,
     pub draft: Option<Draft>,
     pub recording: Option<Field>,
+    /// Is the hold-to-talk key being recorded? (Every key and every mouse button is for it, until one is taken.)
+    pub recording_talk: bool,
     pub notice: Option<Notice>,
     /// The command waiting for "are you sure" before it is deleted.
     pub confirm_delete: Option<usize>,
@@ -350,6 +428,8 @@ pub struct SettingsState {
     pub orb_error: Option<String>,
     /// The volume while its slider is being dragged: shown at once, saved when the drag ends.
     volume_live: Option<u8>,
+    /// The same for the slider of Orbit's own voice.
+    speaking_live: Option<u8>,
     /// Where the orb is while it is being dragged: shown at once, saved when the drag ends.
     orb_live: Option<(f32, f32)>,
     /// Handed out when an edit box's command has gone, so a late keystroke has somewhere harmless to go.
@@ -364,13 +444,15 @@ impl Default for SettingsState {
             problems: Vec::new(),
             existed: false,
             backed_up: false,
-            section: Section::Hotkeys,
+            section: Section::General,
             draft: None,
             recording: None,
+            recording_talk: false,
             notice: None,
             confirm_delete: None,
             orb_error: None,
             volume_live: None,
+            speaking_live: None,
             orb_live: None,
             scratch: TextEdit::new(""),
         }
@@ -413,9 +495,11 @@ impl SettingsState {
     pub fn select(&mut self, section: Section) {
         self.section = section;
         self.recording = None;
+        self.recording_talk = false;
         self.notice = None;
         self.confirm_delete = None;
         self.volume_live = None;
+        self.speaking_live = None;
         self.orb_live = None;
     }
 
@@ -459,11 +543,20 @@ impl SettingsState {
 
     pub fn begin_record(&mut self, field: Field) {
         self.recording = Some(field);
+        self.recording_talk = false;
+        self.notice = None;
+    }
+
+    /// Starts recording the hold-to-talk key: the next key, or mouse button, pressed on the page is it.
+    pub fn begin_record_talk(&mut self) {
+        self.recording_talk = true;
+        self.recording = None;
         self.notice = None;
     }
 
     pub fn cancel_record(&mut self) {
         self.recording = None;
+        self.recording_talk = false;
     }
 
     /// `text` as a chord for `field`, or why not: valid, and not the same as another of the three.
@@ -497,6 +590,7 @@ impl SettingsState {
         let mut next = self.settings.clone();
         next.hotkeys.talk = name.to_owned();
         let done = self.commit(next);
+        self.recording_talk = false;
         self.saved(done, &format!("Hold {} to talk. Orbit uses it straight away.", settings::talk_label(name)))
     }
 
@@ -506,6 +600,7 @@ impl SettingsState {
         next.hotkeys = Hotkeys::default();
         let done = self.commit(next);
         self.recording = None;
+        self.recording_talk = false;
         self.saved(done, "The hotkeys are back to the way they came.")
     }
 
@@ -724,6 +819,97 @@ impl SettingsState {
         self.volume_live = None;
         let done = self.commit(next);
         self.saved(done, "The sounds are back to the way they came.")
+    }
+}
+
+// ---- audio and voice --------------------------------------------------------------------------------------------------
+
+impl SettingsState {
+    /// How loud Orbit's voice is as the page shows it: it follows the slider while it is being dragged.
+    pub fn speaking(&self) -> u8 {
+        self.speaking_live.unwrap_or(self.settings.audio.volume)
+    }
+
+    /// The slider is at `percent` (0 to 100): shown at once, not yet saved.
+    pub fn drag_speaking(&mut self, percent: u8) {
+        self.speaking_live = Some(percent.min(100));
+    }
+
+    /// The drag ended. `keep` saves where it was left; otherwise the slider goes back. True if a new volume was saved.
+    pub fn finish_speaking(&mut self, keep: bool) -> bool {
+        let Some(volume) = self.speaking_live.take() else { return false };
+        if !keep || volume == self.settings.audio.volume {
+            return false;
+        }
+        self.save_speaking(volume)
+    }
+
+    /// Moves it up (`1`) or down (`-1`) by a step, stopping at 0 and 100.
+    pub fn step_speaking(&mut self, direction: i8) -> bool {
+        let now = self.speaking();
+        let next = if direction < 0 { now.saturating_sub(VOLUME_STEP) } else { now.saturating_add(VOLUME_STEP).min(100) };
+        self.speaking_live = None;
+        if next == self.settings.audio.volume {
+            return false;
+        }
+        self.save_speaking(next)
+    }
+
+    fn save_speaking(&mut self, volume: u8) -> bool {
+        let mut next = self.settings.clone();
+        next.audio.volume = volume;
+        let done = self.commit(next);
+        self.saved(done, &format!("Orbit speaks at {volume}%."))
+    }
+
+    /// Picks the microphone by its name ("" = the Windows default).
+    pub fn set_mic(&mut self, name: &str) -> bool {
+        self.set_device(name, true)
+    }
+
+    /// Picks the speaker by its name ("" = the Windows default).
+    pub fn set_speaker(&mut self, name: &str) -> bool {
+        self.set_device(name, false)
+    }
+
+    fn set_device(&mut self, name: &str, mic: bool) -> bool {
+        let Some(device) = settings::parse_device(&serde_json::Value::String(name.to_owned())) else {
+            self.notice = Notice::bad("That is not a device name Orbit can use.");
+            return false;
+        };
+        let mut next = self.settings.clone();
+        let (field, what) = if mic { (&mut next.audio.mic, "microphone") } else { (&mut next.audio.speaker, "speaker") };
+        if *field == device {
+            return false;
+        }
+        field.clone_from(&device);
+        let done = self.commit(next);
+        let shown = if device.is_empty() { "the Windows default".to_owned() } else { device };
+        self.saved(done, &format!("Orbit uses {shown} as its {what}. It switches between turns, with no restart."))
+    }
+
+    pub fn set_wake_word(&mut self, on: bool) -> bool {
+        let mut next = self.settings.clone();
+        next.voice.wake_word = on;
+        let done = self.commit(next);
+        self.saved(done, if on { "Orbit listens for \"Hey Orbit\"." } else { "The wake word is off: hold the talk key to speak to Orbit." })
+    }
+
+    pub fn set_keep_listening(&mut self, on: bool) -> bool {
+        let mut next = self.settings.clone();
+        next.voice.keep_listening = on;
+        let done = self.commit(next);
+        self.saved(done, if on { "Orbit stays ready for a moment after it replies." } else { "Orbit goes back to waiting after each reply." })
+    }
+
+    /// The audio and voice choices back to what they were out of the box.
+    pub fn reset_general(&mut self) -> bool {
+        let mut next = self.settings.clone();
+        next.audio = settings::Audio::default();
+        next.voice = settings::VoiceOptions::default();
+        self.speaking_live = None;
+        let done = self.commit(next);
+        self.saved(done, "The audio and voice choices are back to the way they came.")
     }
 }
 
@@ -1254,7 +1440,169 @@ mod tests {
     fn switching_sections_drops_a_half_finished_recording() {
         let mut page = SettingsState::default();
         page.begin_record(Field::Yes);
-        page.select(Section::Commands);
-        assert_eq!((page.recording, page.section), (None, Section::Commands));
+        page.begin_record_talk();
+        assert_eq!((page.recording, page.recording_talk), (None, true), "one thing is recorded at a time");
+        page.begin_record(Field::Yes);
+        assert_eq!((page.recording, page.recording_talk), (Some(Field::Yes), false));
+        page.begin_record_talk();
+        page.select(Section::Sounds);
+        assert_eq!((page.recording, page.recording_talk, page.section), (None, false, Section::Sounds));
+    }
+
+    // ---- the hold-to-talk key: a key, or a mouse button ----
+
+    fn talk(key: Key) -> TalkRecorded {
+        talk_from_event(&KeyEvent { key, mods: Mods::default() })
+    }
+
+    fn modifier(modifier: rune::Modifier, pressed: bool) -> TalkRecorded {
+        talk(Key::Modifier { modifier, pressed })
+    }
+
+    #[test]
+    fn a_single_key_held_down_can_be_the_talk_key() {
+        assert_eq!(modifier(rune::Modifier::ControlRight, true), TalkRecorded::Key("ctrl_r".into()));
+        assert_eq!(modifier(rune::Modifier::ControlLeft, true), TalkRecorded::Key("ctrl_l".into()));
+        assert_eq!(modifier(rune::Modifier::AltRight, true), TalkRecorded::Key("alt_r".into()));
+        assert_eq!(modifier(rune::Modifier::ShiftRight, true), TalkRecorded::Key("shift_r".into()));
+        assert_eq!(talk(Key::Function(9)), TalkRecorded::Key("f9".into()));
+        assert_eq!(talk(Key::Function(24)), TalkRecorded::Key("f24".into()));
+        for (key, name) in [(Key::Insert, "insert"), (Key::Pause, "pause"), (Key::ScrollLock, "scroll_lock"), (Key::PageUp, "page_up"), (Key::PrintScreen, "print_screen"), (Key::ContextMenu, "menu")] {
+            assert_eq!(talk(key), TalkRecorded::Key(name.into()));
+        }
+    }
+
+    #[test]
+    fn every_key_the_recorder_gives_is_one_orbit_accepts() {
+        for key in [Key::Function(1), Key::Function(12), Key::Insert, Key::Home, Key::End, Key::PageUp, Key::PageDown, Key::Pause, Key::ScrollLock, Key::PrintScreen, Key::ContextMenu] {
+            let TalkRecorded::Key(name) = talk(key.clone()) else { panic!("{key:?}") };
+            assert!(settings::valid_talk_key(&name), "{name}");
+        }
+        for m in [rune::Modifier::ControlRight, rune::Modifier::ControlLeft, rune::Modifier::AltRight, rune::Modifier::AltLeft, rune::Modifier::ShiftRight, rune::Modifier::ShiftLeft] {
+            let TalkRecorded::Key(name) = modifier(m, true) else { panic!("{m:?}") };
+            assert!(settings::valid_talk_key(&name), "{name}");
+        }
+        assert_eq!(talk(Key::Function(25)), TalkRecorded::Ignore, "no such function key");
+    }
+
+    #[test]
+    fn a_key_that_types_something_is_refused_with_the_reason() {
+        for key in [Key::Text("a".into()), Key::Command('k'), Key::Enter, Key::Backspace, Key::Tab, Key::Left, Key::Down] {
+            let TalkRecorded::Refused(why) = talk(key.clone()) else { panic!("{key:?}") };
+            assert!(why.contains("typed into every app") && why.contains("mouse button"), "{why}");
+        }
+        let TalkRecorded::Refused(why) = modifier(rune::Modifier::SuperLeft, true) else { panic!() };
+        assert!(why.contains("Start menu"));
+    }
+
+    #[test]
+    fn a_key_going_up_and_escape_do_not_record() {
+        assert_eq!(modifier(rune::Modifier::ControlRight, false), TalkRecorded::Ignore);
+        assert_eq!(modifier(rune::Modifier::Fn, true), TalkRecorded::Ignore);
+        assert_eq!(talk(Key::Escape), TalkRecorded::Cancel);
+    }
+
+    #[test]
+    fn the_five_mouse_buttons_are_mouse1_to_mouse5() {
+        let named: Vec<_> = [PointerButton::Primary, PointerButton::Secondary, PointerButton::Middle, PointerButton::Back, PointerButton::Forward].into_iter().map(talk_from_button).collect();
+        assert_eq!(named, [Some("mouse1"), Some("mouse2"), Some("mouse3"), Some("mouse4"), Some("mouse5")]);
+        assert_eq!(talk_from_button(PointerButton::Other(7)), None);
+        assert!(named.iter().flatten().all(|n| settings::valid_talk_key(n) && settings::is_mouse_talk(n)));
+    }
+
+    #[test]
+    fn a_mouse_button_is_saved_as_the_talk_key_and_the_file_orbit_reads_has_it() {
+        let (mut page, file) = page();
+        page.begin_record_talk();
+        assert!(page.recording_talk);
+        assert!(page.set_talk(talk_from_button(PointerButton::Forward).unwrap()));
+        assert_eq!((on_disk(&file).hotkeys.talk.as_str(), page.recording_talk), ("mouse5", false), "done once it took");
+        assert!(page.notice.as_ref().unwrap().text.contains("Mouse5 (forward)"), "{:?}", page.notice);
+        assert_eq!(on_disk(&file).commands.len(), 2, "the commands were not touched");
+    }
+
+    // ---- audio and voice ----
+
+    #[test]
+    fn the_speaking_volume_follows_the_slider_and_is_saved_where_it_is_let_go() {
+        let (mut page, file) = page();
+        assert_eq!(page.speaking(), 89, "as the example file has it");
+        page.drag_speaking(10);
+        page.drag_speaking(55);
+        assert_eq!((page.speaking(), on_disk(&file).audio.volume), (55, 89), "shown at once, nothing written during the drag");
+        assert!(page.finish_speaking(true));
+        assert_eq!((on_disk(&file).audio.volume, page.speaking()), (55, 55));
+        assert!(page.notice.as_ref().unwrap().text.contains("55%"));
+        page.drag_speaking(5);
+        assert!(!page.finish_speaking(false) && page.speaking() == 55, "a cancelled drag puts it back");
+        page.drag_speaking(55);
+        assert!(!page.finish_speaking(true), "letting go where it started is not a change");
+        assert_eq!(on_disk(&file).sounds.volume, 65, "the orb's own sounds are a different volume");
+    }
+
+    #[test]
+    fn the_speaking_volume_buttons_step_by_ten_and_stop_at_the_ends() {
+        let (mut page, file) = page();
+        assert!(page.step_speaking(1) && on_disk(&file).audio.volume == 99);
+        assert!(page.step_speaking(1) && on_disk(&file).audio.volume == 100);
+        assert!(!page.step_speaking(1));
+        for _ in 0..12 {
+            page.step_speaking(-1);
+        }
+        assert_eq!(on_disk(&file).audio.volume, 0);
+        assert!(!page.step_speaking(-1));
+    }
+
+    #[test]
+    fn a_microphone_and_a_speaker_are_picked_by_name_and_empty_means_the_windows_default() {
+        let (mut page, file) = page();
+        assert!(page.set_mic("Headset (Buds)"));
+        assert!(page.set_speaker("Speakers (Echo Pop)"));
+        let saved = on_disk(&file).audio;
+        assert_eq!((saved.mic.as_str(), saved.speaker.as_str(), saved.volume), ("Headset (Buds)", "Speakers (Echo Pop)", 89));
+        assert!(page.notice.as_ref().unwrap().text.contains("Speakers (Echo Pop)") && page.notice.as_ref().unwrap().text.contains("no restart"));
+        assert!(!page.set_mic("Headset (Buds)"), "already that one");
+        assert!(page.set_mic(""));
+        assert_eq!(on_disk(&file).audio.mic, "");
+        assert!(page.notice.as_ref().unwrap().text.contains("the Windows default"));
+        assert!(!page.set_mic(&"x".repeat(settings::MAX_DEVICE + 1)) && !page.notice.as_ref().unwrap().good);
+    }
+
+    #[test]
+    fn the_wake_word_and_the_follow_up_are_saved_at_once_and_alone() {
+        let (mut page, file) = page();
+        assert_eq!((page.settings.voice.wake_word, page.settings.voice.keep_listening), (true, false), "as the example file has it");
+        assert!(page.set_wake_word(false) && page.set_keep_listening(true));
+        let saved = on_disk(&file).voice;
+        assert_eq!((saved.wake_word, saved.keep_listening), (false, true));
+        assert!(page.notice.as_ref().unwrap().text.contains("ready for a moment"));
+        assert_eq!((on_disk(&file).audio.volume, on_disk(&file).hotkeys.talk.as_str()), (89, "f9"));
+    }
+
+    #[test]
+    fn resetting_the_audio_and_voice_puts_the_defaults_back_and_keeps_everything_else() {
+        let (mut page, file) = page();
+        assert!(page.reset_general());
+        let saved = on_disk(&file);
+        assert_eq!((saved.audio, saved.voice), (settings::Audio::default(), settings::VoiceOptions::default()));
+        assert_eq!((saved.hotkeys.talk.as_str(), saved.sounds.volume, saved.commands.len()), ("f9", 65, 2));
+    }
+
+    #[test]
+    fn leaving_the_general_tab_drops_a_slider_drag_in_progress() {
+        let mut page = SettingsState::default();
+        page.drag_speaking(5);
+        page.select(Section::Sounds);
+        assert_eq!(page.speaking(), 100);
+    }
+
+    #[test]
+    fn an_audio_change_that_cannot_be_saved_changes_nothing_and_says_why() {
+        let (mut page, file) = page();
+        let before = page.settings.clone();
+        page.path = Some(file.parent().unwrap().join("gone").join("settings.json"));
+        assert!(!page.set_mic("USB") && !page.set_wake_word(false) && !page.step_speaking(1));
+        assert_eq!(page.settings, before);
+        assert!(page.notice.as_ref().unwrap().text.contains("could not write"));
     }
 }

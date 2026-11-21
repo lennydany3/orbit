@@ -65,6 +65,15 @@ class StreamingTTS:
         raise NotImplementedError
 
     emotion = "neutral"
+    gain = 1.0                                        # how loud the voice is, 0 to 1 (the Settings page's "speaking volume")
+
+    def set_device(self, spec: str | int | None) -> bool:
+        """Speaks through another output device from the next reply on (None or "" = the Windows default). True if it changed.
+        Raises ValueError if there is no such device."""
+        device = resolve_device(spec, "output")
+        changed = device != self.device
+        self.device = device
+        return changed
 
     def set_emotion(self, emotion: str | None) -> None:
         """How the next reply should sound ("proud", "caring", ...). Unknown names mean neutral."""
@@ -116,6 +125,8 @@ class StreamingTTS:
                 if not first_sentence:
                     audio = np.concatenate([np.zeros(int(_SENTENCE_PAUSE_S * self.sample_rate), np.int16), audio])
                 first_sentence = False
+                if self.gain != 1.0:                         # the speaking volume: what the speaker plays, the echo canceller hears and the face meters
+                    audio = np.clip(audio.astype(np.float32) * self.gain, -32768, 32767).astype(np.int16)
                 ref16 = None
                 if self.reference is not None:               # the sentence at 16 kHz, resampled as a whole (no seams between blocks)
                     from scipy.signal import resample_poly
@@ -270,6 +281,7 @@ def split_sentences(text: str) -> list[str]:
 class WindowsTTS:
     """The built-in Windows (SAPI) voice through pyttsx3. Robotic, but always there. No streaming, no timing detail."""
     name = "windows"
+    gain = 1.0
 
     def __init__(self):
         import pyttsx3
@@ -289,6 +301,7 @@ class WindowsTTS:
 
         start = time.perf_counter()
         self._engine = pyttsx3.init()   # one engine per call: pyttsx3's event loop does not like being reused across threads
+        self._engine.setProperty("volume", min(1.0, max(0.0, self.gain)))
         voices = self._engine.getProperty("voices")
         female = next((v for v in voices if "zira" in v.name.lower() or "female" in v.name.lower()), None)
         if female:
@@ -321,6 +334,20 @@ class FallbackTTS:
         for engine in self.engines:
             if hasattr(engine, "set_emotion"):
                 engine.set_emotion(emotion)
+
+    def set_volume(self, volume: float) -> None:
+        """How loud Orbit's voice is, 0 (silent) to 1 (full), for every engine from the next reply on."""
+        for engine in self.engines:
+            engine.gain = min(1.0, max(0.0, float(volume)))
+
+    def set_device(self, spec: str | int | None) -> bool:
+        """Speak through another output device from the next reply on. Engines that cannot choose (the Windows voice) are left alone.
+        Raises ValueError if there is no such device."""
+        changed = False
+        for engine in self.engines:
+            if hasattr(engine, "set_device"):
+                changed = engine.set_device(spec) or changed
+        return changed
 
     def set_audio_listener(self, listener) -> None:
         """Hands every played block to `listener` (engines that cannot report their audio, like the Windows voice, never call it)."""

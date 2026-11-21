@@ -44,7 +44,7 @@ def test_the_hotkey_can_interrupt_speech():
     assert m.state is State.LISTENING
 
 
-@pytest.mark.parametrize("start, bad", [(State.IDLE, State.SPEAKING), (State.LISTENING, State.THINKING), (State.THINKING, State.LISTENING),
+@pytest.mark.parametrize("start, bad", [(State.IDLE, State.CONFIRMING), (State.LISTENING, State.THINKING), (State.THINKING, State.LISTENING),
                                         (State.SPEAKING, State.THINKING), (State.CONFIRMING, State.SPEAKING)])
 def test_illegal_transitions_are_refused(start, bad):
     m, _ = machine()
@@ -100,5 +100,5 @@ def test_an_illegal_transition_is_not_reported():
     changes = []
     m = VoiceState(clock=Clock(), on_change=lambda *a: changes.append(a))
     with pytest.raises(IllegalTransition):
-        m.to(State.SPEAKING)
+        m.to(State.CONFIRMING)
     assert changes == [] and m.state is State.IDLE

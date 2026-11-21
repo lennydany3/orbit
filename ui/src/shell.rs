@@ -202,7 +202,7 @@ pub fn make_tray(hub: AppHandle<App>) -> Option<Tray> {
             "orb" => hub.update(|app, tx| app.toggle_pin(crate::clock::now(tx.clock()))),
             "window" => hub.open(),
             "settings" => {
-                hub.update(|app, _| app.open_settings(crate::editor::Section::Hotkeys));
+                hub.update(|app, _| app.open_settings(crate::editor::Section::General));
                 hub.open();
             }
             "quit" => hub.quit(),

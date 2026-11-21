@@ -1,4 +1,9 @@
 {
+  "audio": {
+    "mic": "USB Microphone",
+    "speaker": "",
+    "volume": 89
+  },
   "commands": [
     {
       "enabled": true,
@@ -52,5 +57,9 @@
     "enabled": false,
     "volume": 65
   },
-  "version": 1
+  "version": 1,
+  "voice": {
+    "keep_listening": false,
+    "wake_word": true
+  }
 }

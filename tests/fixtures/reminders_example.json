@@ -1,0 +1,38 @@
+{
+  "history": [
+    {
+      "at": "2026-11-22T08:00",
+      "id": "r-0d0d0d0d",
+      "title": "Stretch"
+    }
+  ],
+  "reminders": [
+    {
+      "created": "2026-11-22T10:15",
+      "due": "2026-11-22T17:00",
+      "enabled": true,
+      "id": "r-3f9a1c2b",
+      "note": "mine",
+      "repeat": "none",
+      "title": "Call mom"
+    },
+    {
+      "created": "2026-11-21T20:00",
+      "due": "2026-11-23T08:00",
+      "enabled": true,
+      "id": "r-0d0d0d0d",
+      "repeat": "daily",
+      "title": "Take medicine"
+    },
+    {
+      "created": "2026-11-20T09:00",
+      "due": "2026-11-27T10:00",
+      "enabled": false,
+      "id": "r-9a9a9a9a",
+      "repeat": "weekly",
+      "title": "Water the plants"
+    }
+  ],
+  "seen": "2026-11-22T07:00",
+  "version": 1
+}

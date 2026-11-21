@@ -47,8 +47,12 @@ class NullBridge:
         return 0
     def confirm_done(self, confirm_id, answer, by) -> None: ...
     def killed(self) -> None: ...
+    def reminder(self, reminder_id, title, text) -> None: ...
 
     def poll_answer(self):
+        return None
+
+    def poll_request(self):
         return None
 
 
@@ -81,14 +85,21 @@ class UiBridge:
         self._next_confirm = 1
         self._open_confirm: int | None = None
         self._answers: queue.Queue[protocol.ConfirmAnswer] = queue.Queue()
+        self._requests: queue.Queue[protocol.PlayRequest] = queue.Queue(maxsize=8)
 
     # ---- for the server ----
     def snapshot(self) -> dict:
         with self._lock:
             return protocol.hello(self._orb, self._level)
 
-    def on_command(self, answer: protocol.ConfirmAnswer) -> str | None:
-        """A face answered a confirmation. Returns why it was not accepted, or None."""
+    def on_command(self, answer: protocol.ConfirmAnswer | protocol.PlayRequest) -> str | None:
+        """A face answered a confirmation, or asked for one of the user's saved playlists. Returns why it was not accepted, or None."""
+        if isinstance(answer, protocol.PlayRequest):
+            try:
+                self._requests.put_nowait(answer)
+            except queue.Full:
+                return "Orbit is already working on earlier requests"
+            return None
         with self._lock:
             if self._open_confirm is None or answer.id != self._open_confirm:
                 return "no such confirmation is open"
@@ -167,6 +178,18 @@ class UiBridge:
     @_safe
     def reply(self, text: str, spoken: str, kind: str, emotion: str) -> None:
         self._publish(protocol.reply(text, spoken, kind, emotion))
+
+    @_safe
+    def reminder(self, reminder_id: str, title: str, text: str) -> None:
+        """A reminder just came due: the face shows it (Orbit says it out loud itself)."""
+        self._publish(protocol.reminder(reminder_id, title, text))
+
+    def poll_request(self) -> protocol.PlayRequest | None:
+        """A request from the face (the Play button), if one is waiting."""
+        try:
+            return self._requests.get_nowait()
+        except queue.Empty:
+            return None
 
     # ---- confirmations ----
     @_safe

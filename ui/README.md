@@ -15,7 +15,9 @@ cargo test                                 # the logic, and the link against Orb
 ```
 
 - **Ctrl+Alt+O**, or a click on the tray icon, pins the orb on screen (again to let it go).
-- **Settings** (the button top right of the window, or Settings... in the tray menu): see below.
+- **The window** has a sidebar: Home (the big sphere), Commands, Reminders, Notes, Music and Settings, with a bell that counts the
+  reminders that went off since you last looked, and a box that says whether Orbit is connected. Settings... in the tray menu opens
+  the Settings page. See below.
 - **Tray menu** (right-click): show or hide the orb, open the Orbit window, Settings, quit. Quitting also stops the Orbit it started.
 - **The orb never takes focus**, and clicks pass straight through it. Only the Yes and No buttons of a question take clicks.
   You can answer a question by clicking, by voice, or with **Ctrl+Alt+Y** (yes) and **Ctrl+Alt+N** (no): those two chords are
@@ -33,14 +35,25 @@ cargo test                                 # the logic, and the link against Orb
 
 ## Settings
 
-The Settings page (a Settings button on the window, and Settings... in the tray menu) controls Orbit from one place. Every
-change is saved the moment it is made, to `settings.json` in the project folder (`ORBIT_SETTINGS` moves it; it is git-ignored).
-The window writes it and Orbit reads it; they share the rules in `tests/fixtures`, which both sides are tested against.
+The Settings page (Settings in the sidebar, and Settings... in the tray menu) controls Orbit from one place, in four tabs: General,
+Shortcuts, Sounds and Orb. Your own commands are a page of their own (Commands in the sidebar). Every change is saved the moment it
+is made, to `settings.json` in the project folder (`ORBIT_SETTINGS` moves it; it is git-ignored). The window writes it and Orbit
+reads it; they share the rules in `tests/fixtures`, which both sides are tested against.
 
-- **Hotkeys.** Click a chord, press the new keys (Esc cancels). The chord for showing the orb, and the yes and no answers, take
-  effect at once; one Windows will not give Orbit (another program has it) is refused with a reason and nothing changes. The
-  hold-to-talk key is picked from a list, and Orbit follows it within a second, with no restart. Reset puts all four back.
-- **Commands.** Say a phrase and Orbit runs a list of steps in order: open an app, a website or a folder; press a key combination
+- **General.** *Audio:* the microphone and the output device (a native menu of what the sound system lists, refreshed by the button;
+  stored by the device's name, empty = the Windows default) and the speaking volume. *Talk to Orbit:* the hold-to-talk key, the wake
+  word switch, and "keep listening after a reply". Saved as `"audio": {"mic": "", "speaker": "", "volume": 100}` and
+  `"voice": {"wake_word": true, "keep_listening": true}`. Orbit follows them between turns, with no restart (`src/orbit/voice/prefs.py`).
+  The device lists come from `python -m orbit.voice.devices` (one line of JSON), run on a background thread.
+- **The hold-to-talk key** is recorded, not picked: **Change** puts a layer over the page that takes the next key, or the next click of
+  any mouse button, and saves it as `"talk": "ctrl_r"`, `"f9"` or `"mouse1"` to `"mouse5"` (left, right, wheel, back, forward). Mouse 3
+  to 5 reach the page through Rune's `pointer_buttons`, Mouse 2 through `on_secondary_press`. A modifier on its own (Right Ctrl) needs
+  `App::modifier_keys()`, which `main.rs` turns on. Orbit's Python side listens for a mouse button with pynput, only while one is the
+  talk key, and only starts listening once it has been held for 0.25 s, so a plain click never wakes it.
+- **Shortcuts.** Click a chord, press the new keys (Esc cancels). The chord for showing the orb, and the yes and no answers, take
+  effect at once; one Windows will not give Orbit (another program has it) is refused with a reason and nothing changes. Reset puts
+  all four back (the talk key included).
+- **Commands** (the Commands page). Say a phrase and Orbit runs a list of steps in order: open an app, a website or a folder; press a key combination
   (`win+shift+s`); type text; wait a moment. Switch a command off without deleting it. A command that presses keys or types
   asks "yes or no?" first, once for the whole command, listing exactly what it will do (so it can be answered by voice, by
   clicking, or with the answer chords). Steps that open a folder only open it: nothing is ever run, and the language model
@@ -60,8 +73,29 @@ The window writes it and Orbit reads it; they share the rules in `tests/fixtures
 - A hand-edited file Orbit cannot fully read does not stop anything: the bad entry is left out, the page lists what, and the
   first save keeps the old file as `settings.json.bak`.
 
-More groups (the model and its keys, the voice, the orb) slot in as another `Section` in `src/editor.rs`, another nav entry
-and function in `src/settings_view.rs`.
+More groups slot in as another `Section` in `src/editor.rs` and a function in `src/settings_view.rs`.
+
+## Reminders, notes, tasks and music
+
+Three more files next to `settings.json`, each written whole under a temporary name and renamed over the old one, read as empty if
+missing or broken, with anything a record has that this version does not know written back as it was. Orbit (Python) reads and writes
+them too (`src/orbit/userdata.py`, `reminders.py`, `notes.py`, `playlists.py`); a change reads the file fresh first, so one side's edit
+is never lost by the other's save, and `src/watcher.rs` (a thread that looks at the three files about once a second) wakes the window
+when Orbit changes one. `tests/cross_language.rs` has the real Python read what the window wrote and the window read what Python
+wrote; the example files in `tests/fixtures` are read by both.
+
+- **Reminders** (`src/reminders.rs`, `reminders_view.rs`): `reminders.json` has the reminders, what went off lately (`history`,
+  written by Orbit when it says one) and when the bell was last looked at (`seen`). Times are local wall-clock text
+  (`2026-11-23T17:00`, `src/datetime.rs`; the one call to the system is `GetLocalTime`). The form takes a day (Today, Tomorrow, Friday,
+  25 Dec, 2026-12-25) and a time (5pm, 17:30, noon), with quick buttons and a repeat. The same repeat rules as `orbit/reminders.py`
+  decide the next time of a repeating one.
+- **Notes and tasks** (`src/notes.rs`, `notes_view.rs`): `notes.json`. A note's text is saved 0.8 s after the typing stops (measured
+  from the first unsaved keystroke, so it cannot be put off for ever), when another note is opened, and when the page is left;
+  `App::next_wake` wakes the window for it. Ctrl+K makes a note.
+- **Music** (`src/music.rs`, `music_view.rs`): `music.json`. The window only has to understand a Spotify link (`parse_link`, checked
+  against `tests/fixtures/spotify_links.json`, which the Python side also reads); Orbit names the playlist from Spotify's public oEmbed
+  page. The Play button sends `{"type": "play", "id": ...}` over the link (`link::message::play_request`); the id has to be one saved in
+  `music.json`. Open in Spotify hands a `spotify:` address (and only that: `src/openers.rs` checks it) to Windows.
 
 An Orbit that is already running is started with `python -m orbit --voice --ipc`, which prints the link to pass with
 `--url`. Or let the app start one itself with `--spawn` (or `--spawn-demo`). Close the window, or have it crash, and the Orbit
@@ -100,8 +134,11 @@ file's own icon in Explorer is not set (that needs a Windows resource file at bu
 - `src/orbit/` the sphere. `state` (the 11 states), `params` (what each does, blended on change), `controller` (the shared
   state, level and timers), `sim` (one sphere's clock and blend, produces the numbers for a frame), `geometry` (the points),
   `gpu` + `sphere.wgsl` (drawing), `compositor` (paints a sphere in every Rune `effect` slot).
-- `src/link/` the connection: `message` (what Orbit sends, as types), `endpoint` (which addresses are allowed), and the thread
-  that connects, reads, writes the one answer, and reconnects.
+- `src/link/` the connection: `message` (what Orbit sends, as types, and the two things the window may send), `endpoint` (which
+  addresses are allowed), and the thread that connects, reads, writes, and reconnects.
+- `src/view.rs` the window (sidebar and the page in its panel; Home is the stage), `sidebar.rs`, `widgets.rs` and `icons.rs` (the
+  shared pieces and Lucide line icons), and one view per page: `commands_view`, `reminders_view`, `notes_view`, `music_view`,
+  `settings_view`. `src/devices.rs` the audio device lists, `src/watcher.rs` the data-file watcher.
 - `src/pacer.rs` flash timing. `src/spawn.rs` starting Orbit. `src/app.rs` app state and rules. `src/view.rs` the window.
 - `src/autostart.rs` the sign-in entry. `src/face.rs` the orb's window and its question; `src/presence.rs` when the orb is showing; `src/shell.rs` the orb's overlay
   handle and the tray icon; `src/clock.rs` the one clock every window shares (each Rune window has its own, which restarts
@@ -115,4 +152,8 @@ Rune is pinned to one revision in `Cargo.toml` (`dev` is never rewritten). Cargo
 table, so it is repeated there at the same revision: update both together.
 
 Headless pictures, without a window (debug build): `cargo run -- --snap out.png --size 1280x800 --scene live-confirm --at 1`.
-Scenes: the 11 states, `live-speaking`, `live-confirm`, `live-retrying`, `live-refused`.
+Scenes: the 11 states, `live-speaking`, `live-confirm`, `live-retrying`, `live-refused`, and the pages: `reminders`, `reminders-form`,
+`notes`, `notes-open`, `notes-tasks`, `music-empty`, `music`, `settings-general`, `settings-recording-talk`, `settings-commands`
+and the other `settings-*` ones (`--list-scenes` has them all). A script can click in a scene too:
+`--scene settings-recording-talk --script click.json --snap out.png` with `{"events": [{"t": 0.1, "type": "tap", "x": 500, "y": 250, "button": "forward"}]}`
+records Mouse 5 as the talk key.

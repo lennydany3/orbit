@@ -4,6 +4,9 @@
                                                          |  ^
                                                     confirming (a risky action asks "yes or no?")
 
+Two turns start from idle without anyone speaking: Orbit says a reminder that came due (idle -> speaking), and the window's Play
+button asks for a saved playlist (idle -> thinking).
+
 Every transition is logged with a timestamp. `idle` can always be entered (a timeout, an error, the kill switch).
 Pure logic: no audio, no threads, so it is unit-tested without any hardware.
 """
@@ -25,7 +28,7 @@ class State(str, Enum):
 
 
 ALLOWED: dict[State, set[State]] = {
-    State.IDLE: {State.WAKE_DETECTED, State.LISTENING},                  # LISTENING directly = hold-to-talk
+    State.IDLE: {State.WAKE_DETECTED, State.LISTENING, State.SPEAKING, State.THINKING},   # LISTENING directly = hold-to-talk
     State.WAKE_DETECTED: {State.LISTENING},
     State.LISTENING: {State.TRANSCRIBING},
     State.TRANSCRIBING: {State.THINKING, State.SPEAKING},                # SPEAKING = "Sorry, I didn't catch that"

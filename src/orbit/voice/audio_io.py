@@ -104,6 +104,26 @@ class MicStream:
         self.frames += 1
         return frame, t_start
 
+    def switch(self, spec: str | int | None) -> bool:
+        """Listens on another microphone from now on (None or "" = the Windows default). True if it changed. Raises ValueError if there
+        is no such device, and the old one keeps working: a microphone that is not plugged in must not leave Orbit deaf."""
+        device = resolve_device(spec, "input")
+        if device == self.device:
+            return False
+        was_running = self._stream is not None
+        old = self.device
+        self.stop()
+        self.device = device
+        self._drain()
+        if was_running:
+            try:
+                self.start()
+            except Exception:
+                self.device = old
+                self.start()
+                raise
+        return True
+
     def pause(self) -> None:
         """Half-duplex: stop collecting audio (e.g. while Orbit speaks) without closing the mic."""
         self._paused.set()

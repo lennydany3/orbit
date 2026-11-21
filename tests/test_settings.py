@@ -33,6 +33,8 @@ def test_the_example_file_the_window_writes_is_read_as_written():
     assert not hello.enabled and hello.steps[0].value == "Hello there!"
     assert work.sends_keys and hello.sends_keys
     assert s.sounds == settings.Sounds(enabled=False, volume=65)
+    assert s.audio == settings.Audio(mic="USB Microphone", speaker="", volume=89)
+    assert s.voice == settings.VoiceOptions(wake_word=True, keep_listening=False)
 
 
 def test_broken_json_falls_back_to_the_defaults_and_says_so(tmp_path):
@@ -67,9 +69,10 @@ def test_a_bad_talk_key_keeps_the_default(key):
 
 
 def test_every_talk_key_name_exists_in_pynput():
-    from pynput import keyboard
-    missing = [k for k in settings.TALK_KEYS if not hasattr(keyboard.Key, k)]
+    from pynput import keyboard, mouse
+    missing = [k for k in settings.TALK_KEYS if not hasattr(keyboard.Key, k) and k not in settings.MOUSE_TALK]
     assert missing == []
+    assert all(hasattr(mouse.Button, button) for button in settings.MOUSE_TALK.values())
 
 
 def test_the_window_checks_the_other_chords_so_here_they_only_need_to_be_text():
@@ -206,3 +209,74 @@ def test_the_talk_keys_the_window_offers_are_the_ones_orbit_accepts():
     keys = json.loads((FIXTURES / "talk_keys.json").read_text(encoding="utf-8"))
     assert all(settings.valid_talk_key(k) for k in keys["valid"]), [k for k in keys["valid"] if not settings.valid_talk_key(k)]
     assert not any(settings.valid_talk_key(k) for k in keys["invalid"]), [k for k in keys["invalid"] if settings.valid_talk_key(k)]
+
+
+# ---- mouse buttons as the talk key ----
+
+@pytest.mark.parametrize("key", ["mouse1", "mouse2", "mouse3", "mouse4", "mouse5"])
+def test_a_mouse_button_can_be_the_talk_key(key):
+    s = parsed({"hotkeys": {"talk": key}})
+    assert s.talk_key == key and s.problems == []
+
+
+@pytest.mark.parametrize("key", ["mouse0", "mouse6", "Mouse1", "mouse", "mouse10"])
+def test_a_mouse_button_that_does_not_exist_is_refused(key):
+    s = parsed({"hotkeys": {"talk": key}})
+    assert s.talk_key == "ctrl_r" and "talk key" in s.problems[0]
+
+
+def test_the_mouse_buttons_are_named_the_way_the_window_names_them():
+    keys = json.loads((FIXTURES / "talk_keys.json").read_text(encoding="utf-8"))
+    assert keys["mouse"] == settings.MOUSE_TALK
+
+
+# ---- audio and voice, read the way the window reads them (tests/fixtures/audio_voice.json) ----
+
+CASES = json.loads((FIXTURES / "audio_voice.json").read_text(encoding="utf-8"))
+
+
+def test_the_speaking_volume_is_read_the_way_the_window_reads_it():
+    for case in CASES["volume"]:
+        s = parsed({"audio": {"volume": case["in"]}})
+        if "out" in case:
+            assert (s.audio.volume, s.problems) == (case["out"], []), case
+        else:
+            assert s.audio.volume == CASES["default_volume"] and "speaking volume" in s.problems[0], case
+    assert settings.DEFAULT_SPEAKING_VOLUME == CASES["default_volume"]
+
+
+@pytest.mark.parametrize("name", ["mic", "speaker"])
+def test_a_device_name_is_read_the_way_the_window_reads_it(name):
+    for case in CASES["device"]:
+        s = parsed({"audio": {name: case["in"]}})
+        if "out" in case:
+            assert (getattr(s.audio, name), s.problems) == (case["out"], []), case
+        else:
+            assert getattr(s.audio, name) == "" and "not a device name" in s.problems[0], case
+
+
+@pytest.mark.parametrize("name", ["wake_word", "keep_listening"])
+def test_a_voice_switch_is_read_the_way_the_window_reads_it(name):
+    for case in CASES["flag"]:
+        s = parsed({"voice": {name: case["in"]}})
+        if "out" in case:
+            assert (getattr(s.voice, name), s.problems) == (case["out"], []), case
+        else:
+            assert getattr(s.voice, name) is True and "true or false" in s.problems[0], case
+
+
+def test_no_audio_or_voice_entry_means_the_way_orbit_always_worked():
+    s = parsed({})
+    assert s.audio == settings.Audio("", "", 100) and s.voice == settings.VoiceOptions(True, True) and s.problems == []
+
+
+def test_an_audio_or_voice_entry_that_is_not_an_object_is_ignored_with_a_reason():
+    for key in ("audio", "voice"):
+        for raw in (True, 5, "loud", [], None):
+            s = parsed({key: raw, "hotkeys": {"talk": "f8"}})
+            assert s.talk_key == "f8" and "not an object" in s.problems[0], (key, raw)
+
+
+def test_each_part_of_the_audio_stands_alone():
+    s = parsed({"audio": {"mic": "USB Mic", "volume": "loud"}})
+    assert (s.audio.mic, s.audio.speaker, s.audio.volume, len(s.problems)) == ("USB Mic", "", 100, 1)

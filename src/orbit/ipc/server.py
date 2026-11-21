@@ -53,9 +53,9 @@ class _Face:
 
 class IpcServer:
     def __init__(self, *, host: str = "127.0.0.1", port: int = 8765, token: str,
-                 allowed_origins: tuple[str, ...] = (), on_command: Callable[[protocol.ConfirmAnswer], str | None],
+                 allowed_origins: tuple[str, ...] = (), on_command: Callable[[protocol.ConfirmAnswer | protocol.PlayRequest], str | None],
                  snapshot: Callable[[], dict]):
-        """`on_command(answer)` returns None when it took the answer, or a reason it could not (sent back as an `error`).
+        """`on_command(command)` returns None when it took the command, or a reason it could not (sent back as an `error`).
         `snapshot()` returns the `hello` message a new face gets first."""
         self.host, self._port, self.token = host, port, token
         self.allowed_origins = allowed_origins

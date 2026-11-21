@@ -1,0 +1,32 @@
+{
+  "volume": [
+    {"in": 0, "out": 0},
+    {"in": 89, "out": 89},
+    {"in": 100, "out": 100},
+    {"in": 55.4, "out": 55},
+    {"in": 55.6, "out": 56},
+    {"in": -1},
+    {"in": 101},
+    {"in": "89"},
+    {"in": true},
+    {"in": null}
+  ],
+  "device": [
+    {"in": "", "out": ""},
+    {"in": "Realtek Microphone", "out": "Realtek Microphone"},
+    {"in": "  USB   Mic  ", "out": "USB Mic"},
+    {"in": 5},
+    {"in": null},
+    {"in": ["USB Mic"]},
+    {"in": true}
+  ],
+  "flag": [
+    {"in": true, "out": true},
+    {"in": false, "out": false},
+    {"in": 1},
+    {"in": 0},
+    {"in": "yes"},
+    {"in": null}
+  ],
+  "default_volume": 100
+}

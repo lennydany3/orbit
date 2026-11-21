@@ -26,15 +26,19 @@ fn ctrl_alt(c: char) -> KeyEvent {
 }
 
 #[test]
-fn the_window_starts_on_the_sphere_and_the_page_comes_and_goes() {
+fn the_window_starts_on_the_sphere_and_the_pages_come_and_go() {
     let mut app = App::default();
-    assert_eq!(app.page, Page::Stage);
-    app.open_settings(Section::Commands);
-    assert_eq!((app.page, app.prefs.section), (Page::Settings, Section::Commands));
+    assert_eq!(app.page, Page::Home);
+    app.go(Page::Commands);
     app.prefs.new_command();
-    app.close_settings();
-    assert_eq!(app.page, Page::Stage);
+    assert_eq!((app.page, app.prefs.draft.is_some()), (Page::Commands, true));
+    app.go(Page::Home);
+    assert_eq!(app.page, Page::Home);
     assert!(app.prefs.draft.is_none(), "a half-made command is dropped on the way out");
+    app.open_settings(Section::Sounds);
+    assert_eq!((app.page, app.prefs.section), (Page::Settings, Section::Sounds));
+    app.close_settings();
+    assert_eq!(app.page, Page::Home);
 }
 
 #[test]
@@ -93,7 +97,7 @@ fn resetting_from_the_page_puts_the_defaults_back_on_the_orb_too() {
 #[test]
 fn a_command_made_on_the_page_is_in_the_file_orbit_reads() {
     let (mut app, file) = app_with_file("command");
-    app.open_settings(Section::Commands);
+    app.go(Page::Commands);
     app.prefs.new_command();
     app.prefs.name_edit().replace_text("Screenshot");
     app.prefs.phrase_edit(0).replace_text("take a screenshot");
