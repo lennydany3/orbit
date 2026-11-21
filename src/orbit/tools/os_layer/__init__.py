@@ -6,7 +6,7 @@ from typing import Callable, Literal
 from pydantic import BaseModel, Field
 
 from ..base import Registry, Tool, ToolResult, VerifyResult, read_only_verify
-from . import apps, glide, lookat, media, monitors, processes, scrolling, textinput, uiclick, volume, windows
+from . import apps, glide, lookat, media, monitors, processes, screenshot, scrolling, textinput, uiclick, volume, windows
 
 APP_START_TIMEOUT_S = 12.0
 SETTLE_TIMEOUT_S = 3.0
@@ -530,6 +530,11 @@ def register_os_tools(registry: Registry) -> None:
         description="Read the window under the mouse pointer: its title, what is under the pointer, selected text and the text around it. "
                     "Orbit runs this itself when the user asks about what is on screen; the model is never given it.",
         params=lookat.LookParams, layer="os", risk="low", run=lookat.look, verify=read_only_verify, model_visible=False))
+    registry.register(Tool(
+        name="os_screenshot",
+        description="Take a screenshot right now: of this screen (the monitor the mouse is on), the window in front or a named window, or all screens. "
+                    "Saves a PNG in the Screenshots folder and copies it to the clipboard. Use when the user asks to take, capture or grab a screenshot.",
+        params=screenshot.ShotParams, layer="os", risk="low", run=screenshot.take, verify=screenshot.verify, idempotent=False))
     registry.register(Tool(
         name="os_scroll", description="Scroll a desktop app's window down or up (or to its top or bottom) with the mouse wheel. For a web page use browser_scroll.",
         params=ScrollParams, layer="os", risk="low", run=scroll_window, verify=verify_scroll_window, idempotent=False))

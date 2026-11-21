@@ -86,7 +86,7 @@ _WORKING_LABELS = {
     "browser_youtube_play": "Playing the video\u2026", "browser_fullscreen": "Going fullscreen\u2026", "browser_close_tabs": "Closing tabs\u2026",
     "browser_switch_tab": "Switching tabs\u2026", "browser_page_info": "Reading the page\u2026",
     "os_click": "Clicking\u2026", "os_type": "Typing\u2026", "os_scroll": "Scrolling\u2026", "os_open_app": "Opening the app\u2026",
-    "os_read_window": "Reading the window\u2026", "os_look_at_screen": "Looking at your screen\u2026",
+    "os_read_window": "Reading the window\u2026", "os_look_at_screen": "Looking at your screen\u2026", "os_screenshot": "Taking a screenshot\u2026",
     # (moving, arranging and closing windows need no pill: the pointer carrying or pressing the window is the animation)
 }
 # "second" and "twice" are numbers too: an optional number you said in words was not invented

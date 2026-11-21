@@ -8,6 +8,7 @@ Pure functions plus a small class for variety: no audio, no model.
 """
 import random
 import re
+from pathlib import PureWindowsPath
 from urllib.parse import urlparse
 
 OKAYS = ("Okay, ", "Sure, ", "Done. ", "Got it. ")
@@ -140,6 +141,11 @@ class Phraser:
         m = re.match(r"(.+?) was already open, brought it to the front$", s, re.I)
         if m:
             return f"{clean_title(m.group(1))} was already open, so I brought it to the front."
+        m = re.match(r"took a screenshot of (.+?) \(\d+x\d+\), saved to (.+?)( and copied to the clipboard)?(?: \(could not copy.*\))?$", s, re.I)
+        if m:                                                      # not the file's path, which is not something to read out
+            folder = PureWindowsPath(m.group(2)).parent.name
+            saved = f"It's saved in your {folder} folder" if folder else "It's saved"
+            return f"{ok()}I took a screenshot of {clean_title(m.group(1), 40)}. {saved}" + (" and copied, so you can paste it." if m.group(3) else ".")
         m = re.match(r"(?:opened|went to) (https?://\S+)(?: \('(.*)'\))?(?: in (?:your Brave|the current tab).*)?$", s, re.I)
         if m:
             return f"{ok()}opening {site_name(m.group(1))}."

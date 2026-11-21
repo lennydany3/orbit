@@ -11,6 +11,7 @@ from .. import config
 
 _EXPLICIT = re.compile(r"\b(?:screen|page|window|display|monitor)\b", re.I)
 # "what is this song", "what time is it": about the music or the clock, not about the screen
+_SCREENSHOT = re.compile(r"\b(?:screen[ -]?(?:shots?|grabs?|captures?)|snap[ -]?shots?)\b", re.I)
 _NOT_THE_SCREEN = re.compile(r"\b(?:song|songs|track|music|playing|volume|time|date|day|weather|album|artist|playlist|spotify|podcast)\b", re.I)
 
 _THIS = r"(?:this|that|these|those)"
@@ -44,6 +45,8 @@ def asks_about_screen(text: str) -> bool:
     unless it names the screen."""
     t = " ".join((text or "").lower().replace("’", "'").split())
     if not t or len(t.split()) > 30:
+        return False
+    if _SCREENSHOT.search(t):                      # "take a screenshot of this screen" is an order, not a question about it
         return False
     if _NOT_THE_SCREEN.search(t) and not _EXPLICIT.search(t):
         return False
