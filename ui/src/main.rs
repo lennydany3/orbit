@@ -2,7 +2,8 @@
 //!
 //! It lives in the tray. When Orbit is doing something a small orb floats up over your work (bottom right, above the
 //! taskbar, never taking focus, clicks passing through) and goes away when things are quiet. Ctrl+Alt+O, or a click on the
-//! tray icon, pins it on screen. The tray menu opens the window: the big sphere, what state it is in and what was last said.
+//! tray icon, pins it on screen. The tray menu opens the window: a sidebar of pages (Home with the big sphere, Commands, Reminders,
+//! Notes, Music and Settings) and the one you chose.
 //!
 //!   (no options)     open the window, with the tray and the orb ready (nothing is connected: use one of the options below)
 //!   --spawn          start Orbit (microphone, wake word, model) and show it; the window stays in the tray
@@ -17,10 +18,16 @@
 use std::time::Duration;
 
 use orbit_ui::app::{App, Page};
+use orbit_ui::datetime::Stamp;
+use orbit_ui::devices::Devices;
+use orbit_ui::music::MusicState;
+use orbit_ui::notes::{NotesState, Tab};
+use orbit_ui::reminders::RemindersState;
 use orbit_ui::autostart;
 use orbit_ui::clock;
 use orbit_ui::editor::{Section, SettingsState};
 use orbit_ui::face::{self, Face};
+use orbit_ui::layout;
 use orbit_ui::link::{Event, Status};
 use orbit_ui::orbit::{OrbState, SphereCompositor};
 use orbit_ui::settings;
@@ -42,6 +49,7 @@ fn setup(s: &mut App, waker: Waker) {
     if rune::is_headless() {
         return;                                    // a snapshot starts nothing and connects to nothing
     }
+    s.start_background();                          // looking at the data files Orbit changes, and at the audio devices
     s.sync_shell(clock::now(0.0));                 // the orb's hotkey, from the settings, from the very start
     let mut args = rune::extra_args().iter();
     while let Some(arg) = args.next() {
@@ -75,17 +83,34 @@ fn poll(s: &mut App, t: f64, tx: &mut rune::Tx) -> bool {
     changed
 }
 
-/// While a hotkey is being recorded every key is for it. Otherwise: on the Settings page Esc goes back; on the big sphere keys
-/// 1 to 9, 0 and M put it in a state, to try them, and Esc answers a question with no.
+/// While a hotkey is being recorded every key is for it. Otherwise: Ctrl+K makes a note (on the Notes page), Esc backs out of a form;
+/// on the big sphere keys 1 to 9, 0 and M put it in a state, to try them, and Esc answers a question with no.
 fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut rune::Tx) -> bool {
     if s.record_key(ev, tx.key_base()) {
         s.sync_shell(clock::now(tx.clock()));
         return true;
     }
-    if s.page == Page::Settings {
-        if ev.key == Key::Escape && s.prefs.draft.is_none() {
-            s.close_settings();
-            return true;
+    if s.page == Page::Notes && ev.is_command('k') && !ev.mods.alt {
+        s.notes.new_note(&Stamp::now());
+        return true;
+    }
+    if s.page != Page::Home {
+        if ev.key == Key::Escape {
+            return match s.page {
+                Page::Commands if s.prefs.draft.is_some() => {
+                    s.prefs.cancel_draft();
+                    true
+                }
+                Page::Reminders if s.reminders.draft.is_some() => {
+                    s.reminders.cancel_draft();
+                    true
+                }
+                Page::Music if s.music.renaming.is_some() => {
+                    s.music.cancel_rename();
+                    true
+                }
+                _ => false,
+            };
         }
         return false;
     }
@@ -117,12 +142,31 @@ fn live(s: &mut App, state: &str, messages: &[&str]) {
 /// The Settings page showing the example settings file, saved nowhere.
 fn settings_scene(s: &mut App, section: Section) {
     s.prefs = SettingsState::from_json(include_str!("../../tests/fixtures/settings_example.json"));
+    s.devices = Devices {
+        inputs: vec!["Microphone (USBAudio1.0)".into(), "Headset (OnePlus Nord Buds 3r)".into(), "Microphone Array (Realtek(R) Au".into()],
+        outputs: vec!["Headphones (OnePlus Nord Buds 3".into(), "Speakers (Echo Pop-043)".into(), "Speakers (Realtek(R) Audio)".into()],
+        default_input: "Microphone (USBAudio1.0)".into(),
+        default_output: "Headphones (OnePlus Nord Buds 3".into(),
+    };
     s.open_settings(section);
+}
+
+/// The Commands page showing the example settings file.
+fn commands_scene(s: &mut App) {
+    s.prefs = SettingsState::from_json(include_str!("../../tests/fixtures/settings_example.json"));
+    s.go(Page::Commands);
+}
+
+/// The example reminders, notes and playlists (what the other pages show), saved nowhere.
+fn data_scene(s: &mut App) {
+    s.reminders = RemindersState::from_json(include_str!("../../tests/fixtures/reminders_example.json"));
+    s.notes = NotesState::from_json(include_str!("../../tests/fixtures/notes_example.json"));
+    s.music = MusicState::from_json(include_str!("../../tests/fixtures/music_example.json"));
 }
 
 fn spec() -> AppSpec<App> {
     AppSpec::<App> {
-        min_size: Some((520.0, 420.0)),
+        min_size: Some((760.0, 540.0)),
         families: ("Inter", "Cascadia Mono, Consolas, Inter"),       // the design's monospace, for addresses and messages
         setup: Some(setup),
         poll: Some(poll),
@@ -152,15 +196,86 @@ fn spec() -> AppSpec<App> {
                     r#"{"type":"confirm","id":1,"question":"os_close_window(...) is a risky action. Allow?","action":"close window Notepad"}"#,
                 ])
             }),
+            ("live-ringing", |s| {
+                live(s, "speaking", &[
+                    r#"{"type":"reminder","id":"r-9","title":"Pasta","text":"Your timer is up.","kind":"timer","ringing":true}"#,
+                ])
+            }),
+            ("live-ringing-reminders", |s| {
+                data_scene(s);
+                s.go(Page::Reminders);
+                s.on_event(Event::Status(Status::Open), 0.0);
+                s.on_event(Event::Message(r#"{"type":"reminder","id":"r-3f9a1c2b","title":"Call mom","text":"Reminder: Call mom.","ringing":true}"#.to_owned()), 0.0);
+            }),
+            ("settings-general", |s| settings_scene(s, Section::General)),
+            ("settings-general-talk", |s| {
+                settings_scene(s, Section::General);
+                s.prefs.set_talk("mouse5");
+            }),
+            ("settings-recording-talk", |s| {
+                settings_scene(s, Section::General);
+                s.prefs.begin_record_talk();
+            }),
             ("settings-hotkeys", |s| settings_scene(s, Section::Hotkeys)),
             ("settings-recording", |s| {
                 settings_scene(s, Section::Hotkeys);
                 s.prefs.begin_record(orbit_ui::editor::Field::Yes);
             }),
+            ("reminders", |s| {
+                data_scene(s);
+                s.go(Page::Reminders);
+            }),
+            ("reminders-empty", |s| s.go(Page::Reminders)),
+            ("reminders-form", |s| {
+                data_scene(s);
+                s.go(Page::Reminders);
+                s.reminders.new_draft(&Stamp::now());
+            }),
+            ("reminders-bell", |s| {
+                data_scene(s);
+                s.live.confirm = None;
+            }),
+            ("notes", |s| {
+                data_scene(s);
+                s.go(Page::Notes);
+            }),
+            ("notes-empty", |s| s.go(Page::Notes)),
+            ("notes-open", |s| {
+                data_scene(s);
+                s.go(Page::Notes);
+                s.notes.open_note("n-gym");
+            }),
+            ("notes-tasks", |s| {
+                data_scene(s);
+                s.go(Page::Notes);
+                s.notes.select_tab(Tab::Tasks);
+            }),
+            ("notes-lists", |s| {
+                s.notes = NotesState::from_json(include_str!("../../tests/fixtures/notes_lists_example.json"));
+                s.go(Page::Notes);
+                s.notes.select_tab(Tab::Tasks);
+                s.notes.select_list(Some("shopping".into()));
+            }),
+            ("notes-lists-all", |s| {
+                s.notes = NotesState::from_json(include_str!("../../tests/fixtures/notes_lists_example.json"));
+                s.go(Page::Notes);
+                s.notes.select_tab(Tab::Tasks);
+            }),
+            ("music-empty", |s| s.go(Page::Music)),
+            ("music", |s| {
+                data_scene(s);
+                s.go(Page::Music);
+            }),
             ("settings-orb-taken", |s| {
                 settings_scene(s, Section::Hotkeys);
                 s.prefs.orb_error = Some("Ctrl + Alt + O is already in use by another program, so Orbit cannot have it.".into());
                 s.prefs.fail("Ctrl + Alt + Y is already used for \"Answer yes\".");
+            }),
+            ("settings-customization", |s| settings_scene(s, Section::Customization)),
+            ("settings-customization-moved", |s| {
+                settings_scene(s, Section::Customization);
+                s.prefs.place_orb(0.18, 0.3);
+                s.prefs.set_orb_size(orbit_ui::settings::OrbSize::Large);
             }),
             ("settings-sounds", |s| settings_scene(s, Section::Sounds)),
             ("settings-sounds-on", |s| {
@@ -168,29 +283,27 @@ fn spec() -> AppSpec<App> {
                 s.prefs.set_sounds_enabled(true);
                 s.prefs.drag_volume(40);
             }),
-            ("settings-commands", |s| settings_scene(s, Section::Commands)),
+            ("settings-commands", commands_scene),
             ("settings-commands-empty", |s| {
-                settings_scene(s, Section::Commands);
                 s.prefs = SettingsState::default();
-                s.open_settings(Section::Commands);
+                s.go(Page::Commands);
             }),
             ("settings-problems", |s| {
-                settings_scene(s, Section::Commands);
                 s.prefs = SettingsState::from_json(r#"{"commands":[{"name":"Broken","phrases":["x"],"steps":[{"kind":"run","program":"calc.exe"}]}]}"#);
-                s.open_settings(Section::Commands);
+                s.go(Page::Commands);
             }),
             ("settings-editor", |s| {
-                settings_scene(s, Section::Commands);
+                commands_scene(s);
                 s.prefs.edit_command(0);
             }),
             ("settings-editor-new", |s| {
-                settings_scene(s, Section::Commands);
+                commands_scene(s);
                 s.prefs.new_command();
                 s.prefs.add_step(orbit_ui::editor::StepKind::Keys);
                 let _ = s.prefs.save_draft();
             }),
             ("settings-delete", |s| {
-                settings_scene(s, Section::Commands);
+                commands_scene(s);
                 s.prefs.ask_delete(1);
             }),
             ("live-retrying", |s| s.on_event(Event::Status(Status::Closed), 0.0)),
@@ -204,6 +317,7 @@ fn spec() -> AppSpec<App> {
 /// the buttons of a question. It gives its GPU memory back when it has been hidden a while.
 fn orb_overlay() -> rune::ConfiguredOverlay<Face> {
     let mut spec = OverlaySpec::new("orbit-orb", (face::WIDTH, face::HEIGHT), face::view);
+    // Until the face says where the user put it (see `layout`), the bottom right, above the taskbar.
     spec.edge = ScreenEdge::Bottom;
     spec.margin = 14.0;
     spec.align = Align::End;
@@ -264,17 +378,23 @@ fn main() {
     let starts_orbit = args.iter().any(|a| matches!(a.as_str(), "--spawn" | "--spawn-demo" | "--url"));
     let open_window = args.iter().any(|a| a == "--window") || !starts_orbit;
 
-    let mut app = rune::App::new(spec()).windowless().compositor(SphereCompositor::default());
+    // modifier_keys: a Ctrl, Alt or Shift pressed on its own reaches the page, so Right Ctrl can be picked as the key to hold to talk.
+    let mut app = rune::App::new(spec()).windowless().modifier_keys().compositor(SphereCompositor::default());
     let hub = app.handle();
     let orb = app.overlay(orb_overlay(), Face::new(Some(hub.clone())));
     let tray = shell::make_tray(hub.clone());
     let hub_in_state = hub.clone();
     let prefs_file = settings::path();
     let app = app.init(move || {
-        App::default().with_shell(Shell::new(orb, hub_in_state, tray)).with_settings(SettingsState::open(prefs_file.clone()))
+        App::default().with_shell(Shell::new(orb, hub_in_state, tray)).with_settings(SettingsState::open(prefs_file.clone())).with_data(&prefs_file)
     });
     if open_window {
         hub.open();
     }
-    rune::run_windows(move |_displays| vec![rune::AnyWindowSpec::from(WindowSpec::from_app("hub", app))]);
+    rune::run_windows(move |displays| {
+        if let Some(main) = displays.iter().find(|d| d.primary).or(displays.first()) {
+            layout::set_screen(layout::Screen::from_pixels(main.position, main.size, main.scale, layout::work_area()));
+        }
+        vec![rune::AnyWindowSpec::from(WindowSpec::from_app("hub", app))]
+    });
 }

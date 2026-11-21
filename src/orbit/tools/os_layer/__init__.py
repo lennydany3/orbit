@@ -6,7 +6,7 @@ from typing import Callable, Literal
 from pydantic import BaseModel, Field
 
 from ..base import Registry, Tool, ToolResult, VerifyResult, read_only_verify
-from . import apps, glide, media, monitors, processes, scrolling, textinput, uiclick, volume, windows
+from . import apps, glide, lookat, media, monitors, processes, scrolling, textinput, uiclick, volume, windows
 
 APP_START_TIMEOUT_S = 12.0
 SETTLE_TIMEOUT_S = 3.0
@@ -525,6 +525,11 @@ def register_os_tools(registry: Registry) -> None:
         params=ClickParams, layer="os", risk="low", run=ui_click, verify=verify_ui_click, idempotent=False,
         needs_confirm=lambda p: bool(uiclick._RISKY.search(p.text))))
     add("os_read_window", "Read the buttons and text of a desktop app's window.", ReadWindowParams, read_window, read_only_verify)
+    registry.register(Tool(
+        name="os_look_at_screen",
+        description="Read the window under the mouse pointer: its title, what is under the pointer, selected text and the text around it. "
+                    "Orbit runs this itself when the user asks about what is on screen; the model is never given it.",
+        params=lookat.LookParams, layer="os", risk="low", run=lookat.look, verify=read_only_verify, model_visible=False))
     registry.register(Tool(
         name="os_scroll", description="Scroll a desktop app's window down or up (or to its top or bottom) with the mouse wheel. For a web page use browser_scroll.",
         params=ScrollParams, layer="os", risk="low", run=scroll_window, verify=verify_scroll_window, idempotent=False))

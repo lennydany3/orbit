@@ -21,7 +21,7 @@ def say(reply, request="", **kw):
     ("clicked 'Play Closer by The Chainsmokers, Halsey' in 'Spotify Premium' (pressed its control)",
      "Okay, I clicked Play Closer by The Chainsmokers, Halsey."),
     ("clicked '\U0001F534PLAYING GTA 6 EARLY ACCESS GAMEPLAY GET IN HERE!' (link) in your Brave",
-     "Okay, I clicked PLAYING GTA 6 EARLY ACCESS GAMEPLAY GET IN HERE!."),
+     "Okay, I clicked PLAYING GTA 6 EARLY ACCESS GAMEPLAY GET IN HERE."),
     ("opened https://www.youtube.com in your Brave (Personal profile)", "Okay, opening YouTube."),
     ("Volume set to 50%.", "Volume set to 50%."),                                   # the model's own sentence stays
     ("set volume to 50%", "Okay, volume is 50 percent."),
@@ -125,3 +125,38 @@ def test_a_raw_tool_call_is_never_read_out_loud(reply):
 @pytest.mark.parametrize("reply", ["Volume set to 50%.", "Okay (done).", "minimize: 'Notepad'", "I set the volume (it was 30)."])
 def test_ordinary_replies_are_not_mistaken_for_tool_calls(reply):
     assert "didn't catch that" not in say(reply)
+
+
+@pytest.mark.parametrize("reply, expected", [
+    ("clicked 'Full screen (f)' (button) in your Brave", "I clicked the full screen button."),
+    ("clicked 'Mute (m)' (button) in your Brave", "I clicked the mute button."),
+    ("clicked 'Unmute keyboard shortcut m' (button) in your Brave", "I clicked the unmute button."),
+    ("clicked 'Pause (k)' (button) in your Brave", "I clicked the pause button."),
+    ("clicked 'YouTube Premium home' (link) in your Brave", "I clicked the YouTube Premium home link."),
+    ("clicked 'GTA 6 - 13 Years of Waiting Ends \U0001F4AA - A Lifetime Experience Is Here \U0001F525 1' (link) in your Brave",
+     "I clicked GTA 6 - 13 Years of Waiting Ends."),
+    ("put the cursor in the 'Search' combo box in your Brave", "I clicked the search box."),
+    ("typed 'mix alle bole tho' and pressed Enter in '(215) YouTube - Brave'", "I typed mix alle bole tho and pressed enter."),
+    ("typed 'tamil news live' in 'Results - Brave' (replacing the words that were in the box)", "I typed tamil news live."),
+    ("pressed Enter in 'Google'", "I pressed enter."),
+    ("clicked the symbol '×' that I read on your Brave page", "I clicked the symbol."),
+])
+def test_clicks_typing_and_boxes_are_said_like_a_person_would(reply, expected):
+    spoken = Phraser(random.Random(1)).say(reply)
+    assert spoken.endswith(expected), spoken
+    assert "(f)" not in spoken and "keyboard shortcut" not in spoken and "'" not in spoken
+
+
+@pytest.mark.parametrize("reply, expected", [
+    ("scrolled down in your Brave", "scrolled down."), ("scrolled down a little in your Brave", "scrolled down a little."),
+    ("scrolled to the bottom in your Brave", "scrolled to the bottom."), ("scrolled down 3 times", "scrolled down 3 times."),
+])
+def test_scrolling_is_said_without_the_browser_name(reply, expected):
+    assert Phraser(random.Random(1)).say(reply).lower().endswith(expected)
+
+
+def test_a_long_title_is_cut_at_a_natural_break_not_in_the_middle_of_a_phrase():
+    from orbit.voice.phrasing import control_name
+    assert control_name("GTA 6 - 13 Years of Waiting Ends \U0001F4AA - A Lifetime Experience Is Here \U0001F525 1") == "GTA 6 - 13 Years of Waiting Ends"
+    assert control_name("one two three four five six seven eight nine ten eleven") == "one two three four five six seven eight nine"
+    assert control_name("Full screen (f)") == "Full screen" and control_name("") == ""

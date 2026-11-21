@@ -1,0 +1,47 @@
+{
+  "notes": [
+    {
+      "body": "Monday legs\nWednesday push\nFriday pull",
+      "created": "2026-11-20T09:00",
+      "id": "n-gym",
+      "pinned": true,
+      "title": "Gym plan",
+      "updated": "2026-11-21T18:30"
+    },
+    {
+      "body": "The wifi is on the router, password on the sticker.",
+      "created": "2026-11-22T10:15",
+      "id": "n-wifi",
+      "title": "Wifi",
+      "updated": "2026-11-22T10:15"
+    },
+    {
+      "body": "An app that reminds you to drink water.",
+      "created": "2026-11-19T08:00",
+      "id": "n-ideas",
+      "title": "Ideas",
+      "updated": "2026-11-19T08:00"
+    }
+  ],
+  "tasks": [
+    {
+      "created": "2026-11-22T10:16",
+      "done": false,
+      "id": "t-milk",
+      "text": "Buy milk"
+    },
+    {
+      "created": "2026-11-22T10:17",
+      "done": true,
+      "id": "t-eggs",
+      "text": "Buy eggs"
+    },
+    {
+      "created": "2026-11-22T10:18",
+      "done": false,
+      "id": "t-rent",
+      "text": "Pay rent"
+    }
+  ],
+  "version": 1
+}

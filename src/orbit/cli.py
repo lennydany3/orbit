@@ -4,6 +4,7 @@ import sys
 
 from . import config
 from .agent.custom import CustomCommands
+from .agent.personal import Personal
 from .agent.loop import Agent
 from .agent.router import Router
 from .agent.safety import Safety
@@ -19,6 +20,8 @@ from .tools.os_layer import register_os_tools
 
 HELP = """Commands: help | tools | clear (forget the conversation) | auth spotify | quit
 Anything else is a request. Fast rules (no model): open spotify | open github | play lofi on youtube | fullscreen | volume 30 | volume up | mute | pause | play | next | previous
+Your own things (no model): remind me to call mom at 5pm | set a timer for 10 minutes | what are my reminders | note down the wifi is on the router |
+  add milk to my tasks | what's on my to do list | play my gym playlist (a playlist saved on the Music page)
 Anything else goes to the model:  switch to chrome | what's playing? | what windows are open?
 (start with --fake-tools to also get the echo/danger test tools)"""
 
@@ -82,7 +85,7 @@ def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: boo
     llm, description = make_llm(llm_provider, ollama_model=model) if use_llm else (None, "rules only")
     chat_llm = llm.with_temperature(config.CHAT_TEMPERATURE) if hasattr(llm, "with_temperature") else llm
     agent = Agent(llm, registry, Router(log), Safety(), log, chat_llm=chat_llm, friend_mode=friend and config.FRIEND_MODE,
-                  custom=CustomCommands())
+                  custom=CustomCommands(), personal=Personal())
     agent.llm_description = description   # shown in the start-up banner
     for problem in agent.custom.problems if agent.custom else []:
         log("settings", problem)            # a command or key in settings.json that Orbit had to leave out

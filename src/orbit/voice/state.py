@@ -4,6 +4,10 @@
                                                          |  ^
                                                     confirming (a risky action asks "yes or no?")
 
+Three turns start from idle without anyone speaking: a reminder or timer comes due and rings (idle -> alarm, which ends by itself, or
+by "ok thanks", the talk key or the window's Stop button, or goes on to speaking for one short answer), a late one is only said
+(idle -> speaking), and the window's Play button asks for a saved playlist (idle -> thinking).
+
 Every transition is logged with a timestamp. `idle` can always be entered (a timeout, an error, the kill switch).
 Pure logic: no audio, no threads, so it is unit-tested without any hardware.
 """
@@ -22,10 +26,11 @@ class State(str, Enum):
     CONFIRMING = "confirming"
     SPEAKING = "speaking"
     FOLLOW_UP = "follow_up"
+    ALARM = "alarm"                       # a reminder or timer is ringing and waiting to hear that you have heard it
 
 
 ALLOWED: dict[State, set[State]] = {
-    State.IDLE: {State.WAKE_DETECTED, State.LISTENING},                  # LISTENING directly = hold-to-talk
+    State.IDLE: {State.WAKE_DETECTED, State.LISTENING, State.SPEAKING, State.THINKING, State.ALARM},   # LISTENING directly = hold-to-talk
     State.WAKE_DETECTED: {State.LISTENING},
     State.LISTENING: {State.TRANSCRIBING},
     State.TRANSCRIBING: {State.THINKING, State.SPEAKING},                # SPEAKING = "Sorry, I didn't catch that"
@@ -33,6 +38,7 @@ ALLOWED: dict[State, set[State]] = {
     State.CONFIRMING: {State.THINKING},
     State.SPEAKING: {State.FOLLOW_UP, State.LISTENING},                  # LISTENING = the hotkey interrupted the speech
     State.FOLLOW_UP: {State.LISTENING},
+    State.ALARM: {State.SPEAKING, State.LISTENING},                      # SPEAKING = "Okay, I'll ring again in 5 minutes"; LISTENING = the talk key
 }
 
 

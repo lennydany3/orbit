@@ -1,0 +1,27 @@
+{
+  "playlists": [
+    {
+      "added": "2026-11-22T10:15",
+      "id": "p-3f9a1c2b",
+      "kind": "playlist",
+      "name": "Gym Mix",
+      "spotify_id": "37i9dQZF1DXcBWIGoYBM5M"
+    },
+    {
+      "added": "2026-11-21T20:00",
+      "color": "teal",
+      "id": "p-0d0d0d0d",
+      "kind": "playlist",
+      "name": "Chill Vibes",
+      "spotify_id": "37i9dQZF1DX4WYpdgoIcn6"
+    },
+    {
+      "added": "2026-11-22T10:20",
+      "id": "p-9a9a9a9a",
+      "kind": "album",
+      "name": "",
+      "spotify_id": "4aawyAB9vmqN3uQ7FjRGTy"
+    }
+  ],
+  "version": 1
+}

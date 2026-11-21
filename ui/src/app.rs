@@ -5,20 +5,29 @@
 //! link. While the link is open Orbit drives: its states are paced (see `pacer`), its level replaces the simulated one, and the
 //! sphere's own hand-over timers are off.
 
+use std::path::Path;
 use std::sync::Arc;
 
-use rune::{KeyEvent, TextEdit, Waker};
+use rune::{KeyEvent, PointerButton, TextEdit, Waker};
 
-use crate::editor::{self, Field, Recorded, Section, SettingsState};
+use crate::datetime::Stamp;
+use crate::devices::{self, Devices, Scan};
+use crate::editor::{self, Field, Recorded, Section, SettingsState, TalkRecorded};
 use crate::face::Face;
+use crate::layout;
 use crate::link::message::{self, Incoming};
 use crate::link::{Event, Link, Status};
+use crate::music::MusicState;
+use crate::notes::NotesState;
 use crate::orbit::{HasOrbit, OrbState, Orbit};
 use crate::pacer::Pacer;
 use crate::presence::Presence;
+use crate::reminders::RemindersState;
 use crate::settings;
 use crate::shell::Shell;
 use crate::spawn::{Kind, Spawned};
+use crate::userdata;
+use crate::watcher::{self, Watcher};
 
 pub struct DemoStep {
     pub state: OrbState,
@@ -88,6 +97,30 @@ pub struct Ask {
     pub sent: Option<bool>,
 }
 
+/// A reminder, timer or alarm that is ringing: it rings until it is stopped (by voice, the talk key, or the Stop button).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ring {
+    pub id: String,
+    pub title: String,
+    /// "reminder", "timer" or "alarm".
+    pub kind: String,
+    /// What Orbit said it is: "Your timer is up."
+    pub text: String,
+    /// Stop was pressed here, and Orbit has not yet said it stopped.
+    pub sent: bool,
+}
+
+impl Ring {
+    /// "Timer", "Alarm" or "Reminder": what to call it above its text.
+    pub fn heading(&self) -> &'static str {
+        match self.kind.as_str() {
+            "timer" => "Timer",
+            "alarm" => "Alarm",
+            _ => "Reminder",
+        }
+    }
+}
+
 fn clip(text: &str, chars: usize) -> String {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.chars().count() <= chars {
@@ -118,6 +151,8 @@ pub struct Live {
     level: f32,
     pub caption: Option<Caption>,
     pub confirm: Option<Ask>,
+    /// The reminder, timer or alarm that is ringing now.
+    pub ring: Option<Ring>,
     /// How the last chat reply felt (`proud`, `caring` ...), for the face to use.
     pub feeling: String,
     child: Option<Spawned>,
@@ -136,19 +171,38 @@ impl Default for Live {
             level: 0.0,
             caption: None,
             confirm: None,
+            ring: None,
             feeling: String::new(),
             child: None,
         }
     }
 }
 
-/// What the window shows.
+/// What the window shows: one page at a time, chosen in the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Page {
     /// The big sphere.
     #[default]
-    Stage,
+    Home,
+    /// Your own commands: a phrase that runs a list of steps.
+    Commands,
+    Reminders,
+    Notes,
+    Music,
     Settings,
+}
+
+impl Page {
+    pub fn label(self) -> &'static str {
+        match self {
+            Page::Home => "Home",
+            Page::Commands => "Commands",
+            Page::Reminders => "Reminders",
+            Page::Notes => "Notes",
+            Page::Music => "Music",
+            Page::Settings => "Settings",
+        }
+    }
 }
 
 pub struct App {
@@ -166,13 +220,43 @@ pub struct App {
     /// The orb's window and the tray icon (empty until the app has made them).
     pub shell: Shell,
     pub page: Page,
-    /// The Settings page: the hotkeys and the user's own commands.
+    /// The Settings page and the Commands page: the hotkeys, the audio and voice choices, and the user's own commands.
     pub prefs: SettingsState,
+    /// Reminders, notes and tasks, and saved playlists: each its own file next to the settings.
+    pub reminders: RemindersState,
+    pub notes: NotesState,
+    pub music: MusicState,
+    /// The microphones and speakers the Audio card offers, and where the asking stands.
+    pub devices: Devices,
+    pub scan: Scan,
+    /// Notices when the other side (Orbit) changes one of those files.
+    watcher: Option<Watcher>,
+    /// What Orbit last said about a reminder, to show a moment.
+    pub reminder_said: Option<String>,
 }
 
 impl Default for App {
     fn default() -> Self {
-        App { orbit: Orbit::new(), manual: 0.35, voice: false, demo: None, shown_level: 0.35, last_push: -1.0, live: Live::default(), presence: Presence::new(), shell: Shell::default(), page: Page::Stage, prefs: SettingsState::default() }
+        App {
+            orbit: Orbit::new(),
+            manual: 0.35,
+            voice: false,
+            demo: None,
+            shown_level: 0.35,
+            last_push: -1.0,
+            live: Live::default(),
+            presence: Presence::new(),
+            shell: Shell::default(),
+            page: Page::Home,
+            prefs: SettingsState::default(),
+            reminders: RemindersState::default(),
+            notes: NotesState::default(),
+            music: MusicState::default(),
+            devices: Devices::default(),
+            scan: Scan::Idle,
+            watcher: None,
+            reminder_said: None,
+        }
     }
 }
 
@@ -195,21 +279,166 @@ impl App {
         self
     }
 
-    // ---- the settings page ------------------------------------------------------------------------------------------
+    /// The app with reminders, notes and playlists read from (and saved to) the files that sit next to the settings file.
+    pub fn with_data(mut self, settings_file: &Path) -> App {
+        self.reminders = RemindersState::open(userdata::beside(settings_file, userdata::REMINDERS_FILE));
+        self.notes = NotesState::open(userdata::beside(settings_file, userdata::NOTES_FILE));
+        self.music = MusicState::open(userdata::beside(settings_file, userdata::MUSIC_FILE));
+        self
+    }
+
+    /// Starts what runs beside the window: a look at the data files for changes Orbit makes, and the first look at the audio devices.
+    pub fn start_background(&mut self) {
+        let files: Vec<(u32, std::path::PathBuf)> = [(watcher::REMINDERS, &self.reminders.path), (watcher::NOTES, &self.notes.path), (watcher::MUSIC, &self.music.path)]
+            .into_iter()
+            .filter_map(|(bit, path)| path.clone().map(|p| (bit, p)))
+            .collect();
+        self.watcher = Some(Watcher::start(files, self.live.waker.clone(), watcher::EVERY));
+        self.scan_devices();
+    }
+
+    /// Uses this watcher (a test's, whose changes it marks itself) instead of starting one.
+    pub fn with_watcher(mut self, watcher: Watcher) -> App {
+        self.watcher = Some(watcher);
+        self
+    }
+
+    // ---- pages -------------------------------------------------------------------------------------------------------------
+
+    /// Goes to a page (saving what was being typed on the one it leaves).
+    pub fn go(&mut self, page: Page) {
+        if self.page == Page::Notes && page != Page::Notes {
+            self.notes.flush();
+        }
+        if self.page == Page::Settings || self.page == Page::Commands {
+            self.prefs.cancel_record();
+            if page != Page::Commands {
+                self.prefs.cancel_draft();
+            }
+        }
+        self.page = page;
+        match page {
+            Page::Reminders => {
+                self.reminders.mark_seen(&Stamp::now());
+            }
+            Page::Settings if self.devices.inputs.is_empty() && self.devices.outputs.is_empty() => self.scan_devices(),
+            _ => {}
+        }
+    }
 
     pub fn open_settings(&mut self, section: Section) {
-        self.page = Page::Settings;
+        self.go(Page::Settings);
         self.prefs.select(section);
     }
 
+    /// Back to the sphere.
     pub fn close_settings(&mut self) {
-        self.page = Page::Stage;
-        self.prefs.cancel_record();
-        self.prefs.cancel_draft();
+        self.go(Page::Home);
+    }
+
+    /// How many reminders have gone off that you have not looked at yet: the number on the bell.
+    pub fn unread(&self) -> usize {
+        self.reminders.data.unread()
+    }
+
+    // ---- the audio devices ---------------------------------------------------------------------------------------------------
+
+    /// Asks Orbit's Python for the microphones and speakers, in the background (the lists fill in when it answers).
+    pub fn scan_devices(&mut self) {
+        if matches!(self.scan, Scan::Scanning(_)) || rune::is_headless() {
+            return;
+        }
+        self.scan = Scan::Scanning(devices::scan_in_background(self.live.waker.clone()));
+    }
+
+    pub fn scanning(&self) -> bool {
+        matches!(self.scan, Scan::Scanning(_))
+    }
+
+    /// What came back from the background: changed files read again, a finished device scan taken. True if anything changed.
+    fn drain_background(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(bits) = self.watcher.as_ref().map(Watcher::take).filter(|b| *b != 0) {
+            changed |= bits & watcher::REMINDERS != 0 && self.reminders.reload_if_changed();
+            changed |= bits & watcher::NOTES != 0 && self.notes.reload_if_changed();
+            changed |= bits & watcher::MUSIC != 0 && self.music.reload_if_changed();
+        }
+        if let Scan::Scanning(rx) = &self.scan {
+            match rx.try_recv() {
+                Ok(Ok(found)) => {
+                    self.devices = found;
+                    self.scan = Scan::Idle;
+                    changed = true;
+                }
+                Ok(Err(why)) => {
+                    self.scan = Scan::Failed(why);
+                    changed = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.scan = Scan::Failed("the device scan stopped".into());
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    // ---- music ---------------------------------------------------------------------------------------------------------------
+
+    /// The Play button: asks Orbit to play one of the saved playlists. False (with the reason on the page) if it cannot.
+    pub fn play_playlist(&mut self, id: &str) -> bool {
+        let Some(title) = self.music.get(id).map(|p| p.title()) else { return false };
+        let sent = self.live_open() && self.live.link.as_ref().is_some_and(|link| link.send(message::play_request(id)));
+        if sent {
+            self.music.good(format!("Asked Orbit to play \u{201c}{title}\u{201d}."));
+        } else {
+            self.music.bad("Orbit is not running, so it cannot play that. Start it from the tray, or run orbit-ui --spawn.");
+        }
+        sent
+    }
+
+    /// Opens a saved playlist in the Spotify app (or the browser, if the app is not there).
+    pub fn open_in_spotify(&mut self, id: &str) -> bool {
+        let Some(uri) = self.music.get(id).map(|p| p.link().uri()) else { return false };
+        match crate::openers::open_uri(&uri) {
+            Ok(()) => true,
+            Err(why) => {
+                self.music.bad(why);
+                false
+            }
+        }
+    }
+
+    // ---- the settings page ------------------------------------------------------------------------------------------
+
+    /// While the hold-to-talk key is being recorded a mouse button pressed on the page is it. True if this press was used.
+    pub fn record_button(&mut self, button: PointerButton) -> bool {
+        if !self.prefs.recording_talk {
+            return false;
+        }
+        match editor::talk_from_button(button) {
+            Some(name) => {
+                self.prefs.set_talk(name);
+            }
+            None => self.prefs.fail("Orbit cannot use that mouse button. Use mouse 1 to 5, or a key."),
+        }
+        true
     }
 
     /// While a hotkey is being recorded every key is for it. True if this key was used.
     pub fn record_key(&mut self, ev: &KeyEvent, base: Option<char>) -> bool {
+        if self.prefs.recording_talk {
+            match editor::talk_from_event(ev) {
+                TalkRecorded::Ignore => {}
+                TalkRecorded::Cancel => self.prefs.cancel_record(),
+                TalkRecorded::Refused(why) => self.prefs.fail(why),
+                TalkRecorded::Key(name) => {
+                    self.prefs.set_talk(&name);
+                }
+            }
+            return true;
+        }
         let Some(field) = self.prefs.recording else { return false };
         match editor::chord_from_event(ev, base) {
             Recorded::Ignore => {}
@@ -413,6 +642,7 @@ impl App {
         self.live.pacer.clear();
         self.live.level = 0.0;
         self.live.confirm = None;
+        self.live.ring = None;                                  // nothing can stop it from here, and Orbit's ringing stops with Orbit
         self.live.caption = None;
     }
 
@@ -468,6 +698,18 @@ impl App {
                 self.live.feeling = emotion;
                 self.say("Orbit", &text, t);
             }
+            Incoming::Reminder { id, title, text, kind, ringing } => {
+                self.reminders.reload_if_changed();                    // the list has moved on: show it at once
+                if ringing {
+                    self.live.ring = Some(Ring { id, title, kind, text: text.clone(), sent: false });
+                }
+                self.reminder_said = Some(text);
+            }
+            Incoming::AlarmStopped { id } => {
+                if self.live.ring.as_ref().is_some_and(|ring| ring.id == id) {
+                    self.live.ring = None;
+                }
+            }
             Incoming::Confirm { id, question, action } => self.live.confirm = Some(Ask { id, action, question, sent: None }),
             Incoming::ConfirmDone { id, .. } => {
                 if self.live.confirm.as_ref().is_some_and(|ask| ask.id == id) {
@@ -498,6 +740,23 @@ impl App {
         Some(message::confirm_answer(ask.id, yes))
     }
 
+    /// The Stop button: the message that silences the ringing reminder, if one is ringing and Stop was not already pressed.
+    pub fn take_dismiss(&mut self) -> Option<String> {
+        let ring = self.live.ring.as_mut().filter(|r| !r.sent)?;
+        ring.sent = true;
+        Some(message::dismiss_request(&ring.id))
+    }
+
+    /// Stops the ringing over the link. False if nothing is ringing, or the link is gone (then Stop can be pressed again).
+    pub fn stop_alarm(&mut self) -> bool {
+        let Some(text) = self.take_dismiss() else { return false };
+        let sent = self.live.link.as_ref().is_some_and(|link| link.send(text));
+        if !sent && let Some(ring) = self.live.ring.as_mut() {
+            ring.sent = false;
+        }
+        sent
+    }
+
     /// Answers the open question over the link. False if there is none, or the link is gone.
     pub fn answer_confirm(&mut self, yes: bool) -> bool {
         let Some(text) = self.take_answer(yes) else { return false };
@@ -512,13 +771,19 @@ impl App {
 
     /// Is Orbit doing anything the orb should be there for? (What was said is not shown on the orb, so it never keeps it up.)
     pub fn active(&self) -> bool {
-        !matches!(self.orbit.state, OrbState::Idle | OrbState::Muted) || self.live.confirm.is_some()
+        !matches!(self.orbit.state, OrbState::Idle | OrbState::Muted) || self.live.confirm.is_some() || self.live.ring.is_some()
     }
 
     /// What the orb's window shows now.
     pub fn face(&self) -> Face {
         let keys = self.prefs.hotkeys();
-        Face { orbit: self.orbit.clone(), ask: self.live.confirm.clone(), keys: false, yes: keys.yes.clone(), no: keys.no.clone(), hub: self.shell.hub.clone() }
+        let place = layout::place(self.prefs.look(), layout::screen(), self.live.confirm.is_some() || self.live.ring.is_some());
+        Face { orbit: self.orbit.clone(), ask: self.live.confirm.clone(), ring: self.live.ring.clone(), keys: false, yes: keys.yes.clone(), no: keys.no.clone(), hub: self.shell.hub.clone(), place }
+    }
+
+    /// Is the Customization page open? The orb is on screen for as long as it is, so moving it can be seen where it will be.
+    pub fn previewing(&self) -> bool {
+        self.page == Page::Settings && self.prefs.section == Section::Customization
     }
 
     /// Brings the orb's window up to date: its content, whether it is showing, and its size.
@@ -529,7 +794,7 @@ impl App {
         if let (Some(why), true) = (&self.prefs.orb_error, std::env::var_os("ORBIT_UI_DEBUG").is_some()) {
             eprintln!("[hub] orb chord: {why}");
         }
-        let visible = self.presence.visible(self.active(), t);
+        let visible = self.presence.visible(self.active() || self.previewing(), t);
         let face = self.face();
         self.shell.apply(face, visible, self.prefs.settings.sounds);
     }
@@ -545,7 +810,8 @@ impl App {
 
     /// When the app next needs to wake by itself: something timed, or the orb due to leave.
     pub fn next_wake(&self, now: f64) -> Option<f64> {
-        [self.next_due(), self.presence.leaves_at(now)].into_iter().flatten().reduce(f64::min)
+        let saving = (self.page == Page::Notes).then(|| self.notes.save_due()).flatten();
+        [self.next_due(), self.presence.leaves_at(now), saving].into_iter().flatten().reduce(f64::min)
     }
 
     // ---- time -------------------------------------------------------------------------------------------------------
@@ -565,7 +831,10 @@ impl App {
     /// Runs everything due by `t`, in order, then sets the level for this frame. True when something
     /// the panel shows changed.
     pub fn advance(&mut self, t: f64) -> bool {
-        let mut changed = self.drain_link(t);
+        let mut changed = self.drain_link(t) | self.drain_background();
+        if self.page == Page::Notes {
+            changed |= self.notes.save_if_due(t);                   // what is typed is saved a moment after the typing stops
+        }
         for _ in 0..64 {
             let Some(due) = self.next_due().filter(|d| *d <= t) else { break };
             if self.demo.map(|d| d.due) == Some(due) {
@@ -862,6 +1131,56 @@ mod tests {
         assert!(app.live.caption.is_none() && app.live.confirm.is_none());
         app.advance(2.1);
         assert_eq!(app.orbit.level, 0.35, "back to the slider");
+    }
+
+    #[test]
+    fn a_ringing_timer_shows_a_stop_button_that_asks_orbit_once_and_goes_when_orbit_says_it_stopped() {
+        let mut app = live();
+        msg(&mut app, r#"{"type":"reminder","id":"r-2","title":"Pasta","text":"Your timer is up.","kind":"timer","ringing":true}"#, 1.0);
+        let ring = app.live.ring.clone().expect("it is ringing");
+        assert_eq!((ring.id.as_str(), ring.heading(), ring.text.as_str(), ring.sent), ("r-2", "Timer", "Your timer is up.", false));
+        assert!(app.active(), "the orb comes up for it even if Orbit is idle");
+
+        let sent = app.take_dismiss().expect("a stop to send");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&sent).unwrap(), serde_json::json!({"type": "dismiss", "id": "r-2"}));
+        assert_eq!(app.take_dismiss(), None, "pressed once: it is asked once");
+        assert!(app.live.ring.as_ref().unwrap().sent);
+
+        msg(&mut app, r#"{"type":"alarm_stopped","id":"r-9","by":"voice"}"#, 1.5);
+        assert!(app.live.ring.is_some(), "another reminder's stop does not end this ring");
+        msg(&mut app, r#"{"type":"alarm_stopped","id":"r-2","by":"voice"}"#, 1.6);
+        assert!(app.live.ring.is_none() && !app.active());
+    }
+
+    #[test]
+    fn a_reminder_that_only_came_due_does_not_ring_and_each_kind_has_its_name() {
+        let mut app = live();
+        msg(&mut app, r#"{"type":"reminder","id":"r-1","title":"Call mom","text":"Reminder: Call mom."}"#, 1.0);
+        assert!(app.live.ring.is_none(), "a late one is only said");
+        for (kind, name) in [("reminder", "Reminder"), ("alarm", "Alarm"), ("timer", "Timer")] {
+            msg(&mut app, &format!(r#"{{"type":"reminder","id":"r-{kind}","title":"x","text":"t","kind":"{kind}","ringing":true}}"#), 1.0);
+            assert_eq!(app.live.ring.as_ref().unwrap().heading(), name);
+        }
+    }
+
+    #[test]
+    fn with_no_link_stop_cannot_be_sent_and_can_be_pressed_again() {
+        let mut app = live();
+        msg(&mut app, r#"{"type":"reminder","id":"r-2","title":"Pasta","text":"Your timer is up.","kind":"timer","ringing":true}"#, 1.0);
+        assert!(!app.stop_alarm());
+        assert!(!app.live.ring.as_ref().unwrap().sent, "so the button comes back");
+        assert!(!App::default().stop_alarm(), "nothing ringing, nothing to stop");
+    }
+
+    #[test]
+    fn the_face_carries_the_ringing_card_and_losing_orbit_ends_the_ring() {
+        let mut app = live();
+        msg(&mut app, r#"{"type":"reminder","id":"r-2","title":"Pasta","text":"Your timer is up.","kind":"timer","ringing":true}"#, 1.0);
+        assert_eq!(app.face().ring.as_ref().map(|r| r.id.as_str()), Some("r-2"));
+        let face = app.face();
+        assert_eq!(face.size().1, face.place.diameter + layout::SPARE + layout::ASK_EXTRA, "the orb's window grows to hold the card");
+        app.on_event(Event::Status(Status::Closed), 2.0);
+        assert!(app.live.ring.is_none(), "Orbit stopping stops its ringing, and nothing could answer a Stop now");
     }
 
     #[test]

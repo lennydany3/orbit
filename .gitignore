@@ -12,3 +12,9 @@ tests/voice/fixtures_*/
 # Rust GUI build output
 ui/target/
 settings.json
+
+# Your own data (reminders, notes, tasks, playlists): made in the window or by voice
+reminders.json
+notes.json
+music.json
+*.json.bak

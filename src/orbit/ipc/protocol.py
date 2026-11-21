@@ -12,6 +12,10 @@ Orbit -> face
     {"type": "reply", "text": "...", "spoken": "...", "kind": "action" | "chat", "emotion": "proud"}
     {"type": "confirm", "id": 3, "question": "...", "action": "close window Notepad"}   a risky action needs yes or no
     {"type": "confirm_done", "id": 3, "answer": true, "by": "voice" | "ui" | "timeout" | "killed"}
+    {"type": "reminder", "id": "r-3f9a", "title": "Stretch", "text": "Reminder: stretch."}   a reminder just came due (Orbit says it too).
+                                                     A timer or alarm adds "kind": "timer" | "alarm"; one that is ringing adds
+                                                     "ringing": true, and the face shows a Stop button until the next message.
+    {"type": "alarm_stopped", "id": "r-3f9a", "by": "voice" | "key" | "ui" | "timeout" | "killed"}   it stopped ringing
     {"type": "error", "message": "..."}              about the face's last message
 
 The state and level messages have no "type" on purpose: they are the format the design's page already understands.
@@ -21,13 +25,18 @@ are never held back to let a flash finish: the face decides how long each animat
 
 Face -> Orbit
     {"type": "confirm", "id": 3, "yes": true}        the answer to a `confirm` that is still open
+    {"type": "play", "id": "p-3f9a1c2b"}             the Play button on one of the user's saved playlists (the Music page)
+    {"type": "dismiss", "id": "r-3f9a"}              the Stop button on a reminder or timer that is ringing
 
-That is the whole command set. A face cannot make Orbit do anything else.
+That is the whole command set. A face cannot make Orbit do anything else: `play` only names a playlist the user saved themselves in
+music.json (an id that is not in that file plays nothing), Orbit plays it through its ordinary Spotify tool, and `dismiss` only
+silences the alarm that is ringing (an id that is not the one ringing does nothing).
 """
 from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -97,6 +106,19 @@ def confirm_done(confirm_id: int, answer: bool, by: str) -> dict:
     return {"type": "confirm_done", "id": confirm_id, "answer": bool(answer), "by": by}
 
 
+def reminder(reminder_id: str, title: str, text: str, kind: str = "reminder", ringing: bool = False) -> dict:
+    msg = {"type": "reminder", "id": str(reminder_id)[:40], "title": _clip(title), "text": _clip(text)}
+    if kind in ("timer", "alarm"):
+        msg["kind"] = kind
+    if ringing:
+        msg["ringing"] = True
+    return msg
+
+
+def alarm_stopped(reminder_id: str, by: str) -> dict:
+    return {"type": "alarm_stopped", "id": str(reminder_id)[:40], "by": by}
+
+
 def error(message: str) -> dict:
     return {"type": "error", "message": _clip(message)}
 
@@ -111,8 +133,21 @@ class ConfirmAnswer:
     yes: bool
 
 
-def parse_command(raw: str | bytes) -> ConfirmAnswer:
-    """Strict: anything but a well-formed `confirm` raises ProtocolError (which the server answers with an `error`)."""
+@dataclass(frozen=True)
+class PlayRequest:
+    id: str
+
+
+@dataclass(frozen=True)
+class DismissRequest:
+    id: str
+
+
+_PLAY_ID = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+
+
+def parse_command(raw: str | bytes) -> ConfirmAnswer | PlayRequest | DismissRequest:
+    """Strict: anything but a well-formed `confirm`, `play` or `dismiss` raises ProtocolError (which the server answers with an `error`)."""
     size = len(raw.encode("utf-8")) if isinstance(raw, str) else len(raw)
     if size > MAX_COMMAND_BYTES:
         raise ProtocolError("message too long")
@@ -122,8 +157,18 @@ def parse_command(raw: str | bytes) -> ConfirmAnswer:
         raise ProtocolError("not JSON") from None
     if not isinstance(msg, dict):
         raise ProtocolError("expected a JSON object")
+    if msg.get("type") == "play":
+        pid = msg.get("id")
+        if not isinstance(pid, str) or not _PLAY_ID.match(pid):
+            raise ProtocolError('play needs the "id" of a saved playlist')
+        return PlayRequest(pid)
+    if msg.get("type") == "dismiss":
+        rid = msg.get("id")
+        if not isinstance(rid, str) or not _PLAY_ID.match(rid):
+            raise ProtocolError('dismiss needs the "id" of the reminder that is ringing')
+        return DismissRequest(rid)
     if msg.get("type") != "confirm":
-        raise ProtocolError("unknown command (the only one is: confirm)")
+        raise ProtocolError("unknown command (the only ones are: confirm, play, dismiss)")
     cid, yes = msg.get("id"), msg.get("yes")
     if not isinstance(cid, int) or isinstance(cid, bool) or not isinstance(yes, bool):
         raise ProtocolError('confirm needs an integer "id" and a boolean "yes"')

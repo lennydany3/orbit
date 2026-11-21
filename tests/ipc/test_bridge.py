@@ -33,7 +33,8 @@ def test_every_voice_state_has_a_sphere_state():
     assert set(ORB_FOR) == set(State)
     assert {s: ORB_FOR[s] for s in State} == {
         State.IDLE: "idle", State.WAKE_DETECTED: "wake", State.LISTENING: "listening", State.TRANSCRIBING: "transcribing",
-        State.THINKING: "thinking", State.CONFIRMING: "confirming", State.SPEAKING: "speaking", State.FOLLOW_UP: "follow_up"}
+        State.THINKING: "thinking", State.CONFIRMING: "confirming", State.SPEAKING: "speaking", State.FOLLOW_UP: "follow_up",
+        State.ALARM: "speaking"}, "a ringing alarm is held as the speaking sphere: it pulses with the sound"
 
 
 def test_a_state_change_is_sent_with_its_reason_and_the_follow_up_window():
@@ -209,3 +210,74 @@ def test_the_null_bridge_accepts_every_call_and_never_has_an_answer():
     b.confirm_done(0, True, "ui")
     b.killed()
     assert b.confirm_asked("q", "a") == 0 and b.poll_answer() is None
+
+
+def test_a_play_request_waits_for_orbit_to_pick_it_up_and_too_many_are_refused():
+    sent = []
+    bridge = UiBridge(sent.append)
+    assert bridge.poll_request() is None
+    assert bridge.on_command(protocol.PlayRequest("p-1")) is None
+    assert bridge.poll_request() == protocol.PlayRequest("p-1") and bridge.poll_request() is None
+    results = [bridge.on_command(protocol.PlayRequest(f"p-{i}")) for i in range(12)]
+    assert results[:8] == [None] * 8 and all("already working" in r for r in results[8:])
+
+
+def test_a_reminder_is_published_and_a_dead_face_cannot_break_it():
+    sent = []
+    UiBridge(sent.append).reminder("r-1", "Call mom", "Reminder: Call mom.")
+    assert sent == [{"type": "reminder", "id": "r-1", "title": "Call mom", "text": "Reminder: Call mom."}]
+
+    def broken(message):
+        raise OSError("the face went away")
+
+    UiBridge(broken).reminder("r-1", "x", "y")                      # never raises into the voice loop
+
+
+def test_the_null_bridge_has_the_new_calls_too():
+    from orbit.ipc.bridge import NullBridge
+
+    n = NullBridge()
+    n.reminder("r", "t", "x")
+    assert n.poll_request() is None
+
+
+def test_a_stop_button_press_waits_for_the_loop_and_pressing_it_over_and_over_is_harmless():
+    sent = []
+    bridge = UiBridge(sent.append)
+    assert bridge.poll_dismiss() is None
+    assert bridge.on_command(protocol.DismissRequest("r-1")) is None
+    assert bridge.poll_dismiss() == "r-1" and bridge.poll_dismiss() is None
+    assert all(bridge.on_command(protocol.DismissRequest("r-1")) is None for _ in range(30)), "never an error, even when the queue is full"
+    assert [bridge.poll_dismiss() for _ in range(9)].count(None) == 1, "and only 8 are kept"
+
+
+def test_a_ringing_reminder_and_its_end_are_published_and_a_dead_face_cannot_break_them():
+    sent = []
+    bridge = UiBridge(sent.append)
+    bridge.reminder("r-1", "Pasta", "Your timer is up.", "timer", True)
+    bridge.alarm_stopped("r-1", "ui")
+    assert sent == [{"type": "reminder", "id": "r-1", "title": "Pasta", "text": "Your timer is up.", "kind": "timer", "ringing": True},
+                    {"type": "alarm_stopped", "id": "r-1", "by": "ui"}]
+
+    def broken(message):
+        raise OSError("the face went away")
+
+    UiBridge(broken).reminder("r-1", "x", "y", "timer", True)
+    UiBridge(broken).alarm_stopped("r-1", "voice")
+
+
+def test_the_null_bridge_has_the_alarm_calls_too():
+    n = NullBridge()
+    n.reminder("r", "t", "x", "timer", True)
+    n.alarm_stopped("r", "ui")
+    assert n.poll_dismiss() is None
+
+
+def test_a_ringing_alarm_shows_its_sound_as_the_spheres_level():
+    sent = []
+    t = [0.0]
+    bridge = UiBridge(sent.append, clock=lambda: t[0])
+    bridge.state_changed(State.IDLE, State.ALARM, "a reminder came due")
+    assert sent[0] == {"state": "speaking", "reason": "a reminder came due"}
+    bridge.audio_block(LOUD)
+    assert any("level" in m and m["level"] > 0 for m in sent), "the sphere pulses with the bell"

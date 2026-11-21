@@ -2,7 +2,7 @@
 
 use orbit_ui::app::{App, Page};
 use orbit_ui::editor::{Field, Section, SettingsState, StepKind};
-use orbit_ui::settings::{self, Sounds};
+use orbit_ui::settings::{self, OrbLook, OrbSize, Sounds};
 use orbit_ui::sound::Cue;
 use rune::{Key, KeyEvent, Mods};
 
@@ -26,15 +26,19 @@ fn ctrl_alt(c: char) -> KeyEvent {
 }
 
 #[test]
-fn the_window_starts_on_the_sphere_and_the_page_comes_and_goes() {
+fn the_window_starts_on_the_sphere_and_the_pages_come_and_go() {
     let mut app = App::default();
-    assert_eq!(app.page, Page::Stage);
-    app.open_settings(Section::Commands);
-    assert_eq!((app.page, app.prefs.section), (Page::Settings, Section::Commands));
+    assert_eq!(app.page, Page::Home);
+    app.go(Page::Commands);
     app.prefs.new_command();
-    app.close_settings();
-    assert_eq!(app.page, Page::Stage);
+    assert_eq!((app.page, app.prefs.draft.is_some()), (Page::Commands, true));
+    app.go(Page::Home);
+    assert_eq!(app.page, Page::Home);
     assert!(app.prefs.draft.is_none(), "a half-made command is dropped on the way out");
+    app.open_settings(Section::Sounds);
+    assert_eq!((app.page, app.prefs.section), (Page::Settings, Section::Sounds));
+    app.close_settings();
+    assert_eq!(app.page, Page::Home);
 }
 
 #[test]
@@ -93,7 +97,7 @@ fn resetting_from_the_page_puts_the_defaults_back_on_the_orb_too() {
 #[test]
 fn a_command_made_on_the_page_is_in_the_file_orbit_reads() {
     let (mut app, file) = app_with_file("command");
-    app.open_settings(Section::Commands);
+    app.go(Page::Commands);
     app.prefs.new_command();
     app.prefs.name_edit().replace_text("Screenshot");
     app.prefs.phrase_edit(0).replace_text("take a screenshot");
@@ -165,4 +169,91 @@ fn changing_the_sounds_leaves_hotkeys_and_commands_as_they_were() {
     app.step_volume(-1);
     let saved = settings::load(&file).settings;
     assert_eq!((saved.hotkeys.talk.as_str(), saved.commands.len()), ("f9", 2));
+}
+
+// ---- the orb's place and size ----
+
+#[test]
+fn the_orb_is_on_screen_for_as_long_as_the_customization_page_is_open() {
+    let (mut app, _) = app_with_file("preview");
+    app.sync_shell(1.0);
+    assert!(!app.previewing());
+    app.open_settings(Section::Hotkeys);
+    assert!(!app.previewing(), "only the customization page shows the orb");
+    app.prefs.select(Section::Customization);
+    assert!(app.previewing());
+    assert!(app.presence.visible(app.active() || app.previewing(), 2.0));
+    app.close_settings();
+    assert!(!app.previewing(), "leaving the page lets the orb go (after its short linger)");
+}
+
+#[test]
+fn a_dragged_orb_follows_the_pointer_and_is_saved_where_it_is_let_go() {
+    let (mut app, file) = app_with_file("drag-orb");
+    app.open_settings(Section::Customization);
+    let home = app.face().place;
+    app.prefs.drag_orb(0.1, 0.2);
+    let during = app.face().place;
+    assert_ne!(during, home, "the real orb moves while the pointer is still down");
+    assert_eq!(settings::load(&file).settings.orb, OrbLook::default(), "nothing saved yet");
+    assert!(app.prefs.finish_orb(true));
+    assert_eq!(settings::load(&file).settings.orb, OrbLook { x: 0.1, y: 0.2, size: OrbSize::Medium });
+    assert_eq!(app.face().place, during, "and stays where it was let go");
+}
+
+#[test]
+fn escape_during_a_drag_puts_the_orb_back() {
+    let (mut app, file) = app_with_file("drag-cancel");
+    app.open_settings(Section::Customization);
+    let home = app.face().place;
+    app.prefs.drag_orb(0.5, 0.5);
+    assert!(!app.prefs.finish_orb(false));
+    assert_eq!(app.face().place, home);
+    assert_eq!(settings::load(&file).settings.orb, OrbLook::default());
+}
+
+#[test]
+fn a_spot_a_size_and_a_reset_are_each_saved_and_the_rest_of_the_file_is_untouched() {
+    let (mut app, file) = app_with_file("spots");
+    app.open_settings(Section::Customization);
+    assert_eq!(app.prefs.spot_name(), Some("Bottom right"), "out of the box");
+    assert!(app.prefs.place_orb(0.5, 0.0));
+    assert_eq!(app.prefs.spot_name(), Some("Top"));
+    assert!(app.prefs.set_orb_size(OrbSize::Large));
+    let saved = settings::load(&file).settings;
+    assert_eq!(saved.orb, OrbLook { x: 0.5, y: 0.0, size: OrbSize::Large });
+    assert_eq!((saved.hotkeys.talk.as_str(), saved.commands.len(), saved.sounds), ("f9", 2, Sounds { enabled: false, volume: 65 }));
+    assert!(!app.prefs.place_orb(0.5, 0.0), "pressing the spot the orb is on changes nothing");
+    assert!(app.prefs.reset_orb());
+    assert_eq!(settings::load(&file).settings.orb, OrbLook::default());
+    let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert!(written.get("orb").is_none(), "a default orb leaves no entry in the file");
+}
+
+#[test]
+fn the_orbs_window_is_laid_out_for_the_place_and_size_chosen() {
+    let (mut app, _) = app_with_file("face-place");
+    let corner = app.face();
+    app.prefs.place_orb(0.0, 0.0);
+    app.prefs.set_orb_size(OrbSize::Small);
+    let face = app.face();
+    assert_ne!(face.key(), corner.key(), "so the window is redrawn and moved");
+    assert_eq!(face.place.diameter, 80.0);
+    assert!(face.place.flip, "in the top half the question opens below the orb");
+    assert_eq!(face.size(), (orbit_ui::face::WIDTH, 80.0 + 28.0));
+    let (x, y) = face.place.at.unwrap();
+    assert!(x >= 0.0 && y >= 0.0, "on the screen");
+}
+
+#[test]
+fn an_open_question_keeps_the_orb_where_it_was() {
+    let (mut app, _) = app_with_file("ask-place");
+    app.prefs.place_orb(0.5, 1.0);
+    let calm = app.face().place;
+    app.on_event(orbit_ui::link::Event::Status(orbit_ui::link::Status::Open), 0.0);
+    app.on_event(orbit_ui::link::Event::Message(r#"{"type":"confirm","id":1,"question":"q","action":"close window Notepad"}"#.to_owned()), 0.0);
+    let asking = app.face();
+    assert_eq!(asking.size().1, calm.diameter + 28.0 + orbit_ui::face::ASK_EXTRA);
+    assert_eq!(asking.place.orb_x, calm.orb_x, "side to side the orb has not moved");
+    assert_eq!(asking.place.at.unwrap().1 + asking.size().1, calm.at.unwrap().1 + calm.diameter + 28.0, "and its bottom edge stayed put");
 }

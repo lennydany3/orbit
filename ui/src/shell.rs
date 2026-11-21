@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use rune::{AppHandle, OverlayHandle, Shortcut, ShortcutError, ShortcutId, Tray, TrayEvent, TrayIcon, TrayItem, TraySpec};
+use rune::{AppHandle, OverlayHandle, OverlayPlacement, Shortcut, ShortcutError, ShortcutId, Tray, TrayEvent, TrayIcon, TrayItem, TraySpec};
 
 use crate::app::App;
 use crate::face::{Face, FaceKey};
@@ -23,6 +23,8 @@ pub struct Shell {
     shown: bool,
     last_key: Option<FaceKey>,
     last_size: Option<(f32, f32)>,
+    /// Where the orb's window was last told to be: its top-left and size.
+    last_rect: Option<[f32; 4]>,
     /// The answer chords, held only while a question is open.
     answer_keys: Option<(ShortcutId, ShortcutId)>,
     /// The chord that shows or hides the orb, as registered with Windows, and the one that was refused (so it is not retried
@@ -36,7 +38,7 @@ pub struct Shell {
 
 impl Shell {
     pub fn new(orb: OverlayHandle<Face>, hub: AppHandle<App>, tray: Option<Tray>) -> Shell {
-        Shell { orb: Some(orb), hub: Some(hub), tray, shown: false, last_key: None, last_size: None, answer_keys: None, orb_chord: None, orb_refused: None, chime: Chime::default(), player: Player::speaking() }
+        Shell { orb: Some(orb), hub: Some(hub), tray, shown: false, last_key: None, last_size: None, last_rect: None, answer_keys: None, orb_chord: None, orb_refused: None, chime: Chime::default(), player: Player::speaking() }
     }
 
     pub fn has_tray(&self) -> bool {
@@ -60,6 +62,12 @@ impl Shell {
         if self.last_size != Some(size) {
             orb.resize(size);
             self.last_size = Some(size);
+        }
+        // Where the window goes: anywhere on the screen the user chose (not known yet: where it always was, bottom right).
+        let rect = face.place.at.map(|(x, y)| [x, y, size.0, size.1]);
+        if rect.is_some() && self.last_rect != rect {
+            self.last_rect = rect;
+            orb.set_placement(rect.map(|[x, y, width, height]| OverlayPlacement::Rect { x, y, width, height }));
         }
         if self.last_key.as_ref() != Some(&key) {
             self.last_key = Some(key);
@@ -194,7 +202,7 @@ pub fn make_tray(hub: AppHandle<App>) -> Option<Tray> {
             "orb" => hub.update(|app, tx| app.toggle_pin(crate::clock::now(tx.clock()))),
             "window" => hub.open(),
             "settings" => {
-                hub.update(|app, _| app.open_settings(crate::editor::Section::Hotkeys));
+                hub.update(|app, _| app.open_settings(crate::editor::Section::General));
                 hub.open();
             }
             "quit" => hub.quit(),

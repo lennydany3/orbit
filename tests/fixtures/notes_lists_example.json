@@ -1,0 +1,33 @@
+{
+  "notes": [],
+  "tasks": [
+    {
+      "created": "2026-11-22T10:16",
+      "done": false,
+      "id": "t-call",
+      "text": "Call mom"
+    },
+    {
+      "created": "2026-11-22T10:17",
+      "done": false,
+      "id": "t-tomato",
+      "list": "shopping",
+      "text": "Tomato"
+    },
+    {
+      "created": "2026-11-22T10:17",
+      "done": false,
+      "id": "t-pasta",
+      "list": "shopping",
+      "text": "Pasta"
+    },
+    {
+      "created": "2026-11-22T10:18",
+      "done": false,
+      "id": "t-brush",
+      "list": "packing",
+      "text": "Toothbrush"
+    }
+  ],
+  "version": 1
+}

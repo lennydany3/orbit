@@ -1,13 +1,13 @@
-//! The window: a black stage with the big sphere, what state it is in, what was last said, and, when Orbit needs a yes or no,
-//! the question. A faithful copy of the design's stage: its layout, colours and type, built from Rune elements.
+//! The window: a sidebar of pages on the left, and the chosen page in a rounded panel on the right. Home is the black stage with the big
+//! sphere, what was last said and, when Orbit needs a yes or no, the question.
 //!
-//! The states can still be tried by hand with the keys 1 to 9, 0 and M, and Esc answers a question with no.
+//! The states can still be tried by hand with the keys 1 to 9, 0 and M (on Home), and Esc answers a question with no.
 
 use rune::tok::TextStyle;
-use rune::{Align, Color, Cx, El, col, effect, el, row, text};
+use rune::{Align, Color, Cx, El, col, effect, icon, row, text};
 
-use crate::app::{App, Ask, Page};
-use crate::editor::Section;
+use crate::app::{App, Ask, Page, Ring};
+use crate::icons;
 use crate::orbit::SphereConfig;
 
 /// Marks that tell the compositor which sphere a slot is.
@@ -23,17 +23,42 @@ pub(crate) fn hex(s: &str) -> Color {
     rune::color::hex(s).unwrap_or(Color::WHITE)
 }
 
-/// The design's few colours.
+/// The window's colours: white on black, one violet for what is on or primary.
 pub(crate) struct Ink {
     pub fg: Color,
     pub muted: Color,
     pub hair: Color,
     pub hair_strong: Color,
+    /// Behind everything.
+    pub bg: Color,
+    /// The page's panel.
+    pub panel: Color,
+    /// A card on the panel.
+    pub raised: Color,
+    /// A text box on a card.
+    pub field: Color,
+    pub accent: Color,
+    /// The violet as text on dark.
+    pub accent_text: Color,
+    /// Something that went wrong.
+    pub bad: Color,
 }
 
 impl Ink {
     pub(crate) fn new() -> Ink {
-        Ink { fg: hex("#F2F3F5"), muted: hex("#8A8F98"), hair: Color::WHITE.alpha(0.08), hair_strong: Color::WHITE.alpha(0.22) }
+        Ink {
+            fg: hex("#F2F3F5"),
+            muted: hex("#8A8F98"),
+            hair: Color::WHITE.alpha(0.08),
+            hair_strong: Color::WHITE.alpha(0.22),
+            bg: hex("#060607"),
+            panel: hex("#0C0C0E"),
+            raised: hex("#111114"),
+            field: hex("#0A0A0C"),
+            accent: hex("#8B4FD0"),
+            accent_text: hex("#C7A6F5"),
+            bad: hex("#FF8F8F"),
+        }
     }
 }
 
@@ -45,35 +70,84 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     cx.reduced_motion(s.orbit.reduced());
     let ink = Ink::new();
     let body = match s.page {
-        Page::Stage => stage(s, &ink),
+        Page::Home => stage(s, &ink),
+        Page::Commands => crate::commands_view::page(s, &ink),
+        Page::Reminders => crate::reminders_view::page(s, &ink),
+        Page::Notes => crate::notes_view::page(s, &ink),
+        Page::Music => crate::music_view::page(s, &ink),
         Page::Settings => crate::settings_view::page(s, &ink),
     };
-    row().key("window").w_full().h_full().fill(Color::BLACK).child(body)
+    row()
+        .key("window")
+        .w_full()
+        .h_full()
+        .fill(ink.bg)
+        .child(crate::sidebar::sidebar(s, &ink))
+        .child(
+            col()
+                .key("content")
+                .grow(1.0)
+                .min_w(0.0)
+                .h_full()
+                .padding(10.0)
+                .gap(8.0)
+                .children(s.live.ring.as_ref().map(|ring| ring_banner(ring, &ink)))
+                .child(col().key("panel").w_full().grow(1.0).min_h(0.0).radius(14.0).fill(if s.page == Page::Home { Color::BLACK } else { ink.panel }).border(1.0, ink.hair).child(body)),
+        )
 }
 
-// ---- the stage ----------------------------------------------------------------------------
+/// A reminder or timer is ringing: a bar above whatever page is open, with the Stop button (saying "ok thanks" stops it too).
+fn ring_banner(ring: &Ring, ink: &Ink) -> El {
+    let stop = if ring.sent {
+        text("Stopping\u{2026}").font(t(12.0, 400.0)).color(ink.muted)
+    } else {
+        row()
+            .key("ring-stop")
+            .role("button")
+            .label("Stop")
+            .focusable(true)
+            .h(32.0)
+            .w(96.0)
+            .center()
+            .radius(8.0)
+            .fill(ink.fg)
+            .border(1.0, ink.fg)
+            .on_press(|s: &mut App| {
+                s.stop_alarm();
+            })
+            .child(text("Stop").font(t(13.0, 500.0)).color(Color::BLACK).a11y_hidden())
+    };
+    row()
+        .key("ring-banner")
+        .role("dialog")
+        .label(ring.heading())
+        .w_full()
+        .items_center()
+        .gap(14.0)
+        .padding(12.0)
+        .radius(12.0)
+        .fill(ink.raised)
+        .border(1.0, ink.accent)
+        .child(icon(&icons::BELL, 18.0).color(ink.accent_text))
+        .child(
+            col()
+                .key("ring-text")
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(text(ring.heading()).font(t(11.0, 400.0).tracking(1.54)).color(ink.muted))
+                .child(text(&ring.text).font(t(15.0, 400.0)).color(ink.fg).wrap()),
+        )
+        .child(text("or say \u{201c}ok thanks\u{201d}").font(t(11.0, 400.0)).color(ink.muted))
+        .child(stop)
+}
+
+// ---- the stage ----------------------------------------------------------------------------------------------------------------
 
 fn stage(s: &App, ink: &Ink) -> El {
-    let state = s.orbit.state;
-    let label = if s.orbit.reduced() { format!("{} (reduced motion)", state.label()) } else { state.label().to_owned() };
-
     let sphere = effect(STAGE_MARK).effect_data(STAGE.to_data()).key("sphere").w_full().h_full();
 
-    let header = row()
-        .key("title")
-        .absolute(28.0, 20.0)
-        .gap(12.0)
-        .items_center()
-        .child(crate::logo::mark(46.0, ink.fg))
-        .child(
-            row()
-                .key("title-text")
-                .gap(12.0)
-                .items_end()
-                .child(text("Orbit").font(t(14.0, 600.0).tracking(0.56)).color(ink.fg))
-                .child(text("Sphere states, motion review").font(t(12.0, 400.0).tracking(0.72)).color(ink.muted)),
-        );
-
+    // What was last said, under the sphere (and nothing else: the state it is in is on the sidebar).
     let mut footer = col().key("footer").items_center().gap(18.0);
     if let Some((who, said)) = s.caption() {
         footer = footer.child(
@@ -85,57 +159,13 @@ fn stage(s: &App, ink: &Ink) -> El {
                 .child(text(said).font(t(18.0, 400.0)).color(ink.fg).max_w(640.0).align(Align::Center).wrap()),
         );
     }
-    footer = footer.child(
-        col()
-            .key("state-text")
-            .items_center()
-            .gap(6.0)
-            .child(text(label).font(t(12.0, 400.0).tracking(1.92)).color(ink.fg))
-            .child(
-                text(state.description())
-                    .font(t(13.0, 400.0))
-                    .color(ink.muted)
-                    .max_w(440.0)
-                    .align(Align::Center)
-                    .wrap(),
-            ),
-    );
-
-    // A way in to the settings, top right.
-    let settings_button = row()
-        .key("top-right")
-        .absolute(0.0, 18.0)
-        .w_full()
-        .px(24.0)
-        .justify_end()
-        .child(
-            row()
-                .key("open-settings")
-                .role("button")
-                .label("Settings")
-                .focusable(true)
-                .h(32.0)
-                .px(14.0)
-                .center()
-                .radius(8.0)
-                .fill(Color::WHITE.alpha(0.06))
-                .border(1.0, Color::WHITE.alpha(0.12))
-                .hover(Color::WHITE.alpha(0.05))
-                .on_press(|s: &mut App| s.open_settings(Section::Hotkeys))
-                .child(text("Settings").font(t(12.0, 400.0)).color(ink.fg).a11y_hidden()),
-        );
 
     col()
         .key("stage")
         .grow(1.0)
         .min_w(0.0)
         .h_full()
-        .fill(Color::BLACK)
-        // The sphere takes everything above a 72 px strip, as in the design.
         .child(col().key("sphere-area").grow(1.0).min_h(0.0).child(sphere))
-        .child(el().key("strip").h(72.0))
-        .child(header)
-        .child(settings_button)
         .child(
             col()
                 .key("overlay")
@@ -197,5 +227,3 @@ fn answer_button(key: &str, label: &str, yes: bool, ink: &Ink) -> El {
         })
         .child(text(label).font(t(13.0, 500.0)).color(if yes { Color::BLACK } else { ink.fg }).a11y_hidden())
 }
-
-// ---- controls -----------------------------------------------------------------------------

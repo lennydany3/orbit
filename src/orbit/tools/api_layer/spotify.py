@@ -298,6 +298,36 @@ def play(p: PlayParams) -> ToolResult:
     return result
 
 
+class PlaySavedParams(BaseModel):
+    uri: str = Field(description="the spotify: address of one of the user's saved playlists, albums, artists or tracks")
+    label: str = Field(default="", description="what to call it when saying what is playing")
+
+
+def play_saved(p: PlaySavedParams) -> ToolResult:
+    """Plays something saved in the Music page. Only Orbit's own code calls this (the model is never offered it), and the address has
+    to be a real Spotify one: it is never a search, so nothing but what the user saved can start."""
+    from ... import playlists
+
+    link = playlists.parse_link(p.uri)
+    if isinstance(link, str):
+        return ToolResult.failure(link, retryable=False)
+    try:
+        client = get_client()
+        device, started = _ensure_device(client, "this")
+        params = {"device_id": device["id"]} if device else None
+        body = {"context_uri": link.uri} if link.kind in playlists.CONTEXT_KINDS else {"uris": [link.uri]}
+        _start_playback(client, params, body, started)
+    except SpotifyError as e:
+        return _fail(e)
+    where = f" on {device['name']}" if device else ""
+    label = p.label.strip() or f"your Spotify {link.kind}"
+    result = ToolResult.success(f"playing {label}{where}" + (" (started Spotify first)" if started else ""))
+    # verify_play knows artist, album, playlist and track; a show is checked like a playlist and an episode like a track
+    kind = {"show": "playlist", "episode": "track"}.get(link.kind, link.kind)
+    result.context.update(kind=kind, uri=link.uri, uris=body.get("uris"))
+    return result
+
+
 def _player(client: SpotifyClient) -> dict | None:
     return client.call("GET", "/me/player")
 
@@ -560,6 +590,8 @@ def register_spotify_tools(registry: Registry) -> None:
         registry.register(Tool(name=name, description=description, params=params, layer="api", risk="low", run=run, verify=verify, **kw))
 
     add("api_spotify_play", "Play a song, artist, album or playlist on Spotify; 'my favourite music' plays liked songs.", PlayParams, play, verify_play)
+    add("api_spotify_play_saved", "Play one of the user's saved Spotify playlists (by its spotify: address).", PlaySavedParams, play_saved,
+        verify_play, model_visible=False)
     add("api_spotify_transfer", "Move Spotify playback to a device (\"put the music on the speaker\", \"play it on my phone\"), optionally setting its volume; 'this' = this computer.", TransferParams, transfer, verify_transfer)
     add("api_spotify_volume", "ONLY change the volume of a Spotify device; it does not move playback (use api_spotify_transfer for that).", VolumeParams, set_device_volume, verify_device_volume)
     add("api_spotify_control", "Play, pause, next or previous on Spotify, on whichever device is playing.", ControlParams, control, verify_control)

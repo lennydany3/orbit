@@ -1,4 +1,4 @@
-//! Orbit's settings file: the hotkeys and the user's own commands. The window writes it (the Settings page); Orbit (Python)
+//! Orbit's settings file: the hotkeys, the audio and voice choices, and the user's own commands. The window writes it (the Settings page); Orbit (Python)
 //! reads it and starts a command when its phrase is said. The two sides share the rules, checked against the same example
 //! files in `tests/fixtures` so they cannot drift apart: what a key combination looks like, how a phrase is compared, what a
 //! step may be.
@@ -27,6 +27,12 @@ pub const DEFAULT_YES: &str = "ctrl+alt+y";
 pub const DEFAULT_NO: &str = "ctrl+alt+n";
 pub const DEFAULT_TALK: &str = "ctrl_r";
 pub const DEFAULT_VOLUME: u8 = 40;
+/// How loud Orbit's own voice is out of the box: full (the Windows volume is yours to turn down).
+pub const DEFAULT_SPEAKING_VOLUME: u8 = 100;
+pub const MAX_DEVICE: usize = 200;
+/// Out of the box the orb sits in the bottom right corner, at the middle size.
+pub const DEFAULT_ORB_X: f32 = 1.0;
+pub const DEFAULT_ORB_Y: f32 = 1.0;
 
 /// The settings file: `ORBIT_SETTINGS`, or `settings.json` in the project folder (the same place Orbit looks).
 pub fn path() -> PathBuf {
@@ -127,18 +133,31 @@ pub fn compact(combo: &str) -> String {
     pretty(combo).replace(" + ", "+")
 }
 
-/// The hold-to-talk keys, by the name Orbit's keyboard listener uses, with what to call them.
+/// The mouse buttons that can be held to talk, by the name Orbit uses (the same as the other side), with what to call them. Mouse 1
+/// is the left button, 2 the right, 3 the middle one (the wheel), 4 the one on the side towards you (back), 5 the one beyond it.
+pub const MOUSE_TALK: &[(&str, &str)] = &[
+    ("mouse1", "Mouse1 (left)"), ("mouse2", "Mouse2 (right)"), ("mouse3", "Mouse3 (middle)"), ("mouse4", "Mouse4 (back)"), ("mouse5", "Mouse5 (forward)"),
+];
+
+/// The hold-to-talk keys the page offers by name, by the name Orbit's keyboard listener uses, with what to call them: keys, and then
+/// the mouse buttons.
 pub const TALK_KEYS: &[(&str, &str)] = &[
     ("ctrl_r", "Right Ctrl"), ("ctrl_l", "Left Ctrl"), ("alt_r", "Right Alt"), ("alt_l", "Left Alt"), ("shift_r", "Right Shift"),
     ("caps_lock", "Caps Lock"), ("scroll_lock", "Scroll Lock"), ("pause", "Pause"), ("insert", "Insert"),
     ("f8", "F8"), ("f9", "F9"), ("f10", "F10"), ("f11", "F11"), ("f12", "F12"),
+    ("mouse1", "Mouse1 (left)"), ("mouse2", "Mouse2 (right)"), ("mouse3", "Mouse3 (middle)"), ("mouse4", "Mouse4 (back)"), ("mouse5", "Mouse5 (forward)"),
 ];
 
 /// Every name the Python side accepts for the talk key (the page offers `TALK_KEYS`; a hand-written file may use any of these).
 pub const TALK_NAMES: &[&str] = &[
     "ctrl_r", "ctrl_l", "alt_r", "alt_l", "alt_gr", "shift_r", "shift_l", "caps_lock", "scroll_lock", "num_lock", "pause", "insert",
-    "home", "end", "page_up", "page_down", "menu", "print_screen", "tab", "space",
+    "home", "end", "page_up", "page_down", "menu", "print_screen", "tab", "space", "mouse1", "mouse2", "mouse3", "mouse4", "mouse5",
 ];
+
+/// Is this talk key a mouse button?
+pub fn is_mouse_talk(name: &str) -> bool {
+    MOUSE_TALK.iter().any(|(n, _)| *n == name)
+}
 
 pub fn valid_talk_key(name: &str) -> bool {
     if name.is_empty() {
@@ -149,7 +168,15 @@ pub fn valid_talk_key(name: &str) -> bool {
 }
 
 pub fn talk_label(name: &str) -> String {
-    TALK_KEYS.iter().find(|(n, _)| *n == name).map(|(_, l)| (*l).to_owned()).unwrap_or_else(|| name.replace('_', " "))
+    if let Some((_, label)) = TALK_KEYS.iter().find(|(n, _)| *n == name) {
+        return (*label).to_owned();
+    }
+    let loose = name.replace('_', " ");
+    match loose.chars().count() {
+        1 => loose.to_uppercase(),
+        _ if name.strip_prefix('f').is_some_and(|n| n.parse::<u32>().is_ok()) => loose.to_uppercase(),
+        _ => loose,
+    }
 }
 
 // ---- phrases ----------------------------------------------------------------------------------------------------------
@@ -183,6 +210,41 @@ impl Default for Hotkeys {
     }
 }
 
+/// Which microphone and speaker Orbit uses (a device's name, or empty for the Windows default) and how loud its own voice is (0 to 100).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Audio {
+    pub mic: String,
+    pub speaker: String,
+    pub volume: u8,
+}
+
+impl Default for Audio {
+    fn default() -> Self {
+        Audio { mic: String::new(), speaker: String::new(), volume: DEFAULT_SPEAKING_VOLUME }
+    }
+}
+
+/// Whether Orbit listens for "Hey Orbit", and whether it stays ready for a moment after it has replied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VoiceOptions {
+    pub wake_word: bool,
+    pub keep_listening: bool,
+}
+
+impl Default for VoiceOptions {
+    fn default() -> Self {
+        VoiceOptions { wake_word: true, keep_listening: true }
+    }
+}
+
+/// A device name as the file may write it: text, whitespace squeezed, at most `MAX_DEVICE` characters (empty = the Windows default).
+/// Python reads it the same way (`tests/fixtures/audio_voice.json`).
+pub fn parse_device(value: &Value) -> Option<String> {
+    let text = value.as_str().filter(|t| t.chars().count() <= MAX_DEVICE * 4)?;
+    let squeezed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (squeezed.chars().count() <= MAX_DEVICE).then_some(squeezed)
+}
+
 /// The orb's sounds: on or off, and how loud (0 to 100, whole numbers). Quiet by default: Orbit is meant to be calm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sounds {
@@ -208,6 +270,85 @@ impl Sounds {
 pub fn parse_volume(value: &Value) -> Option<u8> {
     let n = value.as_f64().filter(|n| n.is_finite() && (0.0..=100.0).contains(n))?;
     Some((n + 0.5).floor() as u8)
+}
+
+/// How big the floating orb is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OrbSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+impl OrbSize {
+    pub const ALL: [OrbSize; 3] = [OrbSize::Small, OrbSize::Medium, OrbSize::Large];
+
+    /// How it is written in the file.
+    pub fn name(self) -> &'static str {
+        match self {
+            OrbSize::Small => "small",
+            OrbSize::Medium => "medium",
+            OrbSize::Large => "large",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            OrbSize::Small => "Small",
+            OrbSize::Medium => "Medium",
+            OrbSize::Large => "Large",
+        }
+    }
+
+    /// The orb's width in points.
+    pub fn diameter(self) -> f32 {
+        match self {
+            OrbSize::Small => 80.0,
+            OrbSize::Medium => 112.0,
+            OrbSize::Large => 152.0,
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<OrbSize> {
+        OrbSize::ALL.into_iter().find(|s| s.name() == name)
+    }
+}
+
+/// Where the floating orb sits and how big it is. `x` and `y` run from 0 (left, top) to 1 (right, bottom) over the part of the
+/// screen apps can use; see `layout` for how that becomes a place.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OrbLook {
+    pub x: f32,
+    pub y: f32,
+    pub size: OrbSize,
+}
+
+impl Default for OrbLook {
+    fn default() -> Self {
+        OrbLook { x: DEFAULT_ORB_X, y: DEFAULT_ORB_Y, size: OrbSize::Medium }
+    }
+}
+
+/// A position as the number written in the file (0.667, not 0.6669999957...).
+fn permille(v: f32) -> f64 {
+    (f64::from(v) * 1000.0).round() / 1000.0
+}
+
+impl OrbLook {
+    /// A position as the file keeps it: 0 to 1, to three decimals (so the file stays tidy and the page can compare).
+    pub fn rounded(v: f32) -> f32 {
+        ((v.clamp(0.0, 1.0) * 1000.0).round() / 1000.0).clamp(0.0, 1.0)
+    }
+
+    /// The same size at another spot, rounded as the file keeps it.
+    pub fn at(self, x: f32, y: f32) -> OrbLook {
+        OrbLook { x: OrbLook::rounded(x), y: OrbLook::rounded(y), ..self }
+    }
+
+    fn to_value(self) -> Value {
+        json!({"x": permille(self.x), "y": permille(self.y), "size": self.size.name()})
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -331,6 +472,9 @@ pub struct Settings {
     pub hotkeys: Hotkeys,
     pub commands: Vec<Command>,
     pub sounds: Sounds,
+    pub orb: OrbLook,
+    pub audio: Audio,
+    pub voice: VoiceOptions,
     /// Anything else the file had (written back untouched).
     extra: Map<String, Value>,
 }
@@ -353,7 +497,7 @@ impl Settings {
         let Some(root) = data.as_object() else {
             return (settings, vec!["the settings file is not a JSON object, so the defaults are used".into()]);
         };
-        settings.extra = root.iter().filter(|(k, _)| !matches!(k.as_str(), "version" | "hotkeys" | "sounds" | "commands")).map(|(k, v)| (k.clone(), v.clone())).collect();
+        settings.extra = root.iter().filter(|(k, _)| !matches!(k.as_str(), "version" | "hotkeys" | "sounds" | "orb" | "audio" | "voice" | "commands")).map(|(k, v)| (k.clone(), v.clone())).collect();
         match root.get("sounds") {
             None => {}
             Some(Value::Object(sounds)) => {
@@ -371,6 +515,61 @@ impl Settings {
                 }
             }
             Some(_) => problems.push("the sounds setting is not an object, so the defaults are used".into()),
+        }
+        match root.get("audio") {
+            None => {}
+            Some(Value::Object(audio)) => {
+                for name in ["mic", "speaker"] {
+                    if let Some(value) = audio.get(name) {
+                        match parse_device(value) {
+                            Some(device) if name == "mic" => settings.audio.mic = device,
+                            Some(device) => settings.audio.speaker = device,
+                            None => problems.push(format!("the {name} {value} is not a device name, so the Windows default is used")),
+                        }
+                    }
+                }
+                if let Some(value) = audio.get("volume") {
+                    match parse_volume(value) {
+                        Some(v) => settings.audio.volume = v,
+                        None => problems.push(format!("the speaking volume {value} is not a number from 0 to 100, so {DEFAULT_SPEAKING_VOLUME} is used")),
+                    }
+                }
+            }
+            Some(_) => problems.push("the audio setting is not an object, so the defaults are used".into()),
+        }
+        match root.get("voice") {
+            None => {}
+            Some(Value::Object(voice)) => {
+                for (name, field) in [("wake_word", &mut settings.voice.wake_word), ("keep_listening", &mut settings.voice.keep_listening)] {
+                    if let Some(value) = voice.get(name) {
+                        match value.as_bool() {
+                            Some(on) => *field = on,
+                            None => problems.push(format!("the voice {} switch {value} is not true or false, so on is used", name.replace('_', " "))),
+                        }
+                    }
+                }
+            }
+            Some(_) => problems.push("the voice setting is not an object, so the defaults are used".into()),
+        }
+        match root.get("orb") {
+            None => {}
+            Some(Value::Object(orb)) => {
+                for (name, field) in [("x", &mut settings.orb.x), ("y", &mut settings.orb.y)] {
+                    if let Some(value) = orb.get(name) {
+                        match value.as_f64().filter(|n| n.is_finite() && (0.0..=1.0).contains(n)) {
+                            Some(n) => *field = OrbLook::rounded(n as f32),
+                            None => problems.push(format!("the orb's {name} position {value} is not a number from 0 to 1, so the corner is used")),
+                        }
+                    }
+                }
+                if let Some(value) = orb.get("size") {
+                    match value.as_str().and_then(OrbSize::parse) {
+                        Some(size) => settings.orb.size = size,
+                        None => problems.push(format!("the orb size {value} is not small, medium or large, so medium is used")),
+                    }
+                }
+            }
+            Some(_) => problems.push("the orb setting is not an object, so the defaults are used".into()),
         }
         if let Some(keys) = root.get("hotkeys").and_then(Value::as_object) {
             let mut take = |field: &mut String, name: &str, default: &str, chord: bool| {
@@ -422,6 +621,11 @@ impl Settings {
         root.insert("version".into(), json!(VERSION));
         root.insert("hotkeys".into(), json!({"orb": self.hotkeys.orb, "yes": self.hotkeys.yes, "no": self.hotkeys.no, "talk": self.hotkeys.talk}));
         root.insert("sounds".into(), json!({"enabled": self.sounds.enabled, "volume": self.sounds.volume}));
+        root.insert("audio".into(), json!({"mic": self.audio.mic, "speaker": self.audio.speaker, "volume": self.audio.volume}));
+        root.insert("voice".into(), json!({"wake_word": self.voice.wake_word, "keep_listening": self.voice.keep_listening}));
+        if self.orb != OrbLook::default() {
+            root.insert("orb".into(), self.orb.to_value());          // only when it was changed: the file Orbit reads stays as it was
+        }
         root.insert("commands".into(), Value::Array(self.commands.iter().map(Command::to_value).collect()));
         let mut text = serde_json::to_string_pretty(&Value::Object(root)).unwrap_or_default();
         text.push('\n');
@@ -527,6 +731,7 @@ pub(crate) mod tests {
     const PHRASES: &str = include_str!("../../tests/fixtures/phrases.json");
     const TALK: &str = include_str!("../../tests/fixtures/talk_keys.json");
     const SOUNDS: &str = include_str!("../../tests/fixtures/sounds.json");
+    const AUDIO: &str = include_str!("../../tests/fixtures/audio_voice.json");
 
     fn parsed(json: &str) -> (Settings, Vec<String>) {
         Settings::parse(&serde_json::from_str(json).unwrap())
@@ -585,6 +790,8 @@ pub(crate) mod tests {
         );
         assert!(!s.commands[1].enabled);
         assert_eq!(s.sounds, Sounds { enabled: false, volume: 65 });
+        assert_eq!(s.audio, Audio { mic: "USB Microphone".into(), speaker: String::new(), volume: 89 });
+        assert_eq!(s.voice, VoiceOptions { wake_word: true, keep_listening: false });
         assert_eq!(s.to_json(), EXAMPLE, "the window writes exactly the file the example is");
     }
 
@@ -613,6 +820,84 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_speaking_volume_is_read_the_way_orbit_reads_it() {
+        let cases: Value = serde_json::from_str(AUDIO).unwrap();
+        for case in cases["volume"].as_array().unwrap() {
+            let (s, problems) = parsed(&json!({"audio": {"volume": case["in"]}}).to_string());
+            match case.get("out") {
+                Some(out) => assert_eq!((s.audio.volume, problems.len()), (out.as_u64().unwrap() as u8, 0), "{}", case["in"]),
+                None => assert_eq!((s.audio.volume, problems.len()), (DEFAULT_SPEAKING_VOLUME, 1), "{}", case["in"]),
+            }
+        }
+        assert_eq!(cases["default_volume"], DEFAULT_SPEAKING_VOLUME);
+    }
+
+    #[test]
+    fn a_device_name_is_read_the_way_orbit_reads_it() {
+        let cases: Value = serde_json::from_str(AUDIO).unwrap();
+        for name in ["mic", "speaker"] {
+            for case in cases["device"].as_array().unwrap() {
+                let (s, problems) = parsed(&json!({"audio": {name: case["in"]}}).to_string());
+                let got = if name == "mic" { &s.audio.mic } else { &s.audio.speaker };
+                match case.get("out") {
+                    Some(out) => assert_eq!((got.as_str(), problems.len()), (out.as_str().unwrap(), 0), "{name}: {}", case["in"]),
+                    None => assert_eq!((got.as_str(), problems.len()), ("", 1), "{name}: {}", case["in"]),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_voice_switch_is_read_the_way_orbit_reads_it() {
+        let cases: Value = serde_json::from_str(AUDIO).unwrap();
+        for name in ["wake_word", "keep_listening"] {
+            for case in cases["flag"].as_array().unwrap() {
+                let (s, problems) = parsed(&json!({"voice": {name: case["in"]}}).to_string());
+                let got = if name == "wake_word" { s.voice.wake_word } else { s.voice.keep_listening };
+                assert_eq!((got, problems.len()), (case.get("out").map_or(true, |o| o.as_bool().unwrap()), usize::from(case.get("out").is_none())), "{name}: {}", case["in"]);
+            }
+        }
+    }
+
+    #[test]
+    fn no_audio_or_voice_entry_means_the_way_orbit_always_worked_and_a_bad_one_is_ignored_with_a_reason() {
+        let (s, problems) = parsed("{}");
+        assert_eq!((s.audio, s.voice, problems.len()), (Audio::default(), VoiceOptions::default(), 0));
+        for key in ["audio", "voice"] {
+            for raw in ["true", "5", "\"x\"", "[]", "null"] {
+                let (s, problems) = parsed(&format!(r#"{{"{key}":{raw},"hotkeys":{{"talk":"f8"}}}}"#));
+                assert_eq!(s.hotkeys.talk, "f8", "{key} {raw}");
+                assert!(problems[0].contains("not an object"), "{key} {raw}: {problems:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_audio_and_voice_are_written_back_with_the_rest_and_nothing_else_is_lost() {
+        let (mut s, _) = parsed(r#"{"theme":"dark","audio":{"mic":"  USB  Mic ","volume":12.5}}"#);
+        s.voice.wake_word = false;
+        let back: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(back["audio"], json!({"mic": "USB Mic", "speaker": "", "volume": 13}));
+        assert_eq!(back["voice"], json!({"wake_word": false, "keep_listening": true}));
+        assert_eq!(back["theme"], "dark");
+        assert_eq!(parsed(&s.to_json()).0, s);
+    }
+
+    #[test]
+    fn the_mouse_buttons_are_talk_keys_and_have_the_names_the_page_shows() {
+        let keys: Value = serde_json::from_str(TALK).unwrap();
+        let mouse = keys["mouse"].as_object().unwrap();
+        assert_eq!(mouse.len(), MOUSE_TALK.len());
+        for (name, label) in MOUSE_TALK {
+            assert!(mouse.contains_key(*name) && valid_talk_key(name) && is_mouse_talk(name) && !label.is_empty(), "{name}");
+            assert_eq!(talk_label(name), *label);
+        }
+        assert!(!is_mouse_talk("f9") && !valid_talk_key("mouse6") && !valid_talk_key("Mouse1"));
+        let (s, problems) = parsed(r#"{"hotkeys":{"talk":"mouse5"}}"#);
+        assert_eq!((s.hotkeys.talk.as_str(), problems.len()), ("mouse5", 0));
+    }
+
+    #[test]
     fn no_sounds_entry_means_a_quiet_default_that_is_on() {
         let (s, problems) = parsed("{}");
         assert_eq!(s.sounds, Sounds { enabled: true, volume: 40 });
@@ -637,6 +922,62 @@ pub(crate) mod tests {
         let back: Value = serde_json::from_str(&s.to_json()).unwrap();
         assert_eq!(back["sounds"], json!({"enabled": false, "volume": 13}));
         assert_eq!(back["theme"], "dark");
+    }
+
+    // ---- the orb ----
+
+    #[test]
+    fn no_orb_entry_means_the_corner_at_the_middle_size_and_the_default_writes_nothing() {
+        let (s, problems) = parsed("{}");
+        assert_eq!(s.orb, OrbLook { x: 1.0, y: 1.0, size: OrbSize::Medium });
+        assert!(problems.is_empty());
+        let back: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert!(back.get("orb").is_none(), "an untouched orb leaves the file as it was");
+    }
+
+    #[test]
+    fn the_orbs_place_and_size_are_read_and_written_back() {
+        let (s, problems) = parsed(r#"{"orb":{"x":0.25,"y":0.6666,"size":"large"}}"#);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(s.orb, OrbLook { x: 0.25, y: 0.667, size: OrbSize::Large }, "kept to three decimals");
+        let back: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(back["orb"], json!({"x": 0.25, "y": 0.667, "size": "large"}));
+        assert_eq!(parsed(&s.to_json()).0, s, "what is written reads back the same");
+    }
+
+    #[test]
+    fn each_part_of_the_orb_stands_alone_and_a_bad_one_keeps_its_default() {
+        let (s, problems) = parsed(r#"{"orb":{"x":0.3}}"#);
+        assert_eq!((s.orb, problems.len()), (OrbLook { x: 0.3, y: 1.0, size: OrbSize::Medium }, 0));
+        for bad in ["-0.1", "1.5", "\"left\"", "null", "true"] {
+            let (s, problems) = parsed(&format!(r#"{{"orb":{{"x":{bad},"y":0.5,"size":"huge"}}}}"#));
+            assert_eq!(s.orb, OrbLook { x: 1.0, y: 0.5, size: OrbSize::Medium }, "{bad}");
+            assert_eq!(problems.len(), 2, "{bad}: {problems:?}");
+        }
+        for raw in ["true", "5", "\"corner\"", "[]", "null"] {
+            let (s, problems) = parsed(&format!(r#"{{"orb":{raw}}}"#));
+            assert_eq!(s.orb, OrbLook::default(), "{raw}");
+            assert!(problems[0].contains("not an object"), "{raw}: {problems:?}");
+        }
+    }
+
+    #[test]
+    fn the_orb_is_written_with_the_rest_and_nothing_else_is_lost() {
+        let (mut s, _) = parsed(r#"{"theme":"dark","sounds":{"enabled":false,"volume":10}}"#);
+        s.orb = OrbLook::default().at(0.5, 0.25);
+        let back: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!((back["theme"].as_str(), back["orb"]["x"].as_f64(), back["sounds"]["volume"].as_u64()), (Some("dark"), Some(0.5), Some(10)));
+        assert_eq!(back.as_object().unwrap().keys().filter(|k| *k == "orb").count(), 1);
+    }
+
+    #[test]
+    fn the_sizes_are_in_order_and_have_names_the_file_can_use() {
+        let widths: Vec<f32> = OrbSize::ALL.iter().map(|s| s.diameter()).collect();
+        assert!(widths.windows(2).all(|w| w[0] < w[1]) && OrbSize::default().diameter() == 112.0);
+        for size in OrbSize::ALL {
+            assert_eq!(OrbSize::parse(size.name()), Some(size));
+        }
+        assert_eq!(OrbSize::parse("Medium"), None);
     }
 
     // ---- keys ----
@@ -670,6 +1011,7 @@ pub(crate) mod tests {
         assert_eq!(pretty("ctrl+esc"), "Ctrl + Esc");
         assert_eq!(talk_label("ctrl_r"), "Right Ctrl");
         assert_eq!(talk_label("page_up"), "page up");
+        assert_eq!((talk_label("f9"), talk_label("f20"), talk_label("z")), ("F9".to_owned(), "F20".to_owned(), "Z".to_owned()));
     }
 
     // ---- reading ----

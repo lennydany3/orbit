@@ -642,3 +642,35 @@ def test_when_you_carry_on_after_a_pause_the_early_result_is_thrown_away():
     sim.stop_when = lambda: loop.turns == 1
     loop.run()
     assert loop.agent.calls[-1] == "open spotify" and loop.test_transcriber.calls == 2
+
+
+class WorkingAgent(ScriptedAgent):
+    """An agent that has already DONE the click (actions_done = 1) but is still busy (a slow model round-trip to write its reply)."""
+
+    def __init__(self, reply, wait_for, actions_done):
+        super().__init__(reply, wait_for)
+        self.actions_done = actions_done
+
+
+def _busy_after_the_action(actions_done, release_after_s=4.0):
+    release = threading.Event()
+    sim, loop, keys, tts, _, out = build("click the play button", agent=WorkingAgent("clicked the play button", release, actions_done),
+                                         rng=random.Random(0))
+    user_holds_key_and_talks(sim, loop, keys)
+    sim.when(lambda: loop.st.is_(State.THINKING) and loop.st.elapsed >= release_after_s, release.set)
+    sim.stop_when = lambda: loop.turns == 1
+    loop.run()
+    return tts
+
+
+def test_no_one_moment_filler_once_the_action_has_already_happened():
+    """The click was done at 1 s; the model's extra round-trip made the turn 4 s long. "Let me check." now would be a lie, and it
+    would hold back the real reply until it finished."""
+    tts = _busy_after_the_action(actions_done=1)
+    assert tts.spoken == ["Clicked the play button."]
+
+
+def test_a_filler_is_still_said_while_nothing_has_happened_yet():
+    tts = _busy_after_the_action(actions_done=0)
+    from orbit.voice.phrasing import FILLERS_FIRST
+    assert len(tts.spoken) == 2 and tts.spoken[0] in FILLERS_FIRST

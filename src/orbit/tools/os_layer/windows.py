@@ -26,6 +26,10 @@ user32.IsZoomed.argtypes = [wintypes.HWND]
 user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
 user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_void_p]
+user32.WindowFromPoint.restype = wintypes.HWND
+user32.WindowFromPoint.argtypes = [wintypes.POINT]
+user32.GetAncestor.restype = wintypes.HWND
+user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
 dwmapi.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
 kernel32.GetConsoleWindow.restype = wintypes.HWND
 kernel32.OpenProcess.restype = wintypes.HANDLE
@@ -104,6 +108,12 @@ def list_windows() -> list[Window]:
 
     user32.EnumWindows(_WNDENUMPROC(visit), 0)
     return found
+
+
+def window_at(x: int, y: int) -> Window | None:
+    """The top-level window under a screen position (what a person points at), or None for the desktop."""
+    hwnd = user32.GetAncestor(user32.WindowFromPoint(wintypes.POINT(int(x), int(y))), 2)       # 2 = GA_ROOT
+    return next((w for w in list_windows() if w.hwnd == int(hwnd or 0)), None)
 
 
 def foreground_window() -> Window | None:

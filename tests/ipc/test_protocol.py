@@ -105,3 +105,55 @@ def test_an_oversized_command_is_refused_before_it_is_parsed():
         parse_command('{"type":"confirm","id":1,"yes":true,"pad":"' + "x" * protocol.MAX_COMMAND_BYTES + '"}')
     with pytest.raises(ProtocolError):
         parse_command(b"\xff\xfe")
+
+
+# ------------------------------------------------------------------ the second command: play one of the saved playlists
+def test_the_play_button_is_understood():
+    assert parse_command('{"type":"play","id":"p-3f9a1c2b"}') == protocol.PlayRequest("p-3f9a1c2b")
+
+
+@pytest.mark.parametrize("raw", [
+    '{"type":"play"}', '{"type":"play","id":""}', '{"type":"play","id":3}', '{"type":"play","id":"a b"}', '{"type":"play","id":"x/../y"}',
+    '{"type":"play","id":"' + "x" * 41 + '"}', '{"type":"play","query":"anything on spotify"}', '{"type":"play","uri":"spotify:playlist:abc"}',
+])
+def test_a_play_request_names_a_saved_playlist_by_its_id_and_nothing_else(raw):
+    with pytest.raises(ProtocolError):
+        parse_command(raw)
+
+
+def test_a_reminder_message_is_plain_json_and_clipped():
+    msg = protocol.reminder("r-1", "Call mom", "Reminder: Call mom.")
+    assert msg == {"type": "reminder", "id": "r-1", "title": "Call mom", "text": "Reminder: Call mom."}
+    assert len(protocol.reminder("r-1", "x" * 9000, "y")["title"]) <= protocol.MAX_TEXT_CHARS
+
+
+# ------------------------------------------------------------------ the third command: stop a ringing alarm
+def test_the_stop_button_is_understood():
+    assert parse_command('{"type":"dismiss","id":"r-3f9a1c2b"}') == protocol.DismissRequest("r-3f9a1c2b")
+
+
+@pytest.mark.parametrize("raw", [
+    '{"type":"dismiss"}', '{"type":"dismiss","id":""}', '{"type":"dismiss","id":3}', '{"type":"dismiss","id":"a b"}', '{"type":"dismiss","id":"x/../y"}',
+    '{"type":"dismiss","id":"' + "x" * 41 + '"}', '{"type":"dismiss","all":true}',
+])
+def test_a_dismiss_names_the_reminder_that_is_ringing_by_its_id_and_nothing_else(raw):
+    with pytest.raises(ProtocolError):
+        parse_command(raw)
+
+
+def test_the_error_for_an_unknown_command_lists_the_three_there_are():
+    with pytest.raises(ProtocolError, match="confirm, play, dismiss"):
+        parse_command('{"type":"shutdown"}')
+
+
+def test_a_ringing_reminder_says_so_and_what_kind_it_is_and_a_plain_one_is_unchanged():
+    assert protocol.reminder("r-1", "Pasta", "Your timer is up.", "timer", True) == \
+        {"type": "reminder", "id": "r-1", "title": "Pasta", "text": "Your timer is up.", "kind": "timer", "ringing": True}
+    assert protocol.reminder("r-1", "Wake up", "x", "alarm") == {"type": "reminder", "id": "r-1", "title": "Wake up", "text": "x", "kind": "alarm"}
+    assert protocol.reminder("r-1", "Stretch", "x", "reminder", True)["ringing"] is True and "kind" not in protocol.reminder("r-1", "Stretch", "x", "reminder", True)
+    assert protocol.reminder("r-1", "Stretch", "x") == {"type": "reminder", "id": "r-1", "title": "Stretch", "text": "x"}
+    assert protocol.reminder("r-1", "t", "x", "bogus") == {"type": "reminder", "id": "r-1", "title": "t", "text": "x"}
+
+
+def test_the_alarm_stopped_message():
+    assert protocol.alarm_stopped("r-1", "voice") == {"type": "alarm_stopped", "id": "r-1", "by": "voice"}

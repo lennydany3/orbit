@@ -8,6 +8,8 @@ or drops that one entry, and `Settings.problems` says what was ignored.
       "version": 1,
       "hotkeys": {"orb": "ctrl+alt+o", "yes": "ctrl+alt+y", "no": "ctrl+alt+n", "talk": "ctrl_r"},
       "sounds": {"enabled": true, "volume": 40},
+      "audio": {"mic": "", "speaker": "", "volume": 100},
+      "voice": {"wake_word": true, "keep_listening": true},
       "commands": [
         {"id": "work", "name": "Work mode", "enabled": true, "phrases": ["work mode"],
          "steps": [{"kind": "open", "target": "Spotify"}, {"kind": "keys", "keys": "win+shift+s"},
@@ -15,7 +17,11 @@ or drops that one entry, and `Settings.problems` says what was ignored.
       ]
     }
 
-The window checks the hotkey chords itself (orb, yes, no); here only the hold-to-talk key and the commands are checked.
+The window checks the hotkey chords itself (orb, yes, no); here only the hold-to-talk key, the audio and voice choices and the commands
+are checked. The hold-to-talk key is a keyboard key (`ctrl_r`, `f9`) or a mouse button (`mouse1` left, `mouse2` right, `mouse3` middle,
+`mouse4` back, `mouse5` forward). `audio` says which microphone and speaker to use (the device's name, or empty for the Windows default)
+and how loud Orbit's voice is (0 to 100); `voice` says whether the wake word is listened for and whether Orbit keeps listening for a
+moment after it has replied.
 The window plays the orb's sounds, so `sounds` is the window's own business; it is read here only so the file is checked the same
 way on both sides (`tests/fixtures/sounds.json` is read by both).
 """
@@ -45,10 +51,16 @@ MAX_WAIT_S = 30.0
 
 STEP_KINDS = ("open", "keys", "type", "wait")
 
+# Mouse buttons that can be held to talk, with the name pynput gives each (voice/hotkey.py listens for them).
+MOUSE_TALK = {"mouse1": "left", "mouse2": "right", "mouse3": "middle", "mouse4": "x1", "mouse5": "x2"}
+
 # Hold-to-talk keys, by their pynput names (voice/hotkey.py turns these into real keys). Or any single character.
 TALK_KEYS = frozenset(
     ["ctrl_r", "ctrl_l", "alt_r", "alt_l", "alt_gr", "shift_r", "shift_l", "caps_lock", "scroll_lock", "num_lock", "pause", "insert",
-     "home", "end", "page_up", "page_down", "menu", "print_screen", "tab", "space"] + [f"f{n}" for n in range(1, 25)])
+     "home", "end", "page_up", "page_down", "menu", "print_screen", "tab", "space"] + [f"f{n}" for n in range(1, 25)] + list(MOUSE_TALK))
+
+DEFAULT_SPEAKING_VOLUME = 100      # Orbit's own voice: full, and the Windows volume is yours to turn down
+MAX_DEVICE = 200
 
 
 def path() -> Path:
@@ -100,11 +112,26 @@ class Sounds:
         return self.enabled and self.volume > 0
 
 
+@dataclass(frozen=True)
+class Audio:
+    mic: str = ""                                  # the microphone's name (or part of it); empty = the Windows default
+    speaker: str = ""                              # the same for the speaker Orbit talks through
+    volume: int = DEFAULT_SPEAKING_VOLUME          # how loud Orbit's voice is, 0 to 100
+
+
+@dataclass(frozen=True)
+class VoiceOptions:
+    wake_word: bool = True                         # listen for "hey orbit" (off: hold the talk key only)
+    keep_listening: bool = True                    # stay ready for a moment after a reply, with no wake word needed
+
+
 @dataclass
 class Settings:
     hotkeys: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_HOTKEYS))
     commands: list[Command] = field(default_factory=list)
     sounds: Sounds = field(default_factory=Sounds)
+    audio: Audio = field(default_factory=Audio)
+    voice: VoiceOptions = field(default_factory=VoiceOptions)
     problems: list[str] = field(default_factory=list)     # what was ignored, and why
 
     @property
@@ -150,6 +177,53 @@ def parse_sounds(raw: object, problems: list[str]) -> Sounds:
         else:
             volume = parsed
     return Sounds(enabled, volume)
+
+
+def parse_device(value: object) -> str | None:
+    """A device name as the file may write it: text up to MAX_DEVICE characters, trimmed ("" = the Windows default). Else None."""
+    if not isinstance(value, str) or len(value) > MAX_DEVICE * 4:
+        return None
+    text = " ".join(value.split())
+    return text if len(text) <= MAX_DEVICE else None
+
+
+def parse_audio(raw: object, problems: list[str]) -> Audio:
+    """The `audio` entry -> the audio choices, with anything wrong in it left at its default and noted in `problems`."""
+    if not isinstance(raw, dict):
+        problems.append("the audio setting is not an object, so the defaults are used")
+        return Audio()
+    mic, speaker, volume = "", "", DEFAULT_SPEAKING_VOLUME
+    for name in ("mic", "speaker"):
+        if name in raw:
+            device = parse_device(raw[name])
+            if device is None:
+                problems.append(f"the {name} {raw[name]!r} is not a device name, so the Windows default is used")
+            elif name == "mic":
+                mic = device
+            else:
+                speaker = device
+    if "volume" in raw:
+        parsed = parse_volume(raw["volume"])
+        if parsed is None:
+            problems.append(f"the speaking volume {raw['volume']!r} is not a number from 0 to 100, so {DEFAULT_SPEAKING_VOLUME} is used")
+        else:
+            volume = parsed
+    return Audio(mic, speaker, volume)
+
+
+def parse_voice(raw: object, problems: list[str]) -> VoiceOptions:
+    """The `voice` entry -> the voice options, each one on unless it is plainly false."""
+    if not isinstance(raw, dict):
+        problems.append("the voice setting is not an object, so the defaults are used")
+        return VoiceOptions()
+    flags = {"wake_word": True, "keep_listening": True}
+    for name in flags:
+        if name in raw:
+            if isinstance(raw[name], bool):
+                flags[name] = raw[name]
+            else:
+                problems.append(f"the voice {name.replace('_', ' ')} switch {raw[name]!r} is not true or false, so on is used")
+    return VoiceOptions(**flags)
 
 
 def parse_step(raw: object) -> tuple[Step | None, str]:
@@ -243,6 +317,10 @@ def parse(data: object) -> Settings:
                 settings.hotkeys[key] = value.strip().lower()
     if "sounds" in data:
         settings.sounds = parse_sounds(data["sounds"], settings.problems)
+    if "audio" in data:
+        settings.audio = parse_audio(data["audio"], settings.problems)
+    if "voice" in data:
+        settings.voice = parse_voice(data["voice"], settings.problems)
     raw_commands = data.get("commands")
     if isinstance(raw_commands, list):
         seen: dict[str, str] = {}

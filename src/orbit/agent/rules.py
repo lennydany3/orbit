@@ -92,8 +92,8 @@ def _mon(m: re.Match) -> str:
     return re.sub(r"\s+window$", "", m["mon"].strip().lower())
 _ACTIONS = {"max": "maximize", "min": "minimize", "res": "restore"}
 _MOVE_TO_MONITOR = re.compile(
-    rf"^(?:move|put|send|shift|drag|take|bring)\s+(?:the\s+|my\s+)?(?!(?:it|that|this|them)\b)(?P<t>[\w .+&'-]+?)(?:\s+(?:app|window))?\s+"
-    rf"(?:to|onto|on|over to)\s+(?:the\s+|my\s+)?(?P<mon>{_MON})$", re.I)
+    rf"^(?:move|put|send|shift|drag|take|bring)\s+(?:back\s+)?(?:the\s+|my\s+)?(?!(?:it|that|this|them)\b)(?P<t>[\w .+&'-]+?)(?:\s+back)?(?:\s+(?:app|window))?\s+"
+    rf"(?:to|onto|on|over to)\s+(?:the\s+|my\s+)?(?P<mon>{_MON})$", re.I)           # ("move back the brave to primary", "move brave back to primary")
 _SNAP = re.compile(
     r"^(?:snap|put|move|send|dock)\s+(?:the\s+|my\s+)?(?!(?:it|that|this|them)\b)(?P<t>[\w .+&'-]+?)(?:\s+(?:app|window))?\s+(?:to|on|onto|at)\s+(?:the\s+)?"
     r"(?P<side>left|right|top|bottom)(?: half| side| of the screen)?$", re.I)
@@ -218,8 +218,8 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
     # "show brave", "bring up spotify": bring an app to the front (os_open_app focuses one that is already open, opens it if not).
     # Never "show me ..." or the lists and readings people also ask for ("show tabs", "show the volume").
     ("show-app", re.compile(
-        r"^(?:show|bring up|pull up|take me to|switch over to|jump to|head to)\s+(?:the\s+|my\s+)?(?!(?:the|my|me|us|it|that|this|them|all|everything|something|anything|a|an|some|what|how|tabs?|windows?|"
-        r"devices?|volume|time|date|clock|battery|music|songs?|playing|results?)\b)(?P<name>[\w+&'-]+(?: [\w+&'-]+){0,2}?)(?: (?:app|window))?$", re.I),
+        r"^(?:show|bring up|pull up|take me to|switch over to|jump to|head to|go to)\s+(?:the\s+|my\s+)?(?!.*\b(?:home ?page|home|main page)\b)(?!(?:the|my|me|us|it|that|this|them|all|everything|something|anything|a|an|some|what|how|tabs?|windows?|"
+        r"devices?|volume|time|date|clock|battery|music|songs?|playing|results?|top|bottom|end|start|beginning|home|homepage|back|forward|next|previous|main|first|last)\b)(?P<name>[\w+&'-]+(?: [\w+&'-]+){0,2}?)(?: (?:app|window))?$", re.I),
      lambda m: ("browser_open", {"url": _site_url(m["name"].lower(), False)}) if m["name"].lower() in SITES
      else ("os_open_app", {"name": m["name"].strip().title()})),
     # "bring brave to the front": the app is named first this time
@@ -232,7 +232,7 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
     ("type-into-box", re.compile(
         rf"^{_TYPE_VERB}\s+(?P<text>.+?)\s+(?:in|into|in to|inside|on)\s+(?:the\s+|that\s+)?(?P<box>(?:\w+\s+){{0,2}}(?:box|bar|field|input|textbox))(?P<go>\s+{_PRESS_ENTER})?$", re.I),
      lambda m: ("os_type", {"text": _clean_text(m["text"]), "into": _box_name(m["box"]), **({"enter": True} if m["go"] else {})})),
-    ("type", re.compile(rf"^{_TYPE_VERB}\s+(?P<text>.+?)(?P<go>\s+{_PRESS_ENTER})?$", re.I),
+    ("type", re.compile(rf"^(?:type|write|input|key in|fill in|enter(?!\s+(?:the\s+)?(?:video\s+)?full ?screen\b))\s+(?P<text>.+?)(?P<go>\s+{_PRESS_ENTER})?$", re.I),     # ("enter full screen" is not text)
      lambda m: ("os_type", {"text": _clean_text(m["text"]), **({"enter": True} if m["go"] else {})})),
     ("scroll-edge", re.compile(r"^(?:please\s+)?(?:scroll|go|jump|move|take me|head|get)\s+(?:all the way\s+)?(?:back\s+)?(?:up\s+|down\s+)?(?:to\s+)?(?:the\s+)?"
                                r"(?P<edge>top|bottom|end|start|beginning)(?:\s+of\s+(?:the\s+)?(?:page|results?|screen|list|site))?$|^(?:scroll|go)\s+all the way\s+(?P<way>down|up)$", re.I),
@@ -263,9 +263,9 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
      lambda m: ("browser_youtube_play", {"query": m["q"]})),
     ("youtube-search", re.compile(r"^search\s+(?:for\s+)?(?P<q>.+?)\s+on youtube$", re.I),
      lambda m: ("browser_open", {"url": "https://www.youtube.com/results?search_query=" + quote_plus(m["q"])})),
-    ("fullscreen-off", re.compile(r"^(?:exit|leave|close) full ?screen$", re.I),
+    ("fullscreen-off", re.compile(r"^(?:exit|leave|close|stop|turn off|get out of|come out of)\s+(?:the\s+)?(?:video\s+)?full ?screen(?:\s+(?:mode|view))?$", re.I),
      lambda m: ("browser_fullscreen", {"on": False})),
-    ("fullscreen-on", re.compile(r"^(?:go |make (?:it|the video) )?full ?screen(?: (?:it|the video))?$", re.I),
+    ("fullscreen-on", re.compile(r"^(?:go |make (?:it|the video) |enter |turn on |switch to )?(?:the\s+)?full ?screen(?: (?:it|the video|mode|view))?$", re.I),
      lambda m: ("browser_fullscreen", {"on": True})),
     ("search-in-box", re.compile(r"^(?:search|look up)\s+(?:for\s+)?(?P<q>.+?)\s+(?:in|on|using|with|into)\s+(?:the\s+)?(?:page'?s?\s+)?search\s+(?:box|bar|field)$", re.I),
      lambda m: ("os_type", {"text": _clean_text(m["q"]), "into": "search", "enter": True})),
@@ -300,7 +300,7 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
      lambda m: ("os_arrange_window", {"title": m["t"].strip().title(), "action": _ACTIONS[m["act"][:3].lower()]})),
     ("arrange-snap", _SNAP, lambda m: ("os_arrange_window", {"title": m["t"].strip().title(), "action": m["side"].lower()})),
     # Quitting an app completely (tray apps keep running after their window closes). Asks first: it can lose unsaved work.
-    ("quit-app", re.compile(r"^(?:please )?(?:quit|exit|kill|terminate|force quit|force close|shut ?down)\s+(?:the )?(?!(?:it|that|this|them|window|app|tab|both|all|everything|orbit|full ?screen)$)(?P<t>[\w .+&'-]+?)(?: (?:app|completely|fully|for good|process))?$", re.I),
+    ("quit-app", re.compile(r"^(?:please )?(?:quit|exit|kill|terminate|force quit|force close|shut ?down)\s+(?:the )?(?!(?:it|that|this|them|window|app|tab|both|all|everything|orbit|(?:video )?full ?screen(?: mode| view)?)$)(?P<t>[\w .+&'-]+?)(?: (?:app|completely|fully|for good|process))?$", re.I),
      lambda m: ("os_quit_app", {"name": m["t"].strip()})),
     ("quit-app-completely", re.compile(r"^(?:please )?close\s+(?:the )?(?P<t>[\w .+&'-]+?)\s+(?:completely|fully|entirely|totally|for good)$", re.I),
      lambda m: ("os_quit_app", {"name": m["t"].strip()})),
@@ -334,7 +334,7 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
 # Polite filler a person puts around a command: "ok can you close the speed test please?", "Uh, could you open Brave?",
 # "Orbit, I want you to open Spotify". Spoken hesitations, Orbit's own name, and the frames that turn an order into a question.
 _SPEECH_FILLER = (r"u+h+|u+m+|e+r+m*|a+h+|h+m+|m{2,}|o+h+|well|actually|basically|alright|ok(?:ay)?|yo+|yeah|yep|hey|hi|bro|dude|so|now|then|just|"
-                  r"please|pls|orbit")
+                  r"please|pls|orbit|no+|nope|nah|but|also|wait|listen|i mean")      # ("No, no, move back the Brave": a correction, then the command)
 _ASK_FRAME = (r"(?:do|would)\s+you\s+mind|(?:can|could|would|will)\s+(?:you|u)(?:\s+(?:possibly|please|kindly|just))*|(?:i|we)\s+(?:want|need|have|got|gotta)\s+(?:you\s+)?to|(?:i|we)\s+(?:wanna|gotta)|"
               r"i(?:'d|\s+would)\s+(?:like|love)\s+(?:you\s+)?to|go\s+ahead\s+and|how\s+about\s+you|why\s+don'?t\s+you|let'?s|you\s+(?:can|could|should)(?:\s+just)?|kindly")
 _FILLER_HEAD = re.compile(rf"^(?:(?:{_SPEECH_FILLER}|{_ASK_FRAME})\b[\s,.\u2026!?-]*)+", re.I)

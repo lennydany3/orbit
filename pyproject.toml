@@ -38,6 +38,9 @@ orbit = "orbit.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"orbit.voice" = ["alarms/*.wav", "alarms/*.md"]      # the reminder and timer sounds
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

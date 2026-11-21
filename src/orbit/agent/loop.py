@@ -9,10 +9,13 @@ from pydantic import ValidationError
 from .. import config
 from .. import visual
 from ..llm.base import LLM, LLMError
+from ..logging_setup import redact
 from ..tools.base import Registry, ToolResult
 from ..tools.os_layer import symbols
-from . import context, friend, rescue, rules
+from ..voice import farewell
+from . import context, friend, rescue, rules, screen_help
 from . import custom as custom_commands
+from . import personal as personal_mod
 from .router import Log, Router
 from .safety import Safety
 
@@ -29,6 +32,8 @@ SYSTEM_PROMPT = (
     "device or app name as the name (never extra words like a volume). "
     "Earlier messages in this chat are context: use them to understand words like 'it', 'that' or 'again'. "
     "When the task is done, or if no tool fits, answer in one short sentence. "
+    "After a tool succeeded, say plainly what you did in under ten words (for example \"Clicked the play button.\" or \"Moved Brave to the "
+    "primary monitor.\"). Say it once. Never answer with \"let me check\", \"one moment\" or \"working on it\" after the work is already done. "
     "The user types casually and loosely: work out what they mean (\"echo\" = the Echo speaker in the facts, \"the notes\" = "
     "the Notepad window) and use the exact names from the facts. "
     "Examples: \"move the music to echo\" -> api_spotify_transfer(device=<exact device name>); "
@@ -58,6 +63,13 @@ _ACTION_VERBS = (
 _SHOW_AN_APP = re.compile(r"^(?:show(?!\s+(?:me|us)\b)|bring up|pull up|take me to|head to|jump to)\b", re.I)
 
 
+def collapse_repeats(text: str) -> str:
+    """"Home page opened.Home page opened." -> "Home page opened." (a model sometimes says the very same thing twice in a row)."""
+    plain = (text or "").strip()
+    again = re.fullmatch(r"(.{6,}?)(?:\s*\1)+", plain, re.S)
+    return again.group(1).strip() if again else plain
+
+
 def _is_action_request(text: str) -> bool:
     plain = rules.normalize(text)
     first = plain.split(None, 1)[0].lower() if plain.split() else ""
@@ -74,7 +86,7 @@ _WORKING_LABELS = {
     "browser_youtube_play": "Playing the video\u2026", "browser_fullscreen": "Going fullscreen\u2026", "browser_close_tabs": "Closing tabs\u2026",
     "browser_switch_tab": "Switching tabs\u2026", "browser_page_info": "Reading the page\u2026",
     "os_click": "Clicking\u2026", "os_type": "Typing\u2026", "os_scroll": "Scrolling\u2026", "os_open_app": "Opening the app\u2026",
-    "os_read_window": "Reading the window\u2026",
+    "os_read_window": "Reading the window\u2026", "os_look_at_screen": "Looking at your screen\u2026",
     # (moving, arranging and closing windows need no pill: the pointer carrying or pressing the window is the animation)
 }
 # "second" and "twice" are numbers too: an optional number you said in words was not invented
@@ -101,8 +113,10 @@ class Agent:
         chat_llm: LLM | None = None,
         friend_mode: bool = config.FRIEND_MODE,
         custom: custom_commands.CustomCommands | None = None,
+        personal: personal_mod.Personal | None = None,
     ):
         self.custom = custom                  # the user's own commands from the Settings page (None = none)
+        self.personal = personal              # reminders, notes, tasks and saved playlists, said in plain words (None = none)
         self.llm = llm
         self.chat_llm = chat_llm or llm       # the model for friend-mode conversation (a warmer temperature than the command model)
         self.friend_mode = friend_mode
@@ -130,6 +144,7 @@ class Agent:
         self.recent_subjects: list[str] = []  # everything opened or focused lately that is still open: "close both"
         self._after_field_click = False       # the last thing done was putting the cursor in a text box: typing replaces a search box's words
         self._next_part = ""                  # the next request of a multi-request sentence: "click the search" before "type cats" means the box
+        self.actions_done = 0                 # tools that succeeded during the current request (the voice does not say "one moment" after work is done)
 
     # ---- public ----
     def handle(self, text: str) -> str:
@@ -137,6 +152,7 @@ class Agent:
         start = time.perf_counter()
         self.last_kind, self.last_emotion = "action", "neutral"
         self._part_failed = False
+        self.actions_done = 0
         try:
             return self._handle(text)
         except LLMError as e:
@@ -145,10 +161,27 @@ class Agent:
         finally:
             self.log("time", f"request took {time.perf_counter() - start:.1f}s")
 
+    def play_saved(self, playlist_id: str) -> str:
+        """Plays one of the saved playlists (the Play button in the window). Like `handle`, but the request is already exact."""
+        self.last_kind, self.last_emotion = "action", "neutral"
+        self._part_failed = False
+        self.actions_done = 0
+        if self.personal is None:
+            self._part_failed = True
+            return "Saved playlists are not available."
+        said = self.personal.play_by_id(playlist_id, self)
+        self._part_failed = not said.ok
+        return said.text
+
     @property
     def last_failed(self) -> bool:
         """Did the last request end with a tool call that failed? (The voice face shows it as an error flash.)"""
         return self._part_failed
+
+    def end_conversation(self) -> None:
+        """The user said "nothing" / "leave it" / "talk later": the chat is over, so a vague follow-up is not part of it any more.
+        (What was said is still remembered for the session; `forget` clears that.)"""
+        self._in_chat = False
 
     def forget(self) -> None:
         """Clear the conversation memory."""
@@ -174,6 +207,7 @@ class Agent:
         return sum(len(m.get("content") or "") + len(str(m.get("tool_calls", ""))) for t in self.turns for m in t)
 
     def _finish(self, turn: list[dict], reply: str) -> str:
+        reply = collapse_repeats(reply)
         turn.append({"role": "assistant", "content": reply})
         self._remember(turn)
         return reply
@@ -192,6 +226,19 @@ class Agent:
             command = self.custom.match(text)
             if command is not None:
                 return self._run_custom(command, text)
+        if self.personal is not None:
+            said = self.personal.handle(text, self)
+            if said is not None:                      # "remind me ...", "note down ...", "add ... to my tasks", "play my gym playlist"
+                self.log("personal", f"handled without the model: '{text[:50]}'")
+                self.last_request = text
+                self._part_failed = not said.ok
+                return self._finish([{"role": "user", "content": text}], said.text)
+        goodbye = farewell.detect(text)
+        if goodbye is not None:                       # "nothing", "leave it", "let's talk later", "bye": the chat is over, no model call
+            self.end_conversation()
+            self.last_kind, self.last_emotion = "chat", "calm"
+            self.log("friend", f"you ended the conversation ({goodbye.kind})")
+            return self._finish([{"role": "user", "content": text}], farewell.reply(goodbye))
         # Several requests in one sentence ("open spotify and then tell me what is playing"): handle them one at a
         # time, each as its own small request (a rule if one fits, otherwise the model). A small model is far
         # more reliable on one thing at a time. Only done when every part starts like a request.
@@ -222,6 +269,8 @@ class Agent:
         """One request: a fast rule if one fits, otherwise the model."""
         user = [{"role": "user", "content": text}]
         was_chatting, self._in_chat = self._in_chat, False
+        if config.SCREEN_HELP and screen_help.asks_about_screen(rules.normalize(text)) and self.registry.get_exposed("os_look_at_screen"):
+            return self._finish(user, self._answer_about_screen(text))      # "what does this mean?": about what the user points at
         m = self._rule_for(text)
         if m:
             self.log("rule", f"'{m.rule}' matched, no model call")
@@ -275,11 +324,34 @@ class Agent:
         if not reply:
             emotion, reply = "caring", "Sorry, I zoned out for a second. Say that again?"
         self.log("friend", f"replied in {resp.elapsed_s:.1f}s, feeling {emotion}")
+        self._remember_chat(text, emotion, reply)
+        return reply
+
+    def _remember_chat(self, text: str, emotion: str, reply: str) -> None:
+        """Keep this exchange for the conversation (so "and why?" works next), within the size budget, and mark the reply as chat."""
         self.chat_turns.append([{"role": "user", "content": text}, {"role": "assistant", "content": f"[{emotion}] {reply}"}])
         del self.chat_turns[: max(0, len(self.chat_turns) - config.MAX_CHAT_TURNS)]
         while len(self.chat_turns) > 1 and sum(len(m["content"]) for p in self.chat_turns for m in p) > config.MAX_CHAT_CHARS:
             self.chat_turns.pop(0)
         self.last_kind, self.last_emotion, self._in_chat = "chat", emotion, True
+
+    # ---- questions about what is on the screen ----
+    def _answer_about_screen(self, text: str) -> str:
+        """"What does this mean?": read the window under the mouse pointer (title, what is under the pointer, selected text, the
+        text around it) and let the language model answer from that text. It sees text, never pictures, and secrets in it are masked."""
+        if self.llm is None:
+            self._part_failed = True
+            return "I need the language model to explain what is on your screen, and it is switched off (--no-llm)."
+        looked = self.execute("os_look_at_screen", {})
+        if not looked.ok:
+            return f"I could not look at the screen: {looked.error}"
+        block = screen_help.redact_secrets(redact(str(looked.data or "")))
+        where = getattr(self, "llm_description", "the language model")
+        self.log("screen", f"{looked.summary}; sending that text to {where} to answer")
+        resp = self.llm.chat(screen_help.build_messages(text, block), [])
+        reply = screen_help.tidy_reply(resp.content) or "I looked, but I could not tell what that is from the text on the screen."
+        self.log("screen", f"answered in {resp.elapsed_s:.1f}s")
+        self._remember_chat(text, "calm", reply)
         return reply
 
     def _rule_for(self, text: str) -> rules.RuleMatch | None:
@@ -415,7 +487,7 @@ class Agent:
             messages.append(assistant)
             turn.append(assistant)
             for call in resp.tool_calls:
-                result = self.execute(call.name, call.arguments)
+                result = self.execute(call.name, call.arguments, by_model=True)
                 tool_msg = {"role": "tool", "tool_name": call.name, "content": result.for_model()}
                 messages.append(tool_msg)
                 turn.append(tool_msg)
@@ -460,9 +532,11 @@ class Agent:
             return contextlib.nullcontext()
         return visual.working(label, lambda: _work_area(tool_name))
 
-    def execute(self, name: str, args: dict) -> ToolResult:
-        """validate -> print -> safety gate -> router (run + verify + retry + fallback)."""
+    def execute(self, name: str, args: dict, by_model: bool = False) -> ToolResult:
+        """validate -> print -> safety gate -> router (run + verify + retry + fallback). `by_model` = the language model asked for it."""
         tool = self.registry.get_exposed(name)
+        if tool is not None and by_model and not tool.model_visible:
+            tool = None                                  # a tool only Orbit's own code may run: to the model it does not exist
         if tool is None:
             hint = self.registry.closest_names(name)
             error = f"unknown tool '{name}'." + (f" Closest: {', '.join(hint)}." if hint else "")
@@ -506,6 +580,7 @@ class Agent:
         self._part_failed = not result.ok
         self._after_field_click = result.ok and name in ("browser_click", "os_click") and getattr(params, "kind", "any") == "field"
         if result.ok:
+            self.actions_done += 1
             if name.startswith("browser_"):
                 self.last_target_kind = "browser"
             elif name in ("os_open_app", "os_focus_window", "os_move_window", "os_arrange_window", "os_click"):

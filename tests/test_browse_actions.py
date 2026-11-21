@@ -547,3 +547,70 @@ def test_a_control_with_no_position_gets_no_pointer_animation(pointer):
 def test_the_centre_of_a_control(pointer):
     assert uia.center(uia.Control("x", "button", False, FakeElement((10, 10, 30, 50)))) == (20, 30)
     assert uia.center(uia.Control("x", "button", False, FakeElement((10, 10, 11, 11)))) is None
+
+
+# ======================================================================================== phrases from a real voice session
+@pytest.mark.parametrize("text, expected", [
+    ("Exit Full Screen Mode", ("browser_fullscreen", {"on": False})),
+    ("leave full screen", ("browser_fullscreen", {"on": False})),
+    ("Okay, go to the brave.", ("os_open_app", {"name": "Brave"})),
+    ("go to spotify", ("os_open_app", {"name": "Spotify"})),
+    ("No, no, move back the Brave to primary monitor.", ("os_move_window", {"title": "Brave", "monitor": "primary monitor"})),
+    ("move brave back to the primary monitor", ("os_move_window", {"title": "Brave", "monitor": "primary monitor"})),
+    ("Yeah, but click the home page.", ("browser_click", {"text": "home page"})),
+    ("No, no, can you click the video GTA 6 13 years of waiting?", ("browser_click", {"text": "video GTA 6 13 years of waiting"})),
+    ("enter full screen", ("browser_fullscreen", {"on": True})),
+    ("go to github home page", ("browser_go_to", {"url": "https://github.com"})),
+    ("go to the top", ("browser_scroll", {"direction": "top"})),
+])
+def test_phrases_from_a_real_session_hit_the_fast_rules(text, expected):
+    assert only(text) == [expected]
+
+
+def test_exiting_full_screen_never_asks_to_quit_an_app_called_full_screen_mode():
+    assert rules.match("Exit Full Screen Mode").tool == "browser_fullscreen"
+    exiting = rules.match("quit full screen mode")
+    assert exiting is None or exiting.tool != "os_quit_app"
+    assert rules.match("quit spotify").tool == "os_quit_app"                        # real quits still work
+
+
+def test_entering_full_screen_is_not_typing_but_typing_those_words_still_is():
+    assert rules.match("enter full screen").tool == "browser_fullscreen"
+    assert rules.match("type full screen").tool == "os_type"
+
+
+def test_a_correction_in_front_of_a_command_is_dropped():
+    for text in ("no, no, scroll down", "nope scroll down", "wait, scroll down", "but scroll down", "oh scroll down"):
+        assert only(text) == [("browser_scroll", {"direction": "down"})]
+
+
+# ======================================================================================== the agent's side of a good reply
+def test_a_model_that_repeats_itself_is_said_once():
+    from orbit.agent.loop import collapse_repeats
+    assert collapse_repeats("Home page opened.Home page opened.") == "Home page opened."
+    assert collapse_repeats("Clicked the play button. Clicked the play button.") == "Clicked the play button."
+    assert collapse_repeats("Volume set to 60%.") == "Volume set to 60%." and collapse_repeats("") == ""
+    assert collapse_repeats("No. No.") == "No. No."                                 # short repeats are real speech
+
+
+def test_the_agent_counts_the_actions_that_have_succeeded_this_turn(agent_and_seen):
+    make, seen = agent_and_seen
+    agent = make(ScriptedLLM())
+    agent.handle("open speedtest")
+    assert agent.actions_done == 1
+    agent.handle("click the first result")
+    assert agent.actions_done == 1                                                  # reset for every new request
+
+
+def test_a_failed_action_is_not_counted(logs):
+    reg = Registry()
+    reg.register(Tool("browser_click", "d", PageClick, "browser", "low", lambda p: ToolResult.failure("nothing called that", retryable=False)))
+    log = lambda k, m: logs.append((k, m))  # noqa: E731
+    agent = Agent(ScriptedLLM(), reg, Router(log), Safety(), log)
+    agent.handle("click the play button")
+    assert agent.actions_done == 0
+
+
+def test_the_model_is_told_how_to_word_its_last_line():
+    from orbit.agent.loop import SYSTEM_PROMPT
+    assert "Clicked the play button." in SYSTEM_PROMPT and "let me check" in SYSTEM_PROMPT.lower()

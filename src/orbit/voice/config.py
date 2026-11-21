@@ -82,6 +82,21 @@ SPOKEN_MAX_CHARS = 220
 LOG_TRANSCRIPTS = False                          # what you said is shown in the console, and only written to logs/voice.log if True
 VOICE_LOG = app_config.LOG_DIR / "voice.log"     # every state transition, with a timestamp (never the audio)
 
+# --- Alarms: a reminder or a timer that comes due rings, over and over, until you say "ok" / "thanks" / "fine" (see alarm.py) ---
+def _seconds_from_env(name: str, default: float) -> float:
+    try:
+        return max(0.0, float(os.environ.get(name, default)))
+    except ValueError:
+        return default
+
+
+ALARM = os.environ.get("ORBIT_ALARM", "on").strip().lower() not in ("0", "off", "no", "false")   # off: it is said once, out loud, and that is all
+ALARM_RING_S = 4.0                               # each stretch of ringing lasts about this long (rounded up to whole plays of the sound)...
+ALARM_LISTEN_S = 4.0                             # ...then it goes quiet this long to hear you (a microphone next to a ringing alarm hears only the alarm)
+ALARM_SETTLE_S = 0.4                             # after the sound stops, what the microphone hears for this long is ignored (the sound's last echo)
+ALARM_SAY_EVERY = 3                              # it says what it is after the first stretch, then again after every this many
+ALARM_MAX_S = _seconds_from_env("ORBIT_ALARM_MAX_S", 600.0)   # gives up after this long (0 = never): a PC nobody is at must not ring all day
+
 # --- Conversational voice ---
 CONVERSATIONAL = True                            # speak natural sentences instead of reading tool reports aloud (the screen shows the original)
 FILLERS = True                                   # "One moment." while the agent is slow, so there is no long silence
