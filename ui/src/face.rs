@@ -9,17 +9,15 @@ use rune::tok::TextStyle;
 use rune::{Align, AppHandle, Color, Cx, El, col, effect, el, row, text};
 
 use crate::app::{App, Ask};
+use crate::layout::{CARD_W, Place, SPARE};
 use crate::orbit::{HasOrbit, Orbit};
 use crate::settings;
 use crate::view::{Ink, OVERLAY, OVERLAY_MARK, hex};
 
-/// The orb's diameter in points.
-const ORB: f32 = 112.0;
-/// The overlay's size in points: wide enough for the question's card, and tall enough for the orb alone.
-pub const WIDTH: f32 = 420.0;
-pub const HEIGHT: f32 = ORB + 28.0;
-/// The extra height while a question is open.
-pub const ASK_EXTRA: f32 = 164.0;
+/// The overlay's size in points: wide enough for the question's card, and `HEIGHT` tall for the orb alone at the middle size.
+/// (The extra height while a question is open.)
+pub use crate::layout::{ASK_EXTRA, WIDTH};
+pub const HEIGHT: f32 = 112.0 + SPARE;
 
 #[derive(Clone)]
 pub struct Face {
@@ -32,6 +30,8 @@ pub struct Face {
     pub no: String,
     /// How the buttons reach the hub.
     pub hub: Option<AppHandle<App>>,
+    /// Where the window is on the screen, how big the orb is and where it sits in the window (see `layout`).
+    pub place: Place,
 }
 
 impl HasOrbit for Face {
@@ -42,12 +42,12 @@ impl HasOrbit for Face {
 
 impl Face {
     pub fn new(hub: Option<AppHandle<App>>) -> Face {
-        Face { orbit: Orbit::new(), ask: None, keys: false, yes: settings::DEFAULT_YES.into(), no: settings::DEFAULT_NO.into(), hub }
+        Face { orbit: Orbit::new(), ask: None, keys: false, yes: settings::DEFAULT_YES.into(), no: settings::DEFAULT_NO.into(), hub, place: Place::default() }
     }
 
     /// The overlay's size for what it shows now.
     pub fn size(&self) -> (f32, f32) {
-        (WIDTH, HEIGHT + if self.ask.is_some() { ASK_EXTRA } else { 0.0 })
+        (WIDTH, self.place.diameter + SPARE + if self.ask.is_some() { ASK_EXTRA } else { 0.0 })
     }
 
     /// What decides whether the overlay needs redrawing: everything the view reads, with the level in whole percents (it
@@ -59,6 +59,7 @@ impl Face {
             ask: self.ask.as_ref().map(|a| (a.id, a.sent)),
             keys: self.keys,
             chords: (self.yes.clone(), self.no.clone()),
+            place: self.place,
         }
     }
 
@@ -75,6 +76,7 @@ pub struct FaceKey {
     ask: Option<(i64, Option<bool>)>,
     keys: bool,
     chords: (String, String),
+    place: Place,
 }
 
 fn t(size: f32, weight: f32) -> TextStyle {
@@ -85,22 +87,30 @@ pub fn view(f: &Face, cx: &mut Cx<Face>) -> El {
     cx.reduced_motion(f.orbit.reduced());
     let ink = Ink::new();
 
+    let d = f.place.diameter;
     let orb = el()
         .key("orb")
-        .size(ORB, ORB)
-        .radius(ORB / 2.0)
-        .clip_rounded(ORB / 2.0)
+        .size(d, d)
+        .radius(d / 2.0)
+        .clip_rounded(d / 2.0)
         .fill(hex("#0A0A0C").alpha(0.80))
         .border(1.0, ink.hair_strong)
-        .child(effect(OVERLAY_MARK).effect_data(OVERLAY.to_data()).key("sphere").size(ORB - 2.0, ORB - 2.0));
+        .child(effect(OVERLAY_MARK).effect_data(OVERLAY.to_data()).key("sphere").size(d - 2.0, d - 2.0));
 
-    let line = row().key("line").items_center().justify_end().child(orb);
+    let line = row().key("line").w_full().items_center().pl(f.place.orb_x).child(orb);
 
-    let mut root = col().key("face").w_full().h_full().justify_end().items_end().gap(14.0);
-    if let Some(ask) = &f.ask {
-        root = root.child(ask_card(ask, f.keys.then(|| format!("{} yes \u{b7} {} no", settings::compact(&f.yes), settings::compact(&f.no))), &ink));
+    // The orb is at the bottom of its window with the card above it, or at the top with the card below it (see `layout`).
+    let mut root = col().key("face").w_full().h_full().items_start().gap(14.0);
+    root = if f.place.flip { root.justify_start() } else { root.justify_end() };
+    let card = f.ask.as_ref().map(|ask| {
+        let keys = f.keys.then(|| format!("{} yes \u{b7} {} no", settings::compact(&f.yes), settings::compact(&f.no)));
+        row().key("ask-line").w_full().pl(f.place.card_x).child(ask_card(ask, keys, &ink))
+    });
+    match (card, f.place.flip) {
+        (Some(card), false) => root.child(card).child(line),
+        (Some(card), true) => root.child(line).child(card),
+        (None, _) => root.child(line),
     }
-    root.child(line)
 }
 
 /// Orbit is asking before it does something risky. The card and its two buttons are the only parts that take clicks.
@@ -116,7 +126,7 @@ fn ask_card(ask: &Ask, keys: Option<String>, ink: &Ink) -> El {
         .role("dialog")
         .label("Orbit asks")
         .hit()
-        .w(WIDTH - 40.0)
+        .w(CARD_W)
         .padding(18.0)
         .gap(12.0)
         .items_center()
@@ -130,7 +140,7 @@ fn ask_card(ask: &Ask, keys: Option<String>, ink: &Ink) -> El {
                 .color(ink.fg)
                 .align(Align::Center)
                 .wrap()
-                .max_w(WIDTH - 80.0),
+                .max_w(CARD_W - 40.0),
         )
         .child(answers)
         .child(text(keys.unwrap_or_default()).font(t(11.0, 400.0)).color(ink.muted))
@@ -175,6 +185,26 @@ mod tests {
         assert_eq!(f.size(), (WIDTH, HEIGHT));
         f.ask = Some(ask());
         assert_eq!(f.size(), (WIDTH, HEIGHT + ASK_EXTRA));
+    }
+
+    #[test]
+    fn the_overlay_follows_the_size_of_the_orb() {
+        let mut f = Face::new(None);
+        f.place.diameter = 152.0;
+        assert_eq!(f.size(), (WIDTH, 152.0 + SPARE));
+        f.ask = Some(ask());
+        assert_eq!(f.size(), (WIDTH, 152.0 + SPARE + ASK_EXTRA));
+    }
+
+    #[test]
+    fn moving_or_resizing_the_orb_redraws_it() {
+        let base = Face::new(None).key();
+        let mut moved = Face::new(None);
+        moved.place = crate::layout::place(crate::settings::OrbLook::default().at(0.2, 0.3), crate::layout::Screen::default(), false);
+        assert_ne!(moved.key(), base);
+        let mut bigger = Face::new(None);
+        bigger.place.diameter = 152.0;
+        assert_ne!(bigger.key(), base);
     }
 
     #[test]

@@ -11,6 +11,7 @@ use rune::{KeyEvent, TextEdit, Waker};
 
 use crate::editor::{self, Field, Recorded, Section, SettingsState};
 use crate::face::Face;
+use crate::layout;
 use crate::link::message::{self, Incoming};
 use crate::link::{Event, Link, Status};
 use crate::orbit::{HasOrbit, OrbState, Orbit};
@@ -518,7 +519,13 @@ impl App {
     /// What the orb's window shows now.
     pub fn face(&self) -> Face {
         let keys = self.prefs.hotkeys();
-        Face { orbit: self.orbit.clone(), ask: self.live.confirm.clone(), keys: false, yes: keys.yes.clone(), no: keys.no.clone(), hub: self.shell.hub.clone() }
+        let place = layout::place(self.prefs.look(), layout::screen(), self.live.confirm.is_some());
+        Face { orbit: self.orbit.clone(), ask: self.live.confirm.clone(), keys: false, yes: keys.yes.clone(), no: keys.no.clone(), hub: self.shell.hub.clone(), place }
+    }
+
+    /// Is the Customization page open? The orb is on screen for as long as it is, so moving it can be seen where it will be.
+    pub fn previewing(&self) -> bool {
+        self.page == Page::Settings && self.prefs.section == Section::Customization
     }
 
     /// Brings the orb's window up to date: its content, whether it is showing, and its size.
@@ -529,7 +536,7 @@ impl App {
         if let (Some(why), true) = (&self.prefs.orb_error, std::env::var_os("ORBIT_UI_DEBUG").is_some()) {
             eprintln!("[hub] orb chord: {why}");
         }
-        let visible = self.presence.visible(self.active(), t);
+        let visible = self.presence.visible(self.active() || self.previewing(), t);
         let face = self.face();
         self.shell.apply(face, visible, self.prefs.settings.sounds);
     }

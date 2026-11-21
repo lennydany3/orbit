@@ -8,13 +8,14 @@ use std::path::PathBuf;
 
 use rune::{Key, KeyEvent, TextEdit};
 
-use crate::settings::{self, Command, Hotkeys, MAX_COMMANDS, MAX_NAME, MAX_PHRASE, MAX_PHRASES, MAX_STEPS, Settings, Sounds, Step};
+use crate::settings::{self, Command, Hotkeys, MAX_COMMANDS, MAX_NAME, MAX_PHRASE, MAX_PHRASES, MAX_STEPS, OrbLook, OrbSize, Settings, Sounds, Step};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
     Hotkeys,
     Commands,
     Sounds,
+    Customization,
 }
 
 /// How far the volume's + and - buttons move it.
@@ -349,6 +350,8 @@ pub struct SettingsState {
     pub orb_error: Option<String>,
     /// The volume while its slider is being dragged: shown at once, saved when the drag ends.
     volume_live: Option<u8>,
+    /// Where the orb is while it is being dragged: shown at once, saved when the drag ends.
+    orb_live: Option<(f32, f32)>,
     /// Handed out when an edit box's command has gone, so a late keystroke has somewhere harmless to go.
     scratch: TextEdit,
 }
@@ -368,6 +371,7 @@ impl Default for SettingsState {
             confirm_delete: None,
             orb_error: None,
             volume_live: None,
+            orb_live: None,
             scratch: TextEdit::new(""),
         }
     }
@@ -412,6 +416,7 @@ impl SettingsState {
         self.notice = None;
         self.confirm_delete = None;
         self.volume_live = None;
+        self.orb_live = None;
     }
 
     /// Writes `next` (and, the first time, keeps a copy of a file that had entries Orbit could not read), then makes it current.
@@ -719,6 +724,84 @@ impl SettingsState {
         self.volume_live = None;
         let done = self.commit(next);
         self.saved(done, "The sounds are back to the way they came.")
+    }
+}
+
+// ---- customization ----------------------------------------------------------------------------------------------------
+
+/// The nine spots the page offers by name: rows from the top, columns from the left.
+pub const SPOTS: [[&str; 3]; 3] = [["Top left", "Top", "Top right"], ["Left", "Center", "Right"], ["Bottom left", "Bottom", "Bottom right"]];
+
+/// Where a spot is, as fractions: column 0, 1, 2 -> 0, 0.5, 1.
+pub fn spot_at(row: usize, col: usize) -> (f32, f32) {
+    (col.min(2) as f32 / 2.0, row.min(2) as f32 / 2.0)
+}
+
+impl SettingsState {
+    /// The orb as the page and the screen show it: where the pointer has it while it is being dragged.
+    pub fn look(&self) -> OrbLook {
+        match self.orb_live {
+            Some((x, y)) => self.settings.orb.at(x, y),
+            None => self.settings.orb,
+        }
+    }
+
+    /// The orb's name for a place, if it is on one of the nine spots ("Bottom right"), else `None`.
+    pub fn spot_name(&self) -> Option<&'static str> {
+        let look = self.look();
+        (0..3).flat_map(|r| (0..3).map(move |c| (r, c))).find(|&(r, c)| {
+            let (x, y) = spot_at(r, c);
+            (look.x - x).abs() < 0.0005 && (look.y - y).abs() < 0.0005
+        }).map(|(r, c)| SPOTS[r][c])
+    }
+
+    /// The orb is at (`x`, `y`) (0 to 1) under the pointer: shown at once, not yet saved.
+    pub fn drag_orb(&mut self, x: f32, y: f32) {
+        self.orb_live = Some((x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)));
+    }
+
+    /// The drag ended. `keep` saves where it was left; otherwise the orb goes back to where it was. True if a new place was saved.
+    pub fn finish_orb(&mut self, keep: bool) -> bool {
+        let Some((x, y)) = self.orb_live.take() else { return false };
+        let next = self.settings.orb.at(x, y);
+        if !keep || next == self.settings.orb {
+            return false;
+        }
+        self.save_orb(next, "The orb will appear there.")
+    }
+
+    /// One of the nine spots, or any place at all, saved at once.
+    pub fn place_orb(&mut self, x: f32, y: f32) -> bool {
+        self.orb_live = None;
+        let next = self.settings.orb.at(x, y);
+        if next == self.settings.orb {
+            return false;
+        }
+        let message = match SPOTS.iter().enumerate().find_map(|(r, row)| row.iter().enumerate().find(|&(c, _)| spot_at(r, c) == (next.x, next.y)).map(|(_, name)| *name)) {
+            Some(name) => format!("The orb will appear at the {}.", name.to_lowercase()),
+            None => "The orb will appear there.".to_owned(),
+        };
+        self.save_orb(next, &message)
+    }
+
+    pub fn set_orb_size(&mut self, size: OrbSize) -> bool {
+        if size == self.settings.orb.size {
+            return false;
+        }
+        self.save_orb(OrbLook { size, ..self.settings.orb }, &format!("The orb is {}.", size.label().to_lowercase()))
+    }
+
+    /// Back to the corner at the middle size.
+    pub fn reset_orb(&mut self) -> bool {
+        self.orb_live = None;
+        self.save_orb(OrbLook::default(), "The orb is back in the bottom right corner, at the middle size.")
+    }
+
+    fn save_orb(&mut self, look: OrbLook, message: &str) -> bool {
+        let mut next = self.settings.clone();
+        next.orb = look;
+        let done = self.commit(next);
+        self.saved(done, message)
     }
 }
 

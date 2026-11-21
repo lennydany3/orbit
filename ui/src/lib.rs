@@ -5,6 +5,7 @@ pub mod autostart;
 pub mod clock;
 pub mod editor;
 pub mod face;
+pub mod layout;
 pub mod link;
 pub mod logo;
 pub mod orbit;

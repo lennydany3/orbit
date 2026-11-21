@@ -27,6 +27,9 @@ pub const DEFAULT_YES: &str = "ctrl+alt+y";
 pub const DEFAULT_NO: &str = "ctrl+alt+n";
 pub const DEFAULT_TALK: &str = "ctrl_r";
 pub const DEFAULT_VOLUME: u8 = 40;
+/// Out of the box the orb sits in the bottom right corner, at the middle size.
+pub const DEFAULT_ORB_X: f32 = 1.0;
+pub const DEFAULT_ORB_Y: f32 = 1.0;
 
 /// The settings file: `ORBIT_SETTINGS`, or `settings.json` in the project folder (the same place Orbit looks).
 pub fn path() -> PathBuf {
@@ -210,6 +213,85 @@ pub fn parse_volume(value: &Value) -> Option<u8> {
     Some((n + 0.5).floor() as u8)
 }
 
+/// How big the floating orb is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OrbSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+impl OrbSize {
+    pub const ALL: [OrbSize; 3] = [OrbSize::Small, OrbSize::Medium, OrbSize::Large];
+
+    /// How it is written in the file.
+    pub fn name(self) -> &'static str {
+        match self {
+            OrbSize::Small => "small",
+            OrbSize::Medium => "medium",
+            OrbSize::Large => "large",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            OrbSize::Small => "Small",
+            OrbSize::Medium => "Medium",
+            OrbSize::Large => "Large",
+        }
+    }
+
+    /// The orb's width in points.
+    pub fn diameter(self) -> f32 {
+        match self {
+            OrbSize::Small => 80.0,
+            OrbSize::Medium => 112.0,
+            OrbSize::Large => 152.0,
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<OrbSize> {
+        OrbSize::ALL.into_iter().find(|s| s.name() == name)
+    }
+}
+
+/// Where the floating orb sits and how big it is. `x` and `y` run from 0 (left, top) to 1 (right, bottom) over the part of the
+/// screen apps can use; see `layout` for how that becomes a place.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OrbLook {
+    pub x: f32,
+    pub y: f32,
+    pub size: OrbSize,
+}
+
+impl Default for OrbLook {
+    fn default() -> Self {
+        OrbLook { x: DEFAULT_ORB_X, y: DEFAULT_ORB_Y, size: OrbSize::Medium }
+    }
+}
+
+/// A position as the number written in the file (0.667, not 0.6669999957...).
+fn permille(v: f32) -> f64 {
+    (f64::from(v) * 1000.0).round() / 1000.0
+}
+
+impl OrbLook {
+    /// A position as the file keeps it: 0 to 1, to three decimals (so the file stays tidy and the page can compare).
+    pub fn rounded(v: f32) -> f32 {
+        ((v.clamp(0.0, 1.0) * 1000.0).round() / 1000.0).clamp(0.0, 1.0)
+    }
+
+    /// The same size at another spot, rounded as the file keeps it.
+    pub fn at(self, x: f32, y: f32) -> OrbLook {
+        OrbLook { x: OrbLook::rounded(x), y: OrbLook::rounded(y), ..self }
+    }
+
+    fn to_value(self) -> Value {
+        json!({"x": permille(self.x), "y": permille(self.y), "size": self.size.name()})
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Step {
     /// An app, a website or a folder: which one is worked out when it runs.
@@ -331,6 +413,7 @@ pub struct Settings {
     pub hotkeys: Hotkeys,
     pub commands: Vec<Command>,
     pub sounds: Sounds,
+    pub orb: OrbLook,
     /// Anything else the file had (written back untouched).
     extra: Map<String, Value>,
 }
@@ -353,7 +436,7 @@ impl Settings {
         let Some(root) = data.as_object() else {
             return (settings, vec!["the settings file is not a JSON object, so the defaults are used".into()]);
         };
-        settings.extra = root.iter().filter(|(k, _)| !matches!(k.as_str(), "version" | "hotkeys" | "sounds" | "commands")).map(|(k, v)| (k.clone(), v.clone())).collect();
+        settings.extra = root.iter().filter(|(k, _)| !matches!(k.as_str(), "version" | "hotkeys" | "sounds" | "orb" | "commands")).map(|(k, v)| (k.clone(), v.clone())).collect();
         match root.get("sounds") {
             None => {}
             Some(Value::Object(sounds)) => {
@@ -371,6 +454,26 @@ impl Settings {
                 }
             }
             Some(_) => problems.push("the sounds setting is not an object, so the defaults are used".into()),
+        }
+        match root.get("orb") {
+            None => {}
+            Some(Value::Object(orb)) => {
+                for (name, field) in [("x", &mut settings.orb.x), ("y", &mut settings.orb.y)] {
+                    if let Some(value) = orb.get(name) {
+                        match value.as_f64().filter(|n| n.is_finite() && (0.0..=1.0).contains(n)) {
+                            Some(n) => *field = OrbLook::rounded(n as f32),
+                            None => problems.push(format!("the orb's {name} position {value} is not a number from 0 to 1, so the corner is used")),
+                        }
+                    }
+                }
+                if let Some(value) = orb.get("size") {
+                    match value.as_str().and_then(OrbSize::parse) {
+                        Some(size) => settings.orb.size = size,
+                        None => problems.push(format!("the orb size {value} is not small, medium or large, so medium is used")),
+                    }
+                }
+            }
+            Some(_) => problems.push("the orb setting is not an object, so the defaults are used".into()),
         }
         if let Some(keys) = root.get("hotkeys").and_then(Value::as_object) {
             let mut take = |field: &mut String, name: &str, default: &str, chord: bool| {
@@ -422,6 +525,9 @@ impl Settings {
         root.insert("version".into(), json!(VERSION));
         root.insert("hotkeys".into(), json!({"orb": self.hotkeys.orb, "yes": self.hotkeys.yes, "no": self.hotkeys.no, "talk": self.hotkeys.talk}));
         root.insert("sounds".into(), json!({"enabled": self.sounds.enabled, "volume": self.sounds.volume}));
+        if self.orb != OrbLook::default() {
+            root.insert("orb".into(), self.orb.to_value());          // only when it was changed: the file Orbit reads stays as it was
+        }
         root.insert("commands".into(), Value::Array(self.commands.iter().map(Command::to_value).collect()));
         let mut text = serde_json::to_string_pretty(&Value::Object(root)).unwrap_or_default();
         text.push('\n');
@@ -637,6 +743,62 @@ pub(crate) mod tests {
         let back: Value = serde_json::from_str(&s.to_json()).unwrap();
         assert_eq!(back["sounds"], json!({"enabled": false, "volume": 13}));
         assert_eq!(back["theme"], "dark");
+    }
+
+    // ---- the orb ----
+
+    #[test]
+    fn no_orb_entry_means_the_corner_at_the_middle_size_and_the_default_writes_nothing() {
+        let (s, problems) = parsed("{}");
+        assert_eq!(s.orb, OrbLook { x: 1.0, y: 1.0, size: OrbSize::Medium });
+        assert!(problems.is_empty());
+        let back: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert!(back.get("orb").is_none(), "an untouched orb leaves the file as it was");
+    }
+
+    #[test]
+    fn the_orbs_place_and_size_are_read_and_written_back() {
+        let (s, problems) = parsed(r#"{"orb":{"x":0.25,"y":0.6666,"size":"large"}}"#);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(s.orb, OrbLook { x: 0.25, y: 0.667, size: OrbSize::Large }, "kept to three decimals");
+        let back: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!(back["orb"], json!({"x": 0.25, "y": 0.667, "size": "large"}));
+        assert_eq!(parsed(&s.to_json()).0, s, "what is written reads back the same");
+    }
+
+    #[test]
+    fn each_part_of_the_orb_stands_alone_and_a_bad_one_keeps_its_default() {
+        let (s, problems) = parsed(r#"{"orb":{"x":0.3}}"#);
+        assert_eq!((s.orb, problems.len()), (OrbLook { x: 0.3, y: 1.0, size: OrbSize::Medium }, 0));
+        for bad in ["-0.1", "1.5", "\"left\"", "null", "true"] {
+            let (s, problems) = parsed(&format!(r#"{{"orb":{{"x":{bad},"y":0.5,"size":"huge"}}}}"#));
+            assert_eq!(s.orb, OrbLook { x: 1.0, y: 0.5, size: OrbSize::Medium }, "{bad}");
+            assert_eq!(problems.len(), 2, "{bad}: {problems:?}");
+        }
+        for raw in ["true", "5", "\"corner\"", "[]", "null"] {
+            let (s, problems) = parsed(&format!(r#"{{"orb":{raw}}}"#));
+            assert_eq!(s.orb, OrbLook::default(), "{raw}");
+            assert!(problems[0].contains("not an object"), "{raw}: {problems:?}");
+        }
+    }
+
+    #[test]
+    fn the_orb_is_written_with_the_rest_and_nothing_else_is_lost() {
+        let (mut s, _) = parsed(r#"{"theme":"dark","sounds":{"enabled":false,"volume":10}}"#);
+        s.orb = OrbLook::default().at(0.5, 0.25);
+        let back: Value = serde_json::from_str(&s.to_json()).unwrap();
+        assert_eq!((back["theme"].as_str(), back["orb"]["x"].as_f64(), back["sounds"]["volume"].as_u64()), (Some("dark"), Some(0.5), Some(10)));
+        assert_eq!(back.as_object().unwrap().keys().filter(|k| *k == "orb").count(), 1);
+    }
+
+    #[test]
+    fn the_sizes_are_in_order_and_have_names_the_file_can_use() {
+        let widths: Vec<f32> = OrbSize::ALL.iter().map(|s| s.diameter()).collect();
+        assert!(widths.windows(2).all(|w| w[0] < w[1]) && OrbSize::default().diameter() == 112.0);
+        for size in OrbSize::ALL {
+            assert_eq!(OrbSize::parse(size.name()), Some(size));
+        }
+        assert_eq!(OrbSize::parse("Medium"), None);
     }
 
     // ---- keys ----

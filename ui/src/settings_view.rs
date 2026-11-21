@@ -1,15 +1,16 @@
 //! The Settings page, drawn: a column of sections on the left (Hotkeys, Commands, Sounds) and the chosen one on the right. All the
 //! rules live in `editor`; this only shows its state and turns clicks into calls on it.
 //!
-//! More sections (the model and its keys, the voice, the orb) slot in as another `Section`, another nav entry and another
+//! More sections (the model and its keys, the voice) slot in as another `Section`, another nav entry and another
 //! function here; nothing else has to change.
 
 use rune::tok::TextStyle;
 use rune::{Color, Drag, El, Phase, ScrollSpec, Tx, col, edit_access, el, row, text, text_input};
 
 use crate::app::App;
-use crate::editor::{Draft, Field, Section, StepKind, describe_field};
-use crate::settings::{self, Command, TALK_KEYS};
+use crate::editor::{Draft, Field, SPOTS, Section, StepKind, describe_field, spot_at};
+use crate::layout;
+use crate::settings::{self, Command, OrbSize, TALK_KEYS};
 use crate::view::{Ink, hex};
 
 fn t(size: f32, weight: f32) -> TextStyle {
@@ -23,6 +24,7 @@ pub(crate) fn page(s: &App, ink: &Ink) -> El {
         Section::Hotkeys => hotkeys(s, ink),
         Section::Commands => commands(s, ink),
         Section::Sounds => sounds(s, ink),
+        Section::Customization => customization(s, ink),
     };
     col()
         .key("settings")
@@ -91,6 +93,7 @@ fn nav(s: &App, ink: &Ink) -> El {
         .child(item("nav-hotkeys", "Hotkeys", Section::Hotkeys))
         .child(item("nav-commands", "Commands", Section::Commands))
         .child(item("nav-sounds", "Sounds", Section::Sounds))
+        .child(item("nav-customization", "Customization", Section::Customization))
 }
 
 // ---- pieces ---------------------------------------------------------------------------------------------------------
@@ -400,6 +403,154 @@ fn volume_slider(percent: u8, on: bool, ink: &Ink) -> El {
         .child(el().key("volume-track").absolute(0.0, 12.0).w(SLIDER_W).h(4.0).radius(2.0).fill(Color::WHITE.alpha(0.16)))
         .child(el().key("volume-fill").absolute(0.0, 12.0).w(knob_x + KNOB / 2.0).h(4.0).radius(2.0).fill(tint))
         .child(el().key("volume-knob").absolute(knob_x, 7.0).size(KNOB, KNOB).radius(KNOB / 2.0).fill(tint))
+}
+
+// ---- customization --------------------------------------------------------------------------------------------------
+
+/// The little screen the orb is dragged about on, in points.
+const PREVIEW_W: f32 = 300.0;
+const TILE_W: f32 = 46.0;
+const TILE_H: f32 = 34.0;
+const DOT: f32 = 8.0;
+
+fn customization(s: &App, ink: &Ink) -> El {
+    let look = s.prefs.look();
+    let spot = s.prefs.spot_name().unwrap_or("Your own spot");
+    let position = row()
+        .key("position-row")
+        .w_full()
+        .px(18.0)
+        .py(16.0)
+        .gap(28.0)
+        .items_start()
+        .justify_between()
+        .child(
+            col()
+                .key("position-text")
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(14.0)
+                .child(
+                    col()
+                        .key("position-head")
+                        .gap(4.0)
+                        .child(text("Position").font(t(14.0, 500.0)).color(ink.fg))
+                        .child(text("Drag the orb on the little screen, or pick a spot. The real orb shows on your screen while this page is open.").font(t(12.0, 400.0)).color(ink.muted).wrap())
+                        .child(text(format!("Now: {spot}")).key("position-now").font(t(12.0, 500.0)).color(ink.fg)),
+                )
+                .child(spot_grid(look.x, look.y, ink)),
+        )
+        .child(screen_preview(look.x, look.y, look.size, ink));
+    let mut chips = row().key("size-chips").gap(8.0).items_center();
+    for size in OrbSize::ALL {
+        chips = chips.child(chip(format!("size-{}", size.name()), size.label(), look.size == size, ink).on_press(move |s: &mut App| {
+            s.prefs.set_orb_size(size);
+        }));
+    }
+    let size = row()
+        .key("size-row")
+        .w_full()
+        .px(18.0)
+        .py(14.0)
+        .gap(16.0)
+        .items_center()
+        .justify_between()
+        .child(
+            col()
+                .key("size-text")
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(4.0)
+                .child(text("Size").font(t(14.0, 500.0)).color(ink.fg))
+                .child(text("How big the orb is when it floats over your work.").font(t(12.0, 400.0)).color(ink.muted).wrap()),
+        )
+        .child(chips);
+    col()
+        .key("customization")
+        .w_full()
+        .gap(18.0)
+        .child(heading(ink, "Customization", "Choose where the orb floats on your screen and how big it is. It stays where you put it."))
+        .child(card("orb-card", ink).child(position).child(divider(ink)).child(size))
+        .child(row().key("orb-actions").gap(10.0).items_center().child(button("reset-orb", "Reset to the defaults", ink, false).on_press(|s: &mut App| {
+            s.prefs.reset_orb();
+        })))
+        .child(notice(s, ink))
+}
+
+/// The nine named spots: press one and the orb goes there.
+fn spot_grid(x: f32, y: f32, ink: &Ink) -> El {
+    let mut grid = col().key("spot-grid").gap(6.0);
+    for (r, names) in SPOTS.iter().enumerate() {
+        let mut line = row().key(format!("spot-row-{r}")).gap(6.0);
+        for (c, name) in names.iter().enumerate() {
+            let (sx, sy) = spot_at(r, c);
+            let on = (x - sx).abs() < 0.0005 && (y - sy).abs() < 0.0005;
+            let dot = el()
+                .key(format!("spot-{r}{c}-dot"))
+                .absolute(5.0 + sx * (TILE_W - 10.0 - DOT), 5.0 + sy * (TILE_H - 10.0 - DOT))
+                .size(DOT, DOT)
+                .radius(DOT / 2.0)
+                .fill(if on { Color::BLACK } else { ink.fg.alpha(0.8) });
+            line = line.child(
+                el()
+                    .key(format!("spot-{r}{c}"))
+                    .role("button")
+                    .label(*name)
+                    .focusable(true)
+                    .size(TILE_W, TILE_H)
+                    .radius(7.0)
+                    .fill(if on { ink.fg } else { Color::WHITE.alpha(0.06) })
+                    .border(1.0, if on { ink.fg } else { Color::WHITE.alpha(0.12) })
+                    .hover(Color::WHITE.alpha(if on { 0.0 } else { 0.06 }))
+                    .on_press(move |s: &mut App| {
+                        s.prefs.place_orb(sx, sy);
+                    })
+                    .child(dot),
+            );
+        }
+        grid = grid.child(line);
+    }
+    grid
+}
+
+/// A small copy of the screen with the orb on it. Pressing anywhere puts the orb there and dragging carries it; it is saved where
+/// it is let go (Esc during the drag puts it back). The orb on the real screen follows as it moves.
+fn screen_preview(x: f32, y: f32, size: OrbSize, ink: &Ink) -> El {
+    let screen = layout::screen();
+    let (kx, ky) = (PREVIEW_W / screen.w.max(1.0), (PREVIEW_W * screen.h / screen.w.max(1.0)).clamp(110.0, 260.0) / screen.h.max(1.0));
+    let height = screen.h * ky;
+    let dot = (size.diameter() * kx).max(12.0);
+    let (ix, iy) = (layout::EDGE_X * kx, layout::EDGE_Y * ky);
+    let (travel_x, travel_y) = ((PREVIEW_W - 2.0 * ix - dot).max(1.0), (height - 2.0 * iy - dot).max(1.0));
+    let at = move |g: &Drag| {
+        let (px, py) = (g.x / g.w.max(1.0) * PREVIEW_W, g.y / g.h.max(1.0) * height);
+        (((px - ix - dot / 2.0) / travel_x).clamp(0.0, 1.0), ((py - iy - dot / 2.0) / travel_y).clamp(0.0, 1.0))
+    };
+    el()
+        .key("orb-preview")
+        .role("slider")
+        .label("Orb position")
+        .focusable(true)
+        .w(PREVIEW_W)
+        .h(height)
+        .radius(10.0)
+        .fill(hex("#08080A"))
+        .border(1.0, ink.hair_strong)
+        .on_drag(move |s: &mut App, g: &mut Drag, tx: &mut Tx| {
+            tx.instant();
+            match g.phase {
+                Phase::Down | Phase::Move => {
+                    let (x, y) = at(g);
+                    s.prefs.drag_orb(x, y);
+                }
+                Phase::Up => {
+                    s.prefs.finish_orb(!g.cancelled());
+                }
+            }
+        })
+        .child(el().key("guide-v").absolute(PREVIEW_W / 2.0, 0.0).size(1.0, height).fill(Color::WHITE.alpha(0.05)))
+        .child(el().key("guide-h").absolute(0.0, height / 2.0).size(PREVIEW_W, 1.0).fill(Color::WHITE.alpha(0.05)))
+        .child(el().key("preview-orb").absolute(ix + x * travel_x, iy + y * travel_y).size(dot, dot).radius(dot / 2.0).fill(ink.fg.alpha(0.92)))
 }
 
 // ---- commands -------------------------------------------------------------------------------------------------------

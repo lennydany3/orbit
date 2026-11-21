@@ -169,6 +169,10 @@ Only a real show or hide makes a sound, and it costs nothing at rest.
   <img src="docs/screenshots/settings-sounds.png" alt="The Sounds settings page" width="620">
 </p>
 
+**Customization.** Put the orb anywhere on your screen: drag it on a small copy of the screen, or press one of nine spots, and
+pick Small, Medium or Large. The real orb shows while the page is open so you see where it lands. It stays inside the usable
+screen (above the taskbar), and a question's card opens above it, or below it when the orb is in the top half.
+
 ### Tray, cost and safety of the link
 
 - **Tray menu** (right-click): show or hide the orb, open the Orbit window, Settings, quit (which also stops the Orbit it started).

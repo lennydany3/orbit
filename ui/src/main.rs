@@ -21,6 +21,7 @@ use orbit_ui::autostart;
 use orbit_ui::clock;
 use orbit_ui::editor::{Section, SettingsState};
 use orbit_ui::face::{self, Face};
+use orbit_ui::layout;
 use orbit_ui::link::{Event, Status};
 use orbit_ui::orbit::{OrbState, SphereCompositor};
 use orbit_ui::settings;
@@ -162,6 +163,12 @@ fn spec() -> AppSpec<App> {
                 s.prefs.orb_error = Some("Ctrl + Alt + O is already in use by another program, so Orbit cannot have it.".into());
                 s.prefs.fail("Ctrl + Alt + Y is already used for \"Answer yes\".");
             }),
+            ("settings-customization", |s| settings_scene(s, Section::Customization)),
+            ("settings-customization-moved", |s| {
+                settings_scene(s, Section::Customization);
+                s.prefs.place_orb(0.18, 0.3);
+                s.prefs.set_orb_size(orbit_ui::settings::OrbSize::Large);
+            }),
             ("settings-sounds", |s| settings_scene(s, Section::Sounds)),
             ("settings-sounds-on", |s| {
                 settings_scene(s, Section::Sounds);
@@ -204,6 +211,7 @@ fn spec() -> AppSpec<App> {
 /// the buttons of a question. It gives its GPU memory back when it has been hidden a while.
 fn orb_overlay() -> rune::ConfiguredOverlay<Face> {
     let mut spec = OverlaySpec::new("orbit-orb", (face::WIDTH, face::HEIGHT), face::view);
+    // Until the face says where the user put it (see `layout`), the bottom right, above the taskbar.
     spec.edge = ScreenEdge::Bottom;
     spec.margin = 14.0;
     spec.align = Align::End;
@@ -276,5 +284,10 @@ fn main() {
     if open_window {
         hub.open();
     }
-    rune::run_windows(move |_displays| vec![rune::AnyWindowSpec::from(WindowSpec::from_app("hub", app))]);
+    rune::run_windows(move |displays| {
+        if let Some(main) = displays.iter().find(|d| d.primary).or(displays.first()) {
+            layout::set_screen(layout::Screen::from_pixels(main.position, main.size, main.scale, layout::work_area()));
+        }
+        vec![rune::AnyWindowSpec::from(WindowSpec::from_app("hub", app))]
+    });
 }

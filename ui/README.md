@@ -51,6 +51,12 @@ The window writes it and Orbit reads it; they share the rules in `tests/fixtures
   orb says, and a show and hide within 350 ms make one sound, not two. Playing costs nothing at rest: nothing starts until the
   first sound, then one thread sleeps on a channel and hands the file to Windows' `PlaySound`, which returns at once. (No new
   crate; the one `unsafe` call is that function, in `src/sound.rs`.) Preview scene: `--scene settings-sounds-on`.
+- **Customization.** Where the orb floats and how big it is: drag it on a small screen or press one of nine spots, and pick
+  Small, Medium or Large. Saved as `"orb": {"x": 1.0, "y": 1.0, "size": "medium"}` (x and y are 0 to 1 across the usable screen,
+  so the orb never leaves it; the entry is only written once changed, and Orbit's Python side ignores it). The real orb is
+  shown while the page is open. The window is placed with a Rune `Rect` placement worked out in `src/layout.rs`, which keeps the
+  orb still when a question's card opens (above it, or below it when the orb is in the top half). Preview scenes:
+  `--scene settings-customization` and `settings-customization-moved`.
 - A hand-edited file Orbit cannot fully read does not stop anything: the bad entry is left out, the page lists what, and the
   first save keeps the old file as `settings.json.bak`.
 
