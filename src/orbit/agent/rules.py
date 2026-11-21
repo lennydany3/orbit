@@ -196,6 +196,39 @@ def _box_name(box: str) -> str:
     return " ".join(name.split()) or "search"
 
 
+# --- screenshots: "take a screenshot of this screen", "screenshot", "capture my screen", "take a screenshot of brave", "screenshot all my screens" ---
+# ("screen shot" is how speech-to-text often writes it.) Anything with another request in it ("... and open paint") is left to the model.
+_SHOT_NOUN = r"(?:screen[ -]?shots?|screen[ -]?(?:grabs?|captures?)|snap[ -]?shots?)"
+_SHOT_FRAME = r"(?:take|capture|grab|snap|get|make|shoot|do|give me)\s+(?:me\s+)?(?:(?:a|an|the|my|another|one|new|quick|fresh|full)\s+)*"
+_SHOT_PICTURE_OF = r"(?:picture|pic|photo|image|shot)s?(?=\s+of\s+(?:the\s+|this\s+|my\s+|that\s+)*(?:screen|window|monitor|display|desktop)\b)"
+_SHOT_NOW = r"(?:\s+(?:right\s+)?(?:now|immediately|instantly|quickly|asap|real quick))*"
+_SHOT_OF = r"(?:\s+(?:of|from|for|on|in|at)\s+[\w .'&+-]{1,60}?|\s+(?:this|that|it|here))?"
+_SHOT_A = re.compile(rf"^(?!.*\b(?:and|then)\b)(?:{_SHOT_FRAME}(?:{_SHOT_NOUN}|{_SHOT_PICTURE_OF})|{_SHOT_NOUN})(?P<rest>{_SHOT_OF}){_SHOT_NOW}$", re.I)
+_SHOT_B = re.compile(
+    rf"^(?!.*\b(?:and|then)\b)(?:capture|screen[ -]?shot|snap[ -]?shot)\s+(?P<rest>(?:(?:the|this|my|that|whole|entire|full|all|every|both|each|your|current|active|front|open|focused|foreground)\s+)*"
+    rf"(?:screens?|windows?|monitors?|displays?|desktop|page|tab|everything)){_SHOT_NOW}$", re.I)
+_SHOT_FLUFF = frozenset("the this that my your our a an current active front open focused foreground whole entire full of for from on in at it here there thing things stuff".split())
+_SHOT_KIND = frozenset("window windows page tab app program application".split())
+_SHOT_SCREEN = frozenset("screen screens monitor monitors display displays".split())
+
+
+def _shot_args(rest: str) -> dict:
+    """What to capture, from what came after "screenshot": nothing or "of this screen" = the monitor the pointer is on; "of this window" = the window
+    in front; "of brave" / "of the spotify window" = that window; "of all my screens" or "of the desktop" = every monitor."""
+    text = " ".join(re.findall(r"[\w'&+.-]+", (rest or "").lower()))
+    words = text.split()
+    if (re.search(r"\b(?:all|every|each|both)\b", text) and any(w in _SHOT_SCREEN for w in words)) or re.search(r"\b(?:desktop|everything)\b", text):
+        return {"what": "all"}
+    kind = any(w in _SHOT_KIND for w in words)
+    after_of = [w for w in words if w not in ("of", "from", "for", "on", "in", "at")]
+    if not kind and (any(w in _SHOT_SCREEN for w in words) or (after_of and after_of[0] in ("this", "that", "these", "those"))):
+        return {"what": "screen"}                 # ("of this error": it is on this screen, not a window called error)
+    name = " ".join(w for w in words if w not in _SHOT_FLUFF and w not in _SHOT_KIND and w not in _SHOT_SCREEN)[:40].strip()
+    if kind or name:
+        return {"what": "window", **({"window": name} if name else {})}
+    return {"what": "screen"}
+
+
 # (rule name, pattern, builder). Patterns are matched against the whole sentence, case-insensitively.
 # Anything with extra clauses ("open X and play Y") deliberately does not match and goes to the model.
 RULES: list[tuple[str, re.Pattern, Builder]] = [
@@ -272,6 +305,8 @@ RULES: list[tuple[str, re.Pattern, Builder]] = [
     ("web-search", re.compile(r"^(?:search|google|look up)\s+(?:(?:the\s+)?(?:web|internet|google)\s+)?(?:for\s+)?(?!.*\b(?:and|then)\b)(?P<q>.+?)(?:\s+(?:on|in|with|using|via)\s+(?:google|the web|the internet))?$", re.I),
      lambda m: ("browser_search", {"query": m["q"]})),
     # --- OS layer ---
+    ("screenshot", _SHOT_A, lambda m: ("os_screenshot", _shot_args(m["rest"]))),
+    ("screenshot-of", _SHOT_B, lambda m: ("os_screenshot", _shot_args(m["rest"]))),
     ("open-app", re.compile(r"^(?:please )?(?:open|launch|start)\s+(?:the |my )?(?!.*\b(?:and|then)\b)(?!(?:it|that|this|them|again)$)(?P<name>[\w .+&'-]+?)(?: app)?$", re.I),
      lambda m: ("os_open_app", {"name": m["name"].strip().title()})),
     ("volume-set", re.compile(rf"^(?:turn |set |put )?{_THE}volume (?:to |at )?(?P<n>\d{{1,3}})\s*%?$", re.I),
@@ -397,7 +432,7 @@ _NOT_A_NAME = frozenset("do it that this them tell show what how why please also
 def is_command(part: str) -> bool:
     """Does this piece of a sentence start like a request? (Used to decide whether "A and B" is two requests.)"""
     first = part.split(None, 1)[0].lower() if part.split() else ""
-    return first in COMMAND_WORDS
+    return first in COMMAND_WORDS or bool(_SHOT_A.match(part) or _SHOT_B.match(part))      # ("take a screenshot and open paint" is two requests)
 
 
 def split_commands(text: str) -> list[str]:

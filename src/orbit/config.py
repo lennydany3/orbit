@@ -1,5 +1,7 @@
 """All tunable settings in one place."""
+import ctypes
 import os
+import uuid
 from pathlib import Path
 
 from .env import load_env
@@ -68,12 +70,35 @@ SCREEN_HELP = os.environ.get("ORBIT_SCREEN_HELP", "1").lower() not in ("0", "off
 VISUALS = os.environ.get("ORBIT_VISUALS", "1").lower() not in ("0", "off", "false", "no")   # --no-visuals turns them off for one run
 VISUALS_SPEED = float(os.environ.get("ORBIT_VISUALS_SPEED", "1"))                            # 2 = twice as fast, 0.5 = half as fast
 
+
+
+def _pictures_folder() -> Path:
+    """The user's real Pictures folder (it is often moved to OneDrive), else ~/Pictures."""
+    try:
+        guid = (ctypes.c_ubyte * 16).from_buffer_copy(uuid.UUID("33E28130-4E1E-4676-835A-98395C3BC3BB").bytes_le)    # FOLDERID_Pictures
+        path = ctypes.c_wchar_p()
+        shell32 = ctypes.WinDLL("shell32")
+        shell32.SHGetKnownFolderPath.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+        if shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(path)) == 0 and path.value:
+            found = Path(path.value)
+            ctypes.WinDLL("ole32").CoTaskMemFree(ctypes.cast(path, ctypes.c_void_p))
+            return found
+    except (OSError, AttributeError):
+        pass
+    return Path.home() / "Pictures"
+
+
+# --- Screenshots: "take a screenshot" saves a PNG here (Windows' own Screenshots folder) and copies the picture to the clipboard ---
+SCREENSHOT_DIR = Path(os.environ.get("ORBIT_SCREENSHOT_DIR") or _pictures_folder() / "Screenshots")
+SCREENSHOT_CLIPBOARD = os.environ.get("ORBIT_SCREENSHOT_CLIPBOARD", "1").lower() not in ("0", "off", "false", "no")
+
 # --- Safety ---
 LOG_DIR = PROJECT_ROOT / "logs"
 # Tools may only touch files under these folders.
 ALLOWED_DIRS = [
     Path.home() / "Downloads",
     Path.home() / "Documents" / APP_NAME,
+    SCREENSHOT_DIR,                   # the one place a screenshot is written (the tool takes no path from anyone)
 ]
 
 # --- Link to the face (the sphere window): `python -m orbit --voice --ipc`. Only this PC can connect (127.0.0.1). ---

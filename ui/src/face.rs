@@ -20,6 +20,17 @@ use crate::view::{Ink, OVERLAY, OVERLAY_MARK, hex};
 pub use crate::layout::{ASK_EXTRA, WIDTH};
 pub const HEIGHT: f32 = 112.0 + SPARE;
 
+/// Whether the orb may show up in screenshots and screen recordings. By default it may not: when you tell Orbit to take a screenshot, the
+/// picture should show what you were looking at, not Orbit's own status orb in the corner. `ORBIT_ORB_CAPTURABLE=1` puts the orb back in
+/// (for a screen recording of Orbit, say).
+pub fn orb_capturable() -> bool {
+    capturable_from(std::env::var("ORBIT_ORB_CAPTURABLE").ok().as_deref())
+}
+
+fn capturable_from(value: Option<&str>) -> bool {
+    value.is_some_and(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "on" | "true" | "yes"))
+}
+
 #[derive(Clone)]
 pub struct Face {
     pub orbit: Orbit,
@@ -230,6 +241,17 @@ mod tests {
 
     fn ask() -> Ask {
         Ask { id: 3, action: "close window Notepad".into(), question: "q".into(), sent: None }
+    }
+
+    #[test]
+    fn the_orb_stays_out_of_screenshots_unless_asked() {
+        assert!(!capturable_from(None), "by default Orbit's own screenshots do not show its orb");
+        for on in ["1", "on", "TRUE", " yes "] {
+            assert!(capturable_from(Some(on)), "{on:?}");
+        }
+        for off in ["", "0", "off", "false", "no", "maybe"] {
+            assert!(!capturable_from(Some(off)), "{off:?}");
+        }
     }
 
     #[test]

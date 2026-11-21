@@ -322,7 +322,7 @@ fn orb_overlay() -> rune::ConfiguredOverlay<Face> {
     spec.margin = 14.0;
     spec.align = Align::End;
     spec.inset = 20.0;
-    spec.options(OverlayOptions { input: OverlayInput::Regions, prewarm: true, ..Default::default() })
+    spec.options(OverlayOptions { input: OverlayInput::Regions, prewarm: true, exclude_from_capture: !face::orb_capturable(), ..Default::default() })
         .compositor(SphereCompositor::default())
 }
 
