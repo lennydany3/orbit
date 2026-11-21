@@ -1,5 +1,5 @@
 """Reminders, notes, tasks and saved playlists said in plain words: answered without the language model, and nothing else is touched."""
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -57,6 +57,32 @@ def test_a_timer_and_an_alarm(me):
     assert say(me, "wake me up at 6:30") == "Okay, I set an alarm for tomorrow at 6:30 AM."
 
 
+def test_a_timer_is_said_back_in_the_length_it_was_asked_for(me):
+    """The log: "30 seconds" was answered as "1 minute", and "put a timer for 30 minutes" was not understood at all."""
+    assert say(me, "Can you set a timer for 30 seconds?") == "Okay, a timer for 30 seconds."
+    assert say(me, "Can you put a timer for 30 minutes?") == "Okay, a timer for 30 minutes."
+    assert say(me, "start a timer for 45 seconds") == "Okay, a timer for 45 seconds."
+    assert say(me, "set a timer for 1 minute 30 seconds") == "Okay, a timer for 1 minute 30 seconds."
+    assert say(me, "set a countdown for 2 hours") == "Okay, a timer for 2 hours."
+    assert [r.kind for r in me.reminders.reminders] == ["timer"] * 5
+    due = sorted(r.due for r in me.reminders.reminders)[0]
+    assert (due - NOW).total_seconds() == 30, "and it is due in exactly the 30 seconds"
+
+
+def test_a_reminder_with_nothing_to_be_reminded_of_is_not_called_reminder_to_reminder(me):
+    assert say(me, "Set a reminder in one minute.") == "Okay, I'll remind you in 1 minute."
+    assert say(me, "remind me in 20 seconds") == "Okay, I'll remind you in 20 seconds."
+    assert say(me, "set a reminder to stretch in 10 minutes") == "Okay, I'll remind you to stretch in 10 minutes."
+
+
+def test_remainder_is_what_speech_to_text_hears_for_reminder(me):
+    assert say(me, "set a remainder in one minute") == "Okay, I'll remind you in 1 minute."
+    assert say(me, "I want a remainder for 5 minutes to stretch").endswith("to stretch in 5 minutes.")
+    assert say(me, "cancel the remainder about stretch") == "Okay, I cancelled the reminder: Stretch."
+    assert say(me, "can you cancel the remainder?") == "Okay, I cancelled the reminder."
+    assert me.reminders.reminders == []
+
+
 def test_a_request_with_no_time_is_answered_with_what_is_missing_and_saves_nothing(me):
     reply = me.handle("remind me to stretch", Played())
     assert "When should I remind you" in reply.text and reply.ok is False and me.reminders.reminders == []
@@ -101,15 +127,15 @@ def test_cancelling_everything_asks_first_in_the_words_orbit_speaks(me):
 
 # ------------------------------------------------------------------ tasks
 def test_tasks_are_added_listed_and_finished(me):
-    assert say(me, "add milk to my tasks") == "Okay, I added milk to your tasks. You have 1 task to do."
-    assert say(me, "add a task: buy eggs") == "Okay, I added buy eggs to your tasks. You have 2 tasks to do."
-    assert say(me, "put call the bank on my to do list").startswith("Okay, I added call the bank")
-    assert say(me, "what's on my to do list") == "You have 3 tasks to do: milk, buy eggs and call the bank."
-    assert say(me, "mark milk as done") == "Okay, I marked milk as done."
-    assert say(me, "tick off buy eggs") == "Okay, I marked buy eggs as done."
-    assert say(me, "how many tasks do I have") == "You have 1 task to do: call the bank."
+    assert say(me, "add milk to my tasks") == "Okay, I added Milk to your tasks. You have 1 task to do."
+    assert say(me, "add a task: buy eggs") == "Okay, I added Buy eggs to your tasks. You have 2 tasks to do."
+    assert say(me, "put call the bank on my to do list").startswith("Okay, I added Call the bank")
+    assert say(me, "what's on my to do list") == "You have 3 tasks to do: Milk, Buy eggs and Call the bank."
+    assert say(me, "mark milk as done") == "Okay, I marked Milk as done."
+    assert say(me, "tick off buy eggs") == "Okay, I marked Buy eggs as done."
+    assert say(me, "how many tasks do I have") == "You have 1 task to do: Call the bank."
     assert say(me, "clear my completed tasks") == "Okay, I cleared 2 finished tasks."
-    assert [t.text for t in me.notes.tasks] == ["call the bank"]
+    assert [t.text for t in me.notes.tasks] == ["Call the bank"]
 
 
 def test_an_empty_task_is_asked_for(me):
@@ -118,7 +144,7 @@ def test_an_empty_task_is_asked_for(me):
 
 def test_i_finished_something_is_only_a_task_when_it_names_one(me):
     say(me, "add buy eggs to my tasks")
-    assert say(me, "I finished the eggs") == "Okay, I marked buy eggs as done."
+    assert say(me, "I finished the eggs") == "Okay, I marked Buy eggs as done."
     assert say(me, "I finished my exam") is None, "that is chat"
     assert say(me, "mark homework as done") == "I couldn't find a task called homework."
 
@@ -127,6 +153,61 @@ def test_checking_something_else_is_not_a_task(me):
     say(me, "add buy eggs to my tasks")
     for text in ("check the weather", "check my email", "mark the spot", "set the volume to 30", "complete the form"):
         assert say(me, text) is None, text
+
+
+# ------------------------------------------------------------------ named lists (the shopping list)
+def test_several_things_go_onto_a_named_list_in_one_sentence(me):
+    """The log: "add tomato, pasta and milkshake to the shopping list" was answered by chat, and nothing was kept."""
+    assert say(me, "Can you add tomato, pasta, and milkshake in the shopping list?") == "Okay, I added Tomato, Pasta and Milkshake to your shopping list."
+    assert [(t.text, t.list) for t in me.notes.tasks] == [("Tomato", "shopping"), ("Pasta", "shopping"), ("Milkshake", "shopping")]
+    assert say(me, "Can you tell me what are my shopping lists?") == "On your shopping list you have Tomato, Pasta and Milkshake."
+    assert say(me, "what's on my shopping list") == say(me, "read me the shopping list") == say(me, "show my shopping list")
+
+
+def test_groceries_and_grocery_list_are_the_shopping_list(me):
+    say(me, "add eggs and bread to the grocery list")
+    say(me, "put rice on my groceries")
+    assert [t.text for t in me.notes.tasks if t.list == "shopping"] == ["Eggs", "Bread", "Rice"]
+    assert say(me, "what's on my groceries") == "On your shopping list you have Eggs, Bread and Rice."
+
+
+def test_any_list_can_be_named_and_the_plain_tasks_are_left_alone(me):
+    assert say(me, "add toothbrush to my packing list") == "Okay, I added Toothbrush to your packing list."
+    assert say(me, "put sunscreen on the packing list") == "Okay, I added Sunscreen to your packing list. It has 2 things on it now."
+    say(me, "add call the bank to my tasks")
+    assert say(me, "what's on my to do list") == "You have 1 task to do: Call the bank."
+    assert say(me, "what lists do I have") == "You have 2 lists: tasks with 1 thing and packing with 2 things."
+
+
+def test_a_plain_task_with_and_in_it_stays_one_task(me):
+    say(me, "add a task: call mom and dad")
+    say(me, "add buy bread and eggs to my tasks")
+    assert [t.text for t in me.notes.tasks] == ["Call mom and dad", "Buy bread and eggs"]
+
+
+def test_things_are_removed_from_and_ticked_off_a_list(me):
+    say(me, "add tomato, pasta and milk to my shopping list")
+    assert say(me, "remove pasta from my shopping list") == "Okay, I removed Pasta from your shopping list."
+    assert say(me, "take eggs off my shopping list") == "I couldn't find Eggs on your shopping list."
+    assert say(me, "mark tomato as done") == "Okay, I marked Tomato as done on your shopping list."
+    assert say(me, "what's on my shopping list") == "On your shopping list you have Milk."
+
+
+def test_a_list_is_cleared_only_after_asking(me):
+    say(me, "add tomato, pasta and milk to my shopping list")
+    say(me, "add call the bank to my tasks")
+    declined = Played(yes=False)
+    assert say(me, "clear my shopping list", declined) == "Okay, I kept your shopping list."
+    assert describe_action(declined.questions[0]) == "delete everything on your shopping list (3 items)"
+    assert len(me.notes.tasks) == 4
+    assert say(me, "empty my shopping list", Played(yes=True)) == "Okay, I cleared your shopping list."
+    assert [t.text for t in me.notes.tasks] == ["Call the bank"], "only that list went"
+    assert say(me, "clear my shopping list") == "Your shopping list is already empty."
+
+
+def test_an_empty_list_is_said_plainly(me):
+    assert say(me, "what's on my shopping list") == "Your shopping list is empty."
+    assert say(me, "what lists do I have") == "You have no lists with anything on them."
 
 
 # ------------------------------------------------------------------ notes
@@ -218,3 +299,37 @@ def test_a_saved_playlist_says_so_when_spotify_is_not_set_up():
     playlist = type("P", (), {"link": GYM, "title": "Gym Mix"})()
     reply = Personal._play(playlist, NoSpotify())
     assert reply.ok is False and "Spotify is not set up" in reply.text
+
+
+# ------------------------------------------------------------------ snoozing what just rang (after the talk key silenced it)
+def test_snooze_rings_again_what_rang_last(me):
+    from datetime import timedelta
+
+    say(me, "set a timer for 30 seconds")
+    say(me, "remind me to stretch in 40 seconds")
+    me.clock = lambda: NOW + timedelta(seconds=60)
+    assert [r.title for r, _ in me.reminders.take_due(NOW + timedelta(seconds=60))] == ["Timer", "Stretch"]
+    assert say(me, "snooze") == "Okay, I'll ring again in 5 minutes."
+    assert sorted((r.title, r.kind) for r in me.reminders.reminders) == [("Stretch", "reminder"), ("Timer", "timer")]
+    assert all(r.due == NOW + timedelta(seconds=360) for r in me.reminders.reminders)
+    me.reminders.take_due(NOW + timedelta(seconds=400))
+    me.clock = lambda: NOW + timedelta(seconds=401)
+    assert say(me, "remind me again in 10 minutes") == "Okay, I'll ring again in 10 minutes."
+    assert say(me, "five more minutes") == "Okay, I'll ring again in 5 minutes."
+
+
+def test_there_is_nothing_to_snooze_unless_something_rang_lately(me):
+    assert say(me, "snooze") == "There is nothing to snooze: nothing rang just now."
+    say(me, "set a timer for 30 seconds")
+    me.reminders.take_due(NOW + timedelta(seconds=40))
+    me.clock = lambda: NOW + timedelta(hours=2)
+    assert say(me, "snooze it") == "There is nothing to snooze: nothing rang just now."
+
+
+def test_a_timer_and_an_alarm_are_remembered_as_what_they_were_asked_as(me):
+    say(me, "set a timer for 30 seconds")
+    say(me, "wake me up at 6:30")
+    say(me, "remind me to stretch in 10 minutes")
+    assert sorted(r.kind for r in me.reminders.reminders) == ["alarm", "reminder", "timer"]
+    me.reminders.reload()
+    assert sorted(r.kind for r in me.reminders.reminders) == ["alarm", "reminder", "timer"], "and it is in the file"

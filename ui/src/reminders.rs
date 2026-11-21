@@ -100,6 +100,15 @@ impl Reminder {
         })
     }
 
+    /// What it was asked as: "timer" or "alarm" ("remind me ..." is the plain "reminder"). Orbit sets it, and decides how it rings by it;
+    /// the window only shows it, and keeps it when the reminder is edited.
+    pub fn kind(&self) -> &str {
+        match self.extra.get("kind").and_then(Value::as_str) {
+            Some(k @ ("timer" | "alarm")) => k,
+            _ => "reminder",
+        }
+    }
+
     fn to_value(&self) -> Value {
         let mut obj = self.extra.clone();
         obj.insert("id".into(), json!(self.id));
@@ -678,6 +687,23 @@ mod tests {
     }
 
     // ---- the file (the example is read by the Python side too) ----
+
+    #[test]
+    fn a_timer_or_alarm_is_known_by_its_kind_and_keeps_it_through_an_edit() {
+        let data = json!({"reminders": [
+            {"id": "r-1", "title": "Pasta", "due": "2026-11-23T17:00", "kind": "timer"},
+            {"id": "r-2", "title": "Wake up", "due": "2026-11-23T06:30", "kind": "alarm"},
+            {"id": "r-3", "title": "Odd", "due": "2026-11-23T09:00", "kind": "sing"},
+            {"id": "r-4", "title": "Plain", "due": "2026-11-23T09:00"}]});
+        let r = Reminders::from_map(data.as_object().unwrap());
+        assert_eq!(r.items.iter().map(Reminder::kind).collect::<Vec<_>>(), ["timer", "alarm", "reminder", "reminder"]);
+        let now = at(NOW);
+        let edited = Draft::editing(&r.items[0], &now).build(&now).unwrap();
+        assert_eq!(edited.kind(), "timer", "an edit does not turn a timer into a plain reminder");
+        let saved = Reminders { items: vec![edited, r.items[2].clone()], ..Reminders::default() }.to_map();
+        assert_eq!((&saved["reminders"][0]["kind"], &saved["reminders"][1]["kind"]), (&json!("timer"), &json!("sing")), "and what the window does not know is written back as it was");
+        assert!(saved["reminders"][1].get("enabled").is_some());
+    }
 
     #[test]
     fn the_example_file_is_read_as_written_and_written_back_the_same() {

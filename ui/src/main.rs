@@ -196,6 +196,17 @@ fn spec() -> AppSpec<App> {
                     r#"{"type":"confirm","id":1,"question":"os_close_window(...) is a risky action. Allow?","action":"close window Notepad"}"#,
                 ])
             }),
+            ("live-ringing", |s| {
+                live(s, "speaking", &[
+                    r#"{"type":"reminder","id":"r-9","title":"Pasta","text":"Your timer is up.","kind":"timer","ringing":true}"#,
+                ])
+            }),
+            ("live-ringing-reminders", |s| {
+                data_scene(s);
+                s.go(Page::Reminders);
+                s.on_event(Event::Status(Status::Open), 0.0);
+                s.on_event(Event::Message(r#"{"type":"reminder","id":"r-3f9a1c2b","title":"Call mom","text":"Reminder: Call mom.","ringing":true}"#.to_owned()), 0.0);
+            }),
             ("settings-general", |s| settings_scene(s, Section::General)),
             ("settings-general-talk", |s| {
                 settings_scene(s, Section::General);
@@ -236,6 +247,17 @@ fn spec() -> AppSpec<App> {
             }),
             ("notes-tasks", |s| {
                 data_scene(s);
+                s.go(Page::Notes);
+                s.notes.select_tab(Tab::Tasks);
+            }),
+            ("notes-lists", |s| {
+                s.notes = NotesState::from_json(include_str!("../../tests/fixtures/notes_lists_example.json"));
+                s.go(Page::Notes);
+                s.notes.select_tab(Tab::Tasks);
+                s.notes.select_list(Some("shopping".into()));
+            }),
+            ("notes-lists-all", |s| {
+                s.notes = NotesState::from_json(include_str!("../../tests/fixtures/notes_lists_example.json"));
                 s.go(Page::Notes);
                 s.notes.select_tab(Tab::Tasks);
             }),

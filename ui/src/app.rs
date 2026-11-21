@@ -97,6 +97,30 @@ pub struct Ask {
     pub sent: Option<bool>,
 }
 
+/// A reminder, timer or alarm that is ringing: it rings until it is stopped (by voice, the talk key, or the Stop button).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ring {
+    pub id: String,
+    pub title: String,
+    /// "reminder", "timer" or "alarm".
+    pub kind: String,
+    /// What Orbit said it is: "Your timer is up."
+    pub text: String,
+    /// Stop was pressed here, and Orbit has not yet said it stopped.
+    pub sent: bool,
+}
+
+impl Ring {
+    /// "Timer", "Alarm" or "Reminder": what to call it above its text.
+    pub fn heading(&self) -> &'static str {
+        match self.kind.as_str() {
+            "timer" => "Timer",
+            "alarm" => "Alarm",
+            _ => "Reminder",
+        }
+    }
+}
+
 fn clip(text: &str, chars: usize) -> String {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.chars().count() <= chars {
@@ -127,6 +151,8 @@ pub struct Live {
     level: f32,
     pub caption: Option<Caption>,
     pub confirm: Option<Ask>,
+    /// The reminder, timer or alarm that is ringing now.
+    pub ring: Option<Ring>,
     /// How the last chat reply felt (`proud`, `caring` ...), for the face to use.
     pub feeling: String,
     child: Option<Spawned>,
@@ -145,6 +171,7 @@ impl Default for Live {
             level: 0.0,
             caption: None,
             confirm: None,
+            ring: None,
             feeling: String::new(),
             child: None,
         }
@@ -615,6 +642,7 @@ impl App {
         self.live.pacer.clear();
         self.live.level = 0.0;
         self.live.confirm = None;
+        self.live.ring = None;                                  // nothing can stop it from here, and Orbit's ringing stops with Orbit
         self.live.caption = None;
     }
 
@@ -670,9 +698,17 @@ impl App {
                 self.live.feeling = emotion;
                 self.say("Orbit", &text, t);
             }
-            Incoming::Reminder { text, .. } => {
+            Incoming::Reminder { id, title, text, kind, ringing } => {
                 self.reminders.reload_if_changed();                    // the list has moved on: show it at once
+                if ringing {
+                    self.live.ring = Some(Ring { id, title, kind, text: text.clone(), sent: false });
+                }
                 self.reminder_said = Some(text);
+            }
+            Incoming::AlarmStopped { id } => {
+                if self.live.ring.as_ref().is_some_and(|ring| ring.id == id) {
+                    self.live.ring = None;
+                }
             }
             Incoming::Confirm { id, question, action } => self.live.confirm = Some(Ask { id, action, question, sent: None }),
             Incoming::ConfirmDone { id, .. } => {
@@ -704,6 +740,23 @@ impl App {
         Some(message::confirm_answer(ask.id, yes))
     }
 
+    /// The Stop button: the message that silences the ringing reminder, if one is ringing and Stop was not already pressed.
+    pub fn take_dismiss(&mut self) -> Option<String> {
+        let ring = self.live.ring.as_mut().filter(|r| !r.sent)?;
+        ring.sent = true;
+        Some(message::dismiss_request(&ring.id))
+    }
+
+    /// Stops the ringing over the link. False if nothing is ringing, or the link is gone (then Stop can be pressed again).
+    pub fn stop_alarm(&mut self) -> bool {
+        let Some(text) = self.take_dismiss() else { return false };
+        let sent = self.live.link.as_ref().is_some_and(|link| link.send(text));
+        if !sent && let Some(ring) = self.live.ring.as_mut() {
+            ring.sent = false;
+        }
+        sent
+    }
+
     /// Answers the open question over the link. False if there is none, or the link is gone.
     pub fn answer_confirm(&mut self, yes: bool) -> bool {
         let Some(text) = self.take_answer(yes) else { return false };
@@ -718,14 +771,14 @@ impl App {
 
     /// Is Orbit doing anything the orb should be there for? (What was said is not shown on the orb, so it never keeps it up.)
     pub fn active(&self) -> bool {
-        !matches!(self.orbit.state, OrbState::Idle | OrbState::Muted) || self.live.confirm.is_some()
+        !matches!(self.orbit.state, OrbState::Idle | OrbState::Muted) || self.live.confirm.is_some() || self.live.ring.is_some()
     }
 
     /// What the orb's window shows now.
     pub fn face(&self) -> Face {
         let keys = self.prefs.hotkeys();
-        let place = layout::place(self.prefs.look(), layout::screen(), self.live.confirm.is_some());
-        Face { orbit: self.orbit.clone(), ask: self.live.confirm.clone(), keys: false, yes: keys.yes.clone(), no: keys.no.clone(), hub: self.shell.hub.clone(), place }
+        let place = layout::place(self.prefs.look(), layout::screen(), self.live.confirm.is_some() || self.live.ring.is_some());
+        Face { orbit: self.orbit.clone(), ask: self.live.confirm.clone(), ring: self.live.ring.clone(), keys: false, yes: keys.yes.clone(), no: keys.no.clone(), hub: self.shell.hub.clone(), place }
     }
 
     /// Is the Customization page open? The orb is on screen for as long as it is, so moving it can be seen where it will be.
@@ -1078,6 +1131,56 @@ mod tests {
         assert!(app.live.caption.is_none() && app.live.confirm.is_none());
         app.advance(2.1);
         assert_eq!(app.orbit.level, 0.35, "back to the slider");
+    }
+
+    #[test]
+    fn a_ringing_timer_shows_a_stop_button_that_asks_orbit_once_and_goes_when_orbit_says_it_stopped() {
+        let mut app = live();
+        msg(&mut app, r#"{"type":"reminder","id":"r-2","title":"Pasta","text":"Your timer is up.","kind":"timer","ringing":true}"#, 1.0);
+        let ring = app.live.ring.clone().expect("it is ringing");
+        assert_eq!((ring.id.as_str(), ring.heading(), ring.text.as_str(), ring.sent), ("r-2", "Timer", "Your timer is up.", false));
+        assert!(app.active(), "the orb comes up for it even if Orbit is idle");
+
+        let sent = app.take_dismiss().expect("a stop to send");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&sent).unwrap(), serde_json::json!({"type": "dismiss", "id": "r-2"}));
+        assert_eq!(app.take_dismiss(), None, "pressed once: it is asked once");
+        assert!(app.live.ring.as_ref().unwrap().sent);
+
+        msg(&mut app, r#"{"type":"alarm_stopped","id":"r-9","by":"voice"}"#, 1.5);
+        assert!(app.live.ring.is_some(), "another reminder's stop does not end this ring");
+        msg(&mut app, r#"{"type":"alarm_stopped","id":"r-2","by":"voice"}"#, 1.6);
+        assert!(app.live.ring.is_none() && !app.active());
+    }
+
+    #[test]
+    fn a_reminder_that_only_came_due_does_not_ring_and_each_kind_has_its_name() {
+        let mut app = live();
+        msg(&mut app, r#"{"type":"reminder","id":"r-1","title":"Call mom","text":"Reminder: Call mom."}"#, 1.0);
+        assert!(app.live.ring.is_none(), "a late one is only said");
+        for (kind, name) in [("reminder", "Reminder"), ("alarm", "Alarm"), ("timer", "Timer")] {
+            msg(&mut app, &format!(r#"{{"type":"reminder","id":"r-{kind}","title":"x","text":"t","kind":"{kind}","ringing":true}}"#), 1.0);
+            assert_eq!(app.live.ring.as_ref().unwrap().heading(), name);
+        }
+    }
+
+    #[test]
+    fn with_no_link_stop_cannot_be_sent_and_can_be_pressed_again() {
+        let mut app = live();
+        msg(&mut app, r#"{"type":"reminder","id":"r-2","title":"Pasta","text":"Your timer is up.","kind":"timer","ringing":true}"#, 1.0);
+        assert!(!app.stop_alarm());
+        assert!(!app.live.ring.as_ref().unwrap().sent, "so the button comes back");
+        assert!(!App::default().stop_alarm(), "nothing ringing, nothing to stop");
+    }
+
+    #[test]
+    fn the_face_carries_the_ringing_card_and_losing_orbit_ends_the_ring() {
+        let mut app = live();
+        msg(&mut app, r#"{"type":"reminder","id":"r-2","title":"Pasta","text":"Your timer is up.","kind":"timer","ringing":true}"#, 1.0);
+        assert_eq!(app.face().ring.as_ref().map(|r| r.id.as_str()), Some("r-2"));
+        let face = app.face();
+        assert_eq!(face.size().1, face.place.diameter + layout::SPARE + layout::ASK_EXTRA, "the orb's window grows to hold the card");
+        app.on_event(Event::Status(Status::Closed), 2.0);
+        assert!(app.live.ring.is_none(), "Orbit stopping stops its ringing, and nothing could answer a Stop now");
     }
 
     #[test]

@@ -4,7 +4,7 @@ The data is `reminders.json` (see `userdata`):
 
     {"version": 1,
      "reminders": [{"id": "r-3f9a1c2b", "title": "Stretch", "due": "2026-11-23T17:00", "repeat": "none", "enabled": true,
-                    "created": "2026-11-22T10:15"}],
+                    "created": "2026-11-22T10:15", "kind": "timer"}],     # kind: reminder (the default, left out), timer or alarm
      "history": [{"id": "r-3f9a1c2b", "title": "Stretch", "at": "2026-11-22T17:00"}],     # what fired lately, newest first
      "seen": "2026-11-22T09:00"}                                                           # when the window last showed them
 
@@ -23,6 +23,7 @@ from pathlib import Path
 from . import userdata
 
 REPEATS = ("none", "daily", "weekdays", "weekly", "monthly")
+KINDS = ("reminder", "timer", "alarm")               # what it was asked as: it decides how it rings (a timer and a reminder sound different)
 MAX_REMINDERS = 200
 MAX_TITLE = 120
 MAX_HISTORY = 30
@@ -50,6 +51,7 @@ class Reminder:
     repeat: str = "none"
     enabled: bool = True
     created: datetime | None = None
+    kind: str = "reminder"
     extra: dict = field(default_factory=dict)               # anything else the file had on it, written back untouched
 
     @classmethod
@@ -63,8 +65,9 @@ class Reminder:
         repeat = raw.get("repeat") if raw.get("repeat") in REPEATS else "none"
         enabled = raw.get("enabled") if isinstance(raw.get("enabled"), bool) else True
         rid = userdata.clean(raw.get("id"), 40) or userdata.new_id("r")
-        known = {"id", "title", "due", "repeat", "enabled", "created"}
-        return cls(rid, title, due, repeat, enabled, userdata.from_text(raw.get("created")),
+        kind = raw.get("kind") if raw.get("kind") in KINDS else "reminder"
+        known = {"id", "title", "due", "repeat", "enabled", "created", "kind"}
+        return cls(rid, title, due, repeat, enabled, userdata.from_text(raw.get("created")), kind,
                    {k: v for k, v in raw.items() if k not in known})
 
     def to_dict(self) -> dict:
@@ -72,6 +75,8 @@ class Reminder:
         out.update(id=self.id, title=self.title, due=userdata.to_text(self.due), repeat=self.repeat, enabled=self.enabled)
         if self.created is not None:
             out["created"] = userdata.to_text(self.created)
+        if self.kind != "reminder":
+            out["kind"] = self.kind
         return out
 
 
@@ -158,10 +163,10 @@ class ReminderStore:
         return [r for r in self.reminders if all(w in r.title.lower() for w in wanted)]
 
     # ---- changing ----
-    def add(self, title: str, due: datetime, repeat: str = "none", now: datetime | None = None) -> Reminder:
+    def add(self, title: str, due: datetime, repeat: str = "none", now: datetime | None = None, kind: str = "reminder") -> Reminder:
         title = userdata.clean(title, MAX_TITLE) or "Reminder"
         reminder = Reminder(userdata.new_id("r"), title, due.replace(microsecond=0), repeat if repeat in REPEATS else "none", True,
-                            (now or datetime.now()).replace(second=0, microsecond=0))
+                            (now or datetime.now()).replace(second=0, microsecond=0), kind if kind in KINDS else "reminder")
 
         def apply() -> Reminder:
             if len(self.reminders) >= MAX_REMINDERS:
@@ -199,7 +204,7 @@ class ReminderStore:
                     said.append((r, late))
                     self.history.insert(0, {"id": r.id, "title": r.title, "at": userdata.to_text(now.replace(microsecond=0))})
                 if r.repeat != "none":
-                    keep.append(Reminder(r.id, r.title, advance(r.due, r.repeat, now), r.repeat, True, r.created, r.extra))
+                    keep.append(Reminder(r.id, r.title, advance(r.due, r.repeat, now), r.repeat, True, r.created, r.kind, r.extra))
             self.reminders = keep
             del self.history[MAX_HISTORY:]
             return said
@@ -215,12 +220,33 @@ def clock_text(when: datetime) -> str:
     return f"{hour}:{when.minute:02d} {'AM' if when.hour < 12 else 'PM'}"
 
 
+def duration_text(seconds: float) -> str:
+    """A length of time as a person says it: "30 seconds", "1 minute", "10 minutes", "1 hour 30 minutes", "2 days"."""
+    total = max(1, round(seconds))
+    if total < 60:
+        return f"{total} second" + ("" if total == 1 else "s")
+    if total < 3600:
+        minutes, rest = divmod(total, 60)
+        if rest >= 30 and minutes < 10:
+            return f"{minutes} minutes {rest} seconds" if minutes != 1 else f"1 minute {rest} seconds"
+        minutes += rest >= 30
+        return "1 minute" if minutes == 1 else f"{minutes} minutes"
+    if total < 86400:
+        hours, rest = divmod(total, 3600)
+        minutes = round(rest / 60)
+        if minutes == 60:
+            hours, minutes = hours + 1, 0
+        text = "1 hour" if hours == 1 else f"{hours} hours"
+        return text if minutes == 0 else f"{text} {minutes} minute" + ("" if minutes == 1 else "s")
+    days = round(total / 86400)
+    return "1 day" if days == 1 else f"{days} days"
+
+
 def when_text(due: datetime, now: datetime) -> str:
-    """How a time is said: "in 10 minutes", "today at 5:00 PM", "tomorrow at 9:00 AM", "Monday at 3:00 PM", "25 Nov at 9:00 AM"."""
+    """How a time is said: "in 30 seconds", "in 10 minutes", "today at 5:00 PM", "tomorrow at 9:00 AM", "Monday at 3:00 PM"."""
     delta = due - now
     if timedelta(0) <= delta < timedelta(minutes=60):
-        minutes = max(1, round(delta.total_seconds() / 60))
-        return "in 1 minute" if minutes == 1 else f"in {minutes} minutes"
+        return "in " + duration_text(delta.total_seconds())
     days = (due.date() - now.date()).days
     at = f"at {clock_text(due)}"
     if days == 0:
@@ -252,26 +278,31 @@ def _ordinal(n: int) -> str:
 def announcement(reminder: Reminder, late: bool = False) -> str:
     """What Orbit says when it is due."""
     title = reminder.title.strip().rstrip(".!?")
-    if title.lower() in ("timer", "your timer"):
+    if title.lower() in ("timer", "your timer") or (reminder.kind == "timer" and title.lower() in ("", "reminder")):
         return "Your timer is up."
-    if title.lower() == "alarm":
+    if title.lower() == "alarm" or (reminder.kind == "alarm" and title.lower() in ("", "reminder")):
         return "Your alarm is going off."
-    return f"{'Reminder, a bit late: ' if late else 'Reminder: '}{title}."
+    if title.lower() == "reminder":                           # it was set with nothing to be reminded of
+        return "This is your reminder." if not late else "This is your reminder, a bit late."
+    name = {"timer": "Timer", "alarm": "Alarm"}.get(reminder.kind, "Reminder")          # a timer or alarm with a name of its own: "Timer: pasta."
+    return f"{name + ', a bit late: ' if late else name + ': '}{title}."
 
 
 # ---- understanding what was said --------------------------------------------------------------------------------------
 
 _FILLER = frozenset({"a", "an", "the", "my", "me", "to", "that", "about", "of", "for", "reminder", "reminders", "please", "i", "it"})
 
+# "reminder" as speech-to-text hears it: it often writes "remainder"
+NOUN = r"(?:reminder|remainder|alarm|timer|countdown)"
 _INTENT = re.compile(
-    r"^(?:(?:hey )?(?:orbit )?)?(?:please\s+)?(?:(?:can|could|would) you\s+(?:please\s+)?)?"
-    r"(?P<what>remind me|remind us|set (?:me )?(?:up )?(?:a |an |the )?(?:new )?(?P<kind>reminder|alarm|timer)|"
-    r"(?:add|create|make|schedule|new) (?:me )?(?:a |an )?(?:new )?(?P<kind2>reminder|alarm|timer)|"
-    r"wake me(?: up)?)\b[\s,:]*", re.I)
+    r"^(?:(?:hey )?(?:orbit )?)?(?:please\s+)?(?:(?:can|could|would|will) you\s+(?:please\s+)?)?(?:(?:i|we) (?:need|want|would like)\s+)?"
+    r"(?P<what>remind me|remind us|wake me(?: up)?|"
+    r"(?:set|put|start|make|create|add|schedule|give|get|new)\s+(?:me\s+|us\s+|up\s+)?(?:a\s+|an\s+|the\s+|my\s+)?(?:new\s+)?(?P<kind>" + NOUN + r")|"
+    r"(?:a\s+|an\s+)(?P<kind2>" + NOUN + r")(?=\s+(?:for|at|in|after)\b))\b[\s,:]*", re.I)
 
 _NUM = r"(?:\d+(?:\.\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty five|forty|fifty|sixty|ninety)"
 _UNIT = r"(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)"
-_PAIR = rf"(?:half an? hour|(?:{_NUM}|a couple of|a few)\s*(?:and a half\s+)?{_UNIT}|{_NUM}\s*(?:h|m|s)\b)"
+_PAIR = rf"(?:half an? hour|(?:{_NUM}|a couple of|a few)\s*(?:and a half\s+)?{_UNIT}(?:\s+and a half)?|{_NUM}\s*(?:h|m|s)\b)"
 _RELATIVE = re.compile(rf"\b(?:in|after|for)\s+(?P<amount>{_PAIR}(?:(?:\s*,\s*|\s+and\s+|\s+){_PAIR})*)(?=\W|$)", re.I)
 _CLOCK = re.compile(
     r"(?:\b(?:at|@|by|around)\s*)?\b(?:(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>a\.?m\.?|p\.?m\.?)\b|"
@@ -294,13 +325,14 @@ class When:
     due: datetime
     repeat: str
     spans: list[tuple[int, int]]            # where in the sentence the time was said (so what is left is the thing to remember)
+    seconds: int | None = None              # said as a length of time ("in 30 seconds"): how long, for saying it back the way it was asked
 
 
 def _seconds_in(amount: str) -> float | None:
     total = 0.0
     text = amount.lower()
-    for match in re.finditer(rf"(half an? hour|a couple of|a few|{_NUM})\s*(and a half\s+)?({_UNIT}|h|m|s)?\b", text):
-        word, half, unit = match.group(1), match.group(2), match.group(3)
+    for match in re.finditer(rf"(half an? hour|a couple of|a few|{_NUM})\s*(and a half\s+)?({_UNIT}|h|m|s)?(\s+and a half)?\b", text):
+        word, half, unit = match.group(1), match.group(2) or match.group(4), match.group(3)
         if word.startswith("half"):
             total += 1800
             continue
@@ -319,6 +351,18 @@ def _seconds_in(amount: str) -> float | None:
         unit = unit[0]
         total += count * {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[unit]
     return total or None
+
+
+def spoken_length(text: str) -> int | None:
+    """A length of time said anywhere in `text`, in seconds: "in 10 minutes", "give me five more minutes", "again in an hour". None if none was said."""
+    low = re.sub(r"\b(?:more|again|another|extra)\b", " ", text.lower())
+    found = _RELATIVE.search(low)
+    amount = found.group("amount") if found else None
+    if amount is None:
+        bare = re.search(rf"\b(?P<amount>{_PAIR}(?:(?:\s*,\s*|\s+and\s+|\s+){_PAIR})*)(?=\W|$)", low)
+        amount = bare.group("amount") if bare else None
+    seconds = _seconds_in(amount) if amount else None
+    return round(seconds) if seconds else None
 
 
 def _clock_from(match: re.Match) -> tuple[time, bool] | None:
@@ -368,7 +412,7 @@ def parse_when(text: str, now: datetime, morning: bool = False) -> When | None:
     if rel is not None and rep is None:
         seconds = _seconds_in(rel.group("amount"))
         if seconds is not None:
-            return When(now + timedelta(seconds=round(seconds)), "none", [rel.span()])
+            return When(now + timedelta(seconds=round(seconds)), "none", [rel.span()], round(seconds))
 
     spans: list[tuple[int, int]] = []
     repeat, weekday, day, part_hour = "none", None, None, None
@@ -456,6 +500,12 @@ class Request:
     title: str
     due: datetime
     repeat: str
+    seconds: int | None = None              # "in 30 seconds": how long it was asked for
+
+    @property
+    def has_own_title(self) -> bool:
+        """Did the sentence say what to be reminded of? ("remind me in a minute" did not.)"""
+        return self.title not in ("Reminder", "Timer", "Alarm")
 
 
 def _title_from(text: str, spans: list[tuple[int, int]], kind: str) -> str:
@@ -467,9 +517,9 @@ def _title_from(text: str, spans: list[tuple[int, int]], kind: str) -> str:
         keep.append(text[cursor:start])
         cursor = end
     keep.append(text[cursor:])
-    rest = " ".join("".join(keep).split())
+    rest = " ".join("".join(keep).split()).strip(" ,.;:-?!")
     rest = re.sub(r"^(?:and\s+)?(?:to|that|about|of|for|on|at|in)\s+", "", rest, flags=re.I)
-    rest = re.sub(r"\s+(?:at|on|in|by|for|around|and)$", "", rest, flags=re.I).strip(" ,.;:-")
+    rest = re.sub(r"\s+(?:at|on|in|by|for|around|and)$", "", rest, flags=re.I).strip(" ,.;:-?!")
     rest = re.sub(r"^(?:to|that|about)\s+", "", rest, flags=re.I)
     if re.fullmatch(r"(?:to|that|about|of|for|on|at|in|by|and|around)", rest, re.I):
         rest = ""
@@ -486,6 +536,7 @@ def parse_request(text: str, now: datetime) -> Request | str | None:
     if intent is None:
         return None
     kind = (intent.group("kind") or intent.group("kind2") or ("alarm" if intent.group("what").lower().startswith("wake") else "reminder")).lower()
+    kind = {"remainder": "reminder", "countdown": "timer"}.get(kind, kind)
     rest = said[intent.end():]
     when = parse_when(rest, now, morning=kind == "alarm")
     if when is None:
@@ -494,4 +545,4 @@ def parse_request(text: str, now: datetime) -> Request | str | None:
         return "When should I remind you? Say it with a time, like remind me to stretch in ten minutes, or tomorrow at nine."
     if when.due <= now and when.repeat == "none":
         return "That time has already passed. Say a time that is still ahead."
-    return Request(kind, _title_from(rest, when.spans, kind), when.due, when.repeat)
+    return Request(kind, _title_from(rest, when.spans, kind), when.due, when.repeat, when.seconds)

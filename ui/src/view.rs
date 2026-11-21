@@ -4,9 +4,10 @@
 //! The states can still be tried by hand with the keys 1 to 9, 0 and M (on Home), and Esc answers a question with no.
 
 use rune::tok::TextStyle;
-use rune::{Align, Color, Cx, El, col, effect, row, text};
+use rune::{Align, Color, Cx, El, col, effect, icon, row, text};
 
-use crate::app::{App, Ask, Page};
+use crate::app::{App, Ask, Page, Ring};
+use crate::icons;
 use crate::orbit::SphereConfig;
 
 /// Marks that tell the compositor which sphere a slot is.
@@ -89,8 +90,56 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
                 .min_w(0.0)
                 .h_full()
                 .padding(10.0)
+                .gap(8.0)
+                .children(s.live.ring.as_ref().map(|ring| ring_banner(ring, &ink)))
                 .child(col().key("panel").w_full().grow(1.0).min_h(0.0).radius(14.0).fill(if s.page == Page::Home { Color::BLACK } else { ink.panel }).border(1.0, ink.hair).child(body)),
         )
+}
+
+/// A reminder or timer is ringing: a bar above whatever page is open, with the Stop button (saying "ok thanks" stops it too).
+fn ring_banner(ring: &Ring, ink: &Ink) -> El {
+    let stop = if ring.sent {
+        text("Stopping\u{2026}").font(t(12.0, 400.0)).color(ink.muted)
+    } else {
+        row()
+            .key("ring-stop")
+            .role("button")
+            .label("Stop")
+            .focusable(true)
+            .h(32.0)
+            .w(96.0)
+            .center()
+            .radius(8.0)
+            .fill(ink.fg)
+            .border(1.0, ink.fg)
+            .on_press(|s: &mut App| {
+                s.stop_alarm();
+            })
+            .child(text("Stop").font(t(13.0, 500.0)).color(Color::BLACK).a11y_hidden())
+    };
+    row()
+        .key("ring-banner")
+        .role("dialog")
+        .label(ring.heading())
+        .w_full()
+        .items_center()
+        .gap(14.0)
+        .padding(12.0)
+        .radius(12.0)
+        .fill(ink.raised)
+        .border(1.0, ink.accent)
+        .child(icon(&icons::BELL, 18.0).color(ink.accent_text))
+        .child(
+            col()
+                .key("ring-text")
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(text(ring.heading()).font(t(11.0, 400.0).tracking(1.54)).color(ink.muted))
+                .child(text(&ring.text).font(t(15.0, 400.0)).color(ink.fg).wrap()),
+        )
+        .child(text("or say \u{201c}ok thanks\u{201d}").font(t(11.0, 400.0)).color(ink.muted))
+        .child(stop)
 }
 
 // ---- the stage ----------------------------------------------------------------------------------------------------------------

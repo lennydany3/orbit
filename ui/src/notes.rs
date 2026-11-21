@@ -4,8 +4,11 @@
 //! ```json
 //! {"version": 1,
 //!  "notes": [{"id": "n-1a2b3c4d", "title": "Gym plan", "body": "Mon legs ...", "created": "2026-11-22T10:15", "updated": "2026-11-22T10:20"}],
-//!  "tasks": [{"id": "t-9f8e7d6c", "text": "Buy milk", "done": false, "created": "2026-11-22T10:16"}]}
+//!  "tasks": [{"id": "t-9f8e7d6c", "text": "Buy milk", "done": false, "created": "2026-11-22T10:16", "list": "shopping"}]}
 //! ```
+//!
+//! A task may name the list it is on ("shopping", "packing"); with no `list` it is on the plain task list, called Tasks. Orbit puts
+//! things on a list when you say "add tomato and pasta to my shopping list".
 //!
 //! What is typed into a note is saved a moment after the typing stops (and at once when another note is opened or the page is left),
 //! as one whole file. No drawing and no windowing, so all of it is tested; `notes_view` only draws it.
@@ -23,6 +26,34 @@ pub const MAX_TASKS: usize = 500;
 pub const MAX_TITLE: usize = 80;
 pub const MAX_BODY: usize = 20_000;
 pub const MAX_TASK: usize = 200;
+/// The longest name a list has.
+pub const MAX_LIST: usize = 30;
+/// What the plain task list is called.
+pub const PLAIN_LIST: &str = "Tasks";
+
+/// A list's name as it is kept: lowercase words of letters, digits and hyphens, at most `MAX_LIST` characters ("" is the plain task
+/// list). The same rule as `clean_list` in `orbit/notes.py`, so both sides spell a list the same way.
+pub fn clean_list(name: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    for c in name.to_lowercase().chars().chain(std::iter::once(' ')) {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || (c == '-' && !word.is_empty()) {
+            word.push(c);
+        } else if !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+    }
+    words.join(" ").chars().take(MAX_LIST).collect::<String>().trim().to_owned()
+}
+
+/// How a list is called on the page and out loud: "Shopping", and "Tasks" for the plain one.
+pub fn list_title(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        None => PLAIN_LIST.to_owned(),
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+    }
+}
 /// How long after the last keystroke a note is saved (seconds).
 pub const SAVE_AFTER: f64 = 0.8;
 /// What a note with no title is called.
@@ -96,10 +127,12 @@ pub struct Task {
     pub text: String,
     pub done: bool,
     pub created: Option<Stamp>,
+    /// Which list it is on ("" is the plain task list).
+    pub list: String,
     extra: Map<String, Value>,
 }
 
-const TASK_KNOWN: [&str; 4] = ["id", "text", "done", "created"];
+const TASK_KNOWN: [&str; 5] = ["id", "text", "done", "created", "list"];
 
 impl Task {
     fn parse(raw: &Value) -> Option<Task> {
@@ -114,6 +147,7 @@ impl Task {
             text,
             done: obj.get("done").and_then(Value::as_bool) == Some(true),
             created: userdata::text(obj, "created").and_then(Stamp::parse),
+            list: clean_list(userdata::text(obj, "list").unwrap_or_default()),
             extra: userdata::rest(obj, &TASK_KNOWN),
         })
     }
@@ -125,6 +159,9 @@ impl Task {
         obj.insert("done".into(), json!(self.done));
         if let Some(created) = self.created {
             obj.insert("created".into(), json!(created.to_text()));
+        }
+        if !self.list.is_empty() {
+            obj.insert("list".into(), json!(self.list));
         }
         Value::Object(obj)
     }
@@ -153,6 +190,23 @@ impl Notes {
         data.insert("notes".into(), Value::Array(self.notes.iter().map(Note::to_value).collect()));
         data.insert("tasks".into(), Value::Array(self.tasks.iter().map(Task::to_value).collect()));
         data
+    }
+
+    /// Every list that has something on it, with how many are still to do: the plain task list first, then in the order they began.
+    #[cfg(test)]
+    fn data_lists(&self) -> Vec<String> {
+        self.list_names().into_iter().map(|(name, _)| name).collect()
+    }
+
+    pub fn list_names(&self) -> Vec<(String, usize)> {
+        let mut order: Vec<&str> = Vec::new();
+        for t in &self.tasks {
+            if !order.contains(&t.list.as_str()) {
+                order.push(&t.list);
+            }
+        }
+        order.sort_by_key(|name| !name.is_empty());
+        order.into_iter().map(|name| (name.to_owned(), self.tasks.iter().filter(|t| t.list == name && !t.done).count())).collect()
     }
 
     /// The newest change first (notes changed in the same minute: the one saved last).
@@ -192,6 +246,10 @@ pub struct NotesState {
     /// When the first unsaved keystroke happened (page clock, seconds).
     dirty_since: Option<f64>,
     pub new_task: TextEdit,
+    /// Which list the Tasks tab shows and adds to: `None` is every list together, `Some("")` the plain task list.
+    pub list: Option<String>,
+    /// The box a new list's name is typed in.
+    pub new_list: TextEdit,
     pub notice: Option<Notice>,
     pub confirm_delete: Option<String>,
     stamp: Option<(u128, u64)>,
@@ -210,6 +268,8 @@ impl Default for NotesState {
             saved: (String::new(), String::new()),
             dirty_since: None,
             new_task: TextEdit::new(""),
+            list: None,
+            new_list: TextEdit::new(""),
             notice: None,
             confirm_delete: None,
             stamp: None,
@@ -349,6 +409,10 @@ impl NotesState {
         &mut self.new_task
     }
 
+    pub fn list_edit(&mut self) -> &mut TextEdit {
+        &mut self.new_list
+    }
+
     /// Is there something typed in the editor that is not saved yet?
     fn unsaved(&self) -> bool {
         self.open.is_some() && (self.title.text != self.saved.0 || self.body.text != self.saved.1)
@@ -446,8 +510,53 @@ impl NotesState {
 
     // ---- tasks ----
 
+    /// Is this task on what the Tasks tab shows (every list, or the one chosen)?
+    pub fn in_view(&self, task: &Task) -> bool {
+        self.list.as_ref().is_none_or(|list| *list == task.list)
+    }
+
+    /// How many tasks in view are still to do.
     pub fn open_tasks(&self) -> usize {
-        self.data.tasks.iter().filter(|t| !t.done).count()
+        self.data.tasks.iter().filter(|t| !t.done && self.in_view(t)).count()
+    }
+
+    /// How many tasks in view there are, finished or not.
+    pub fn tasks_in_view(&self) -> usize {
+        self.data.tasks.iter().filter(|t| self.in_view(t)).count()
+    }
+
+    /// What the Tasks tab offers to look at: everything, then each list (with how many are to do). The chosen list is there even when
+    /// nothing is on it yet.
+    pub fn list_choices(&self) -> Vec<(Option<String>, String, usize)> {
+        let all = self.data.tasks.iter().filter(|t| !t.done).count();
+        let mut choices = vec![(None, "All".to_owned(), all)];
+        let mut named = self.data.list_names();
+        if let Some(chosen) = &self.list
+            && !named.iter().any(|(name, _)| name == chosen)
+        {
+            named.push((chosen.clone(), 0));
+        }
+        choices.extend(named.into_iter().map(|(name, open)| (Some(name.clone()), list_title(&name), open)));
+        choices
+    }
+
+    /// Looks at one list (or, with `None`, every list together). New tasks go on the one being looked at.
+    pub fn select_list(&mut self, list: Option<String>) {
+        self.list = list;
+        self.notice = None;
+    }
+
+    /// Makes the list named in the box the one looked at, so what is added next goes on it (it exists once something is on it).
+    /// False if the box was empty.
+    pub fn start_list(&mut self) -> bool {
+        let name = clean_list(&self.new_list.text);
+        if name.is_empty() {
+            return false;
+        }
+        self.new_list.replace_text("");
+        self.list = Some(name);
+        self.notice = None;
+        true
     }
 
     /// Adds the task typed in the box. False if there was nothing to add.
@@ -460,7 +569,8 @@ impl NotesState {
             self.bad(format!("A task is at most {MAX_TASK} characters."));
             return false;
         }
-        let made = Task { id: userdata::new_id("t"), text, done: false, created: Some(Stamp { second: 0, ..*now }), extra: Map::new() };
+        let list = self.list.clone().unwrap_or_default();
+        let made = Task { id: userdata::new_id("t"), text, done: false, created: Some(Stamp { second: 0, ..*now }), list, extra: Map::new() };
         match self.change(|data| {
             if data.tasks.len() >= MAX_TASKS {
                 return Err(format!("That is as many tasks as Orbit keeps ({MAX_TASKS}). Clear some first."));
@@ -504,11 +614,12 @@ impl NotesState {
         .is_ok()
     }
 
-    /// Takes every finished task off the list. How many went.
+    /// Takes every finished task off what is in view (every list, or the one chosen). How many went.
     pub fn clear_done(&mut self) -> usize {
+        let view = self.list.clone();
         match self.change(|data| {
             let before = data.tasks.len();
-            data.tasks.retain(|t| !t.done);
+            data.tasks.retain(|t| !(t.done && view.as_ref().is_none_or(|list| *list == t.list)));
             Ok(before - data.tasks.len())
         }) {
             Ok(n) => {
@@ -706,6 +817,96 @@ mod tests {
         theirs.get_mut("tasks").unwrap().as_array_mut().unwrap().clear();
         userdata::write(&file, theirs).unwrap();
         assert!(page.reload_if_changed() && page.data.tasks.is_empty());
+    }
+
+    // ---- lists ----
+
+    const LISTS: &str = include_str!("../../tests/fixtures/notes_lists_example.json");
+
+    fn lists_page() -> (NotesState, PathBuf) {
+        let dir = tempdir("notes-lists");
+        let file = dir.join("notes.json");
+        std::fs::write(&file, LISTS).unwrap();
+        (NotesState::open(file.clone()), file)
+    }
+
+    #[test]
+    fn a_list_is_named_the_same_way_on_both_sides() {
+        for (said, kept) in [
+            ("Shopping", "shopping"), ("  Packing   list ", "packing list"), ("to-do", "to-do"), ("-x", "x"), ("a_b", "a b"), ("Caf\u{e9}", "caf"),
+            ("", ""), ("!!!", ""), ("one two three four five six seven eight nine", "one two three four five six sev"[..30].trim_end()),
+        ] {
+            assert_eq!(clean_list(said), kept, "{said:?}");
+        }
+        assert_eq!((list_title(""), list_title("shopping"), list_title("packing list")), ("Tasks".to_owned(), "Shopping".to_owned(), "Packing list".to_owned()));
+    }
+
+    #[test]
+    fn the_lists_file_is_read_as_written_and_written_back_the_same() {
+        let data: Value = serde_json::from_str(LISTS).unwrap();
+        let n = Notes::from_map(data.as_object().unwrap());
+        assert_eq!(n.tasks.iter().map(|t| (t.text.as_str(), t.list.as_str())).collect::<Vec<_>>(), [("Call mom", ""), ("Tomato", "shopping"), ("Pasta", "shopping"), ("Toothbrush", "packing")]);
+        let mut back = n.to_map();
+        back.insert("version".into(), json!(1));
+        assert_eq!(Value::Object(back), data, "a plain task has no list field, and nothing else is lost");
+    }
+
+    #[test]
+    fn the_lists_are_counted_the_plain_one_first_then_in_the_order_they_began() {
+        let (page, _) = lists_page();
+        assert_eq!(page.data.list_names(), [("".to_owned(), 1), ("shopping".to_owned(), 2), ("packing".to_owned(), 1)]);
+        assert_eq!(
+            page.list_choices().iter().map(|(list, label, open)| (list.clone(), label.as_str(), *open)).collect::<Vec<_>>(),
+            [(None, "All", 4), (Some("".into()), "Tasks", 1), (Some("shopping".into()), "Shopping", 2), (Some("packing".into()), "Packing", 1)]
+        );
+    }
+
+    #[test]
+    fn looking_at_one_list_shows_only_its_tasks_and_adds_to_it() {
+        let (mut page, file) = lists_page();
+        assert_eq!((page.open_tasks(), page.tasks_in_view()), (4, 4), "every list together");
+        page.select_list(Some("shopping".into()));
+        assert_eq!((page.open_tasks(), page.tasks_in_view()), (2, 2));
+        assert!(page.data.tasks.iter().filter(|t| page.in_view(t)).all(|t| t.list == "shopping"));
+        page.new_task.replace_text("Milkshake");
+        assert!(page.add_task(&at("2026-11-22T14:30")));
+        let saved = on_disk(&file);
+        assert_eq!(saved.tasks.last().map(|t| (t.text.as_str(), t.list.as_str())), Some(("Milkshake", "shopping")));
+        page.select_list(Some("".into()));
+        page.new_task.replace_text("Pay rent");
+        assert!(page.add_task(&at("2026-11-22T14:31")));
+        assert_eq!(on_disk(&file).tasks.last().map(|t| t.list.as_str()), Some(""), "the plain list again: no list field");
+        page.select_list(None);
+        page.new_task.replace_text("Anywhere");
+        assert!(page.add_task(&at("2026-11-22T14:32")));
+        assert_eq!(on_disk(&file).tasks.last().map(|t| t.list.as_str()), Some(""), "adding while looking at all goes on the plain list");
+    }
+
+    #[test]
+    fn a_new_list_is_named_in_the_box_and_is_offered_before_anything_is_on_it() {
+        let (mut page, file) = lists_page();
+        assert!(!page.start_list(), "nothing typed");
+        page.new_list.replace_text("  Gym Bag!  ");
+        assert!(page.start_list());
+        assert_eq!((page.list.as_deref(), page.new_list.text.as_str()), (Some("gym bag"), ""));
+        assert!(page.list_choices().iter().any(|(list, label, open)| list.as_deref() == Some("gym bag") && label == "Gym bag" && *open == 0), "offered while it is empty");
+        page.new_task.replace_text("Towel");
+        assert!(page.add_task(&at("2026-11-22T14:30")));
+        assert_eq!(on_disk(&file).data_lists(), ["", "shopping", "packing", "gym bag"]);
+    }
+
+    #[test]
+    fn clearing_finished_tasks_clears_only_what_is_in_view() {
+        let (mut page, file) = lists_page();
+        for id in ["t-call", "t-pasta"] {
+            assert!(page.toggle_task(id));
+        }
+        page.select_list(Some("shopping".into()));
+        assert_eq!(page.clear_done(), 1, "the finished shopping task; the finished plain one stays");
+        assert_eq!(on_disk(&file).tasks.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(), ["Call mom", "Tomato", "Toothbrush"]);
+        page.select_list(None);
+        assert_eq!(page.clear_done(), 1);
+        assert_eq!(on_disk(&file).tasks.len(), 2);
     }
 
     // ---- tasks ----

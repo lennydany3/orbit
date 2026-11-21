@@ -26,11 +26,12 @@ ORB_FOR = {
     State.CONFIRMING: "confirming",
     State.SPEAKING: "speaking",
     State.FOLLOW_UP: "follow_up",
+    State.ALARM: "speaking",                  # a ringing alarm pulses with its own sound, like a voice
 }
 
 # Levels only mean something while a voice is being heard: yours (mic) or Orbit's (speaker).
 _MIC_STATES = (State.LISTENING, State.FOLLOW_UP, State.CONFIRMING)
-_VOICE_STATES = (State.SPEAKING, State.CONFIRMING)
+_VOICE_STATES = (State.SPEAKING, State.CONFIRMING, State.ALARM)
 
 
 class NullBridge:
@@ -47,12 +48,16 @@ class NullBridge:
         return 0
     def confirm_done(self, confirm_id, answer, by) -> None: ...
     def killed(self) -> None: ...
-    def reminder(self, reminder_id, title, text) -> None: ...
+    def reminder(self, reminder_id, title, text, kind="reminder", ringing=False) -> None: ...
+    def alarm_stopped(self, reminder_id, by) -> None: ...
 
     def poll_answer(self):
         return None
 
     def poll_request(self):
+        return None
+
+    def poll_dismiss(self):
         return None
 
 
@@ -86,14 +91,22 @@ class UiBridge:
         self._open_confirm: int | None = None
         self._answers: queue.Queue[protocol.ConfirmAnswer] = queue.Queue()
         self._requests: queue.Queue[protocol.PlayRequest] = queue.Queue(maxsize=8)
+        self._dismissals: queue.Queue[str] = queue.Queue(maxsize=8)
 
     # ---- for the server ----
     def snapshot(self) -> dict:
         with self._lock:
             return protocol.hello(self._orb, self._level)
 
-    def on_command(self, answer: protocol.ConfirmAnswer | protocol.PlayRequest) -> str | None:
-        """A face answered a confirmation, or asked for one of the user's saved playlists. Returns why it was not accepted, or None."""
+    def on_command(self, answer: protocol.ConfirmAnswer | protocol.PlayRequest | protocol.DismissRequest) -> str | None:
+        """A face answered a confirmation, asked for one of the user's saved playlists, or stopped a ringing alarm.
+        Returns why it was not accepted, or None."""
+        if isinstance(answer, protocol.DismissRequest):
+            try:
+                self._dismissals.put_nowait(answer.id)
+            except queue.Full:
+                pass                                   # Stop pressed over and over: one is enough
+            return None
         if isinstance(answer, protocol.PlayRequest):
             try:
                 self._requests.put_nowait(answer)
@@ -180,9 +193,21 @@ class UiBridge:
         self._publish(protocol.reply(text, spoken, kind, emotion))
 
     @_safe
-    def reminder(self, reminder_id: str, title: str, text: str) -> None:
-        """A reminder just came due: the face shows it (Orbit says it out loud itself)."""
-        self._publish(protocol.reminder(reminder_id, title, text))
+    def reminder(self, reminder_id: str, title: str, text: str, kind: str = "reminder", ringing: bool = False) -> None:
+        """A reminder just came due: the face shows it (Orbit says it out loud itself). `ringing`: it keeps ringing until it is stopped."""
+        self._publish(protocol.reminder(reminder_id, title, text, kind, ringing))
+
+    @_safe
+    def alarm_stopped(self, reminder_id: str, by: str) -> None:
+        """The ringing stopped (so the face takes its Stop button away)."""
+        self._publish(protocol.alarm_stopped(reminder_id, by))
+
+    def poll_dismiss(self) -> str | None:
+        """The id of a reminder the face asked to stop (its Stop button), if one is waiting."""
+        try:
+            return self._dismissals.get_nowait()
+        except queue.Empty:
+            return None
 
     def poll_request(self) -> protocol.PlayRequest | None:
         """A request from the face (the Play button), if one is waiting."""

@@ -20,11 +20,13 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import Future
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 
 import numpy as np
 
+from . import alarm as alarm_mod
 from . import config
 from ..ipc.bridge import NullBridge
 from .aec import EchoCanceller, ReferenceAligner, ReferenceTimeline
@@ -116,6 +118,12 @@ _HALLUCINATIONS = frozenset({"thank you", "thank you.", "thanks for watching", "
                              "thanks", "you", "the end", "subtitles by the amara.org community"})
 
 
+def _announcement(reminder) -> str:
+    from ..reminders import announcement
+
+    return announcement(reminder)
+
+
 def is_noise(text: str) -> bool:
     """A "transcript" that is only filler ("Uh...") or something Whisper invents for silence: not a request."""
     clean = re.sub(r"[^a-z' ]+", " ", (text or "").lower()).split()
@@ -170,6 +178,22 @@ def _file_logger() -> logging.Logger:
     return logger
 
 
+@dataclass
+class Ring:
+    """One reminder, timer or alarm that is ringing (or several that came due together) and the point it has got to."""
+    due: list                                   # the reminders.Reminder items that rang
+    kind: str                                   # which sound: "reminder" or "timer"
+    text: str                                   # what Orbit says it is
+    started: float
+    step: str = "ring"                          # ring -> (say ->) listen -> (transcribe ->) ring again ...
+    until: float = 0.0                          # when this step ends
+    settle: float = 0.0                         # listening: what the microphone hears before this moment is the sound's echo
+    cycle: int = 0                              # stretches of ringing so far
+    heard: bool = False                         # listening: you have started to speak
+    warned: bool = False                        # the "cannot play the sound" message has been shown
+    ids: set = field(default_factory=set)
+
+
 # ---------------------------------------------------------------- the loop
 class VoiceLoop:
     def __init__(self, agent, mic, transcriber, tts, keys=None, wake=None, segmenter=None, check_vad=None, *,
@@ -177,15 +201,20 @@ class VoiceLoop:
                  out=print, verbose: bool = False, monitor=None, file_log=None, clock=time.monotonic,
                  conversational: bool = config.CONVERSATIONAL, fillers: bool = config.FILLERS, rng: random.Random | None = None,
                  aec: EchoCanceller | None = None, reference: ReferenceTimeline | None = None, barge_in: bool = config.BARGE_IN,
-                 media_check=None, ui=None, prefs=None, reminders=None, wake_enabled: bool = True, lock: frozenset = frozenset()):
+                 media_check=None, ui=None, prefs=None, reminders=None, wake_enabled: bool = True, lock: frozenset = frozenset(),
+                 alarm=None, alarm_ring_s: float = config.ALARM_RING_S, alarm_listen_s: float = config.ALARM_LISTEN_S,
+                 alarm_max_s: float = config.ALARM_MAX_S, alarm_settle_s: float = config.ALARM_SETTLE_S):
         """`prefs` (voice.prefs.LivePrefs) lets the Settings page change the volume, devices, wake word and follow-up while Orbit runs;
         `lock` names what the command line chose and the page must not change ("wake", "follow_up", "mic", "speaker").
-        `reminders` (reminders.ReminderStore) is what is said aloud when a reminder comes due."""
+        `reminders` (reminders.ReminderStore) is what is said aloud when a reminder comes due.
+        `alarm` (alarm.AlarmPlayer) makes a reminder or timer ring until you say "ok thanks" (without it, it is only said once)."""
         self.agent, self.mic, self.transcriber, self.tts = agent, mic, transcriber, tts
         self.prefs, self.reminders, self.wake_enabled, self._locked = prefs, reminders, wake_enabled, lock
         self._wanted = None                        # settings read from the file and not applied yet (devices change between turns)
         self._announce: deque = deque()            # reminders due and waiting to be said
         self._reminders_at = 0.0
+        self.alarm, self._ring = alarm, None       # the sound player, and the Ring that is ringing now
+        self.alarm_ring_s, self.alarm_listen_s, self.alarm_max_s, self.alarm_settle_s = alarm_ring_s, alarm_listen_s, alarm_max_s, alarm_settle_s
         self.ui = ui or NullBridge()               # the sphere window, if one is connected (python -m orbit --voice --ipc)
         self._confirm_id = 0
         self.keys, self.wake, self.segmenter, self.check_vad = keys, wake, segmenter, check_vad
@@ -287,7 +316,7 @@ class VoiceLoop:
         except KeyboardInterrupt:
             reason = "quit"
         finally:
-            for cleanup in (self.tts.stop, self.keys.stop if self.keys else None, self.mic.stop):
+            for cleanup in (self.tts.stop, self.alarm.stop if self.alarm else None, self.keys.stop if self.keys else None, self.mic.stop):
                 try:                                   # a second Ctrl+C during shutdown must not print a traceback
                     if cleanup:
                         cleanup()
@@ -321,6 +350,8 @@ class VoiceLoop:
             self._tick_confirming(frame)
         elif s is State.SPEAKING:
             self._tick_speaking(frame, t)
+        elif s is State.ALARM:
+            self._tick_alarm(frame)
 
     # ---- hotkeys ----
     def _handle_keys(self) -> None:
@@ -341,6 +372,7 @@ class VoiceLoop:
         self.out("[killed] kill switch pressed: microphone stopped")
         self.killed = True
         self.tts.stop()
+        self._silence_alarm("killed")
         if self._pending_confirm:                      # a waiting risky action gets "no"
             self._pending_confirm["event"].set()
             self._pending_confirm = None
@@ -356,6 +388,9 @@ class VoiceLoop:
                 except Exception:  # noqa: BLE001
                     pass
             self._start_listening("ptt", "hotkey interrupted the speech")
+        elif self.st.is_(State.ALARM):
+            self._silence_alarm("key")                 # the talk key stops a ringing alarm at once, and what you say next is a normal request
+            self._start_listening("ptt", "hotkey stopped the alarm")
         elif self.st.is_(State.IDLE, State.FOLLOW_UP):
             self._start_listening("ptt", "hotkey")
         else:
@@ -467,6 +502,8 @@ class VoiceLoop:
         set_volume = getattr(self.tts, "set_volume", None)
         if set_volume is not None:
             set_volume(s.audio.volume / 100)
+        if self.alarm is not None:
+            self.alarm.set_volume(s.audio.volume / 100)
         if "mic" not in self._locked and hasattr(self.mic, "switch"):
             try:
                 if self.mic.switch(s.audio.mic):
@@ -476,6 +513,8 @@ class VoiceLoop:
                 self.out(f"  (cannot use the microphone '{s.audio.mic}': {e}; keeping the current one)")
         if "speaker" not in self._locked and hasattr(self.tts, "set_device"):
             try:
+                if self.alarm is not None:
+                    self.alarm.set_device(s.audio.speaker)
                 if self.tts.set_device(s.audio.speaker):
                     self.out(f"Speaker: {s.audio.speaker or 'the Windows default'}")
             except Exception as e:  # noqa: BLE001
@@ -494,6 +533,17 @@ class VoiceLoop:
         from .. import reminders as reminder_text
 
         reminder, late = self._announce.popleft()
+        if self.alarm is not None and config.ALARM and not late:
+            together = [reminder]                                      # everything else that came due at the same moment rings as one
+            rest: deque = deque()
+            for other, was_late in self._announce:
+                if was_late:
+                    rest.append((other, was_late))
+                else:
+                    together.append(other)
+            self._announce = rest
+            self._start_ring(together)
+            return True
         said = reminder_text.announcement(reminder, late)
         self.out(f"[reminder] {said}")
         self.ui.reminder(reminder.id, reminder.title, said)
@@ -501,6 +551,161 @@ class VoiceLoop:
         self.mode = "reminder"
         self._speak(said, "a reminder came due", emotion="calm", chat=False)
         return True
+
+    # ---- a reminder or timer that rings until you say you have heard it ----
+    def _start_ring(self, due: list) -> None:
+        texts = [_announcement(r) for r in due]
+        said = " ".join(texts)
+        self.out(f"[ring] {said}")
+        while self.ui.poll_dismiss() is not None:                      # a Stop pressed for an earlier ring must not end this one
+            pass
+        for r, text in zip(due, texts):
+            self.ui.reminder(r.id, r.title, text, r.kind, True)
+        self.ui.reply(said, said, "action", "calm")
+        self.mode = "alarm"
+        self._pause_mic()
+        self.st.to(State.ALARM, "a reminder came due")
+        self._ring = Ring(due, alarm_mod.sound_kind(r.kind for r in due), said, self._clock(), ids={r.id for r in due})
+        self._ring_stretch()
+
+    def _ring_stretch(self) -> None:
+        """Rings: the sound plays for a stretch, with the microphone off (it would hear only the sound)."""
+        ring = self._ring
+        ring.step, ring.heard = "ring", False
+        length = self.alarm_ring_s
+        try:
+            length = self.alarm.ring_seconds(ring.kind, self.alarm_ring_s)
+            self.alarm.start(ring.kind)
+        except Exception as e:  # noqa: BLE001 - no speaker, or the file is gone: it is still said and listened for, just not rung
+            self._flog(f"alarm: cannot play ({type(e).__name__})")
+            if not ring.warned:
+                ring.warned = True
+                self.out(f"  (cannot play the alarm sound: {e}; it will only be said)")
+        ring.until = self._clock() + length
+
+    def _ring_say(self) -> None:
+        ring = self._ring
+        ring.step = "say"
+        self._set_emotion("calm")
+        self.future = spawn(self.tts.speak, ring.text)
+
+    def _ring_listen(self) -> None:
+        """Quiet for a few seconds, microphone on: this is when "ok thanks" is heard."""
+        ring, now = self._ring, self._clock()
+        ring.step, ring.heard = "listen", False
+        ring.settle, ring.until = now + self.alarm_settle_s, now + self.alarm_listen_s
+        self._resume_mic()
+        self._reset_listeners()
+
+    def _tick_alarm(self, frame) -> None:
+        ring = self._ring
+        if ring is None:                                               # cannot happen; never be stuck if it does
+            self._idle("no alarm ringing")
+            return
+        now = self._clock()
+        asked = self.ui.poll_dismiss()
+        if asked is not None and asked in ring.ids:
+            self._finish_ring("ui")
+            return
+        if self.alarm_max_s and now - ring.started >= self.alarm_max_s:
+            self.out(f"  (rang for {self.alarm_max_s:.0f}s and nobody answered: stopping)")
+            self._finish_ring("timeout")
+            return
+        if ring.step == "ring":
+            if now >= ring.until:
+                self._stop_sound()
+                if ring.cycle % config.ALARM_SAY_EVERY == 0:
+                    self._ring_say()
+                else:
+                    self._ring_listen()
+        elif ring.step == "say":
+            if self.future.done():
+                self._ring_listen()
+        elif ring.step == "listen":
+            self._ring_hear(frame, now)
+        elif ring.step == "transcribe" and self.future.done():
+            self._ring_judge()
+
+    def _ring_hear(self, frame, now: float) -> None:
+        ring = self._ring
+        if not ring.heard and now >= ring.until:                       # nobody spoke: ring again
+            ring.cycle += 1
+            self._pause_mic()
+            self._ring_stretch()
+            return
+        if frame is None or now < ring.settle:
+            return
+        for e in self.segmenter.feed(frame):
+            if e.kind == "start":
+                ring.heard = True
+            elif e.kind == "end":
+                self._pause_mic()
+                ring.step = "transcribe"
+                self.future = spawn(self.transcriber.transcribe, e.clip)
+                return
+
+    def _ring_judge(self) -> None:
+        ring = self._ring
+        result, error = self._text_of(self.future)
+        text = "" if error is not None else result.text
+        verdict = alarm_mod.judge(text)
+        self.out(f'  you said "{text.strip()}" -> {verdict.kind}')
+        if verdict.kind == "dismiss":
+            self._finish_ring("voice", say="You're welcome." if verdict.thanks else None)
+        elif verdict.kind == "snooze":
+            self._snooze(verdict.minutes)
+        else:                                                          # something else: it was not said to the alarm
+            ring.cycle += 1
+            self._ring_stretch()
+
+    def _snooze(self, minutes: int) -> None:
+        """Rings again later: the same reminders, due again `minutes` from now."""
+        from .. import reminders as reminder_text
+
+        add = getattr(self.reminders, "add", None)
+        try:
+            if add is None:
+                raise OSError("there is no reminders file")
+            now = datetime.now()
+            for r in self._ring.due:
+                add(r.title, now + timedelta(minutes=minutes), "none", now, r.kind)
+            said = f"Okay, I'll ring again in {reminder_text.duration_text(minutes * 60)}."
+        except Exception as e:  # noqa: BLE001
+            self._flog(f"alarm: snooze failed ({type(e).__name__})")
+            said = "Sorry, I couldn't snooze that."
+        self._finish_ring("voice", say=said)
+
+    def _stop_sound(self) -> None:
+        if self.alarm is not None:
+            try:
+                self.alarm.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _silence_alarm(self, by: str) -> None:
+        """Stops the sound (and any speech of it) and forgets the ring. The caller moves the state on."""
+        ring, self._ring = self._ring, None
+        if ring is None:
+            return
+        self._stop_sound()
+        if ring.step == "say":
+            self.tts.stop()
+            try:
+                self.future.result(timeout=1.0)
+            except Exception:  # noqa: BLE001
+                pass
+        self.out(f"[ring] stopped ({by})")
+        for rid in sorted(ring.ids):
+            self.ui.alarm_stopped(rid, by)
+
+    def _finish_ring(self, by: str, say: str | None = None) -> None:
+        """You have answered (or it gave up): silence, then back to waiting, after one short answer if there is one."""
+        self._silence_alarm(by)
+        if say:
+            self.mode = "reminder"
+            self._speak(say, "the alarm stopped", emotion="calm", chat=False)
+        else:
+            self._idle("the alarm stopped")
 
     def _start_window_request(self) -> bool:
         """The window's Play button on a saved playlist: runs it as if you had asked, and tells you the result."""
@@ -835,6 +1040,20 @@ def privacy_note(transcriber, tts, llm_description: str = "") -> str:
             "and audio is never saved by Orbit.")
 
 
+def _make_alarm(device, volume: float, out):
+    """The player that rings a reminder or timer, on the speaker the page chose (the Windows default if that one is not there).
+    None if it cannot be made: reminders are then only said once."""
+    try:
+        try:
+            return alarm_mod.AlarmPlayer(device, volume)
+        except ValueError as e:
+            out(f"  (cannot ring on the speaker '{device}': {e}; using the Windows default)")
+            return alarm_mod.AlarmPlayer(None, volume)
+    except Exception as e:  # noqa: BLE001
+        out(f"  (alarm sounds unavailable: {e}; reminders and timers will only be said once)")
+        return None
+
+
 def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bool = True, follow_up: bool | None = None,
               seconds: float | None = None, wav: str | None = None, verbose: bool = False, out=print, ui=None) -> str:
     """Builds everything and runs the loop. Returns "killed" | "quit" | "timeout", or "failed" if voice cannot start
@@ -883,6 +1102,7 @@ def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bo
             tts = make_tts(log=out, reference=reference)
         if hasattr(tts, "set_volume"):
             tts.set_volume(chosen.audio.volume / 100)
+        alarm = _make_alarm(config.SPEAKER_DEVICE or chosen.audio.speaker or None, chosen.audio.volume / 100, out) if config.ALARM else None
     except Exception as e:  # noqa: BLE001 - any setup problem: fall back to text
         out(f"Voice could not start ({type(e).__name__}: {e}). Falling back to text mode.")
         return "failed"
@@ -891,10 +1111,12 @@ def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bo
     loop = VoiceLoop(agent, mic, transcriber, tts, keys, wake, segmenter, check_vad,
                      follow_up=use_follow_up, out=out, verbose=verbose, monitor=Monitor(),
                      aec=EchoCanceller() if reference is not None else None, reference=reference, ui=ui,
-                     prefs=prefs, reminders=ReminderStore(), wake_enabled=wake is not None and chosen.voice.wake_word, lock=locked)
+                     prefs=prefs, reminders=ReminderStore(), wake_enabled=wake is not None and chosen.voice.wake_word, lock=locked, alarm=alarm)
     agent.safety.confirm = loop.confirm              # risky actions are confirmed by voice from now on
     if ui is not None and hasattr(tts, "set_audio_listener"):
         tts.set_audio_listener(ui.audio_block)         # the face shows Orbit's voice level while it speaks
+    if ui is not None and alarm is not None:
+        alarm.on_audio = ui.audio_block                # ...and pulses with a ringing alarm
     loop.monitor.start()
     llm = getattr(agent, "llm", None)
     if llm is not None and hasattr(llm, "warm_up"):

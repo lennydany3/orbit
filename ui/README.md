@@ -91,7 +91,16 @@ wrote; the example files in `tests/fixtures` are read by both.
   decide the next time of a repeating one.
 - **Notes and tasks** (`src/notes.rs`, `notes_view.rs`): `notes.json`. A note's text is saved 0.8 s after the typing stops (measured
   from the first unsaved keystroke, so it cannot be put off for ever), when another note is opened, and when the page is left;
-  `App::next_wake` wakes the window for it. Ctrl+K makes a note.
+  `App::next_wake` wakes the window for it. Ctrl+K makes a note. A task may name a `list` ("shopping", "packing"; none = the plain
+  Tasks list): the Tasks tab has a chip for All and for each list, a box that starts a new one, adds to the list being looked at,
+  and "Clear finished" clears only what is in view. A list is named by `notes::clean_list`, the same rule as `orbit/notes.py`
+  (checked in both languages against `tests/fixtures/notes_lists_example.json`). Preview scenes: `notes-lists`, `notes-lists-all`.
+- **A ringing reminder** (`app::Ring`, `view::ring_banner`, `face::ring_card`): Orbit sends `{"type":"reminder", ..., "kind":"timer",
+  "ringing":true}` when one rings and `{"type":"alarm_stopped","id":...}` when it stops. While it rings the window shows a banner
+  above whatever page is open and the floating orb a card, each with a **Stop** button that sends `{"type":"dismiss","id":...}`
+  (`link::message::dismiss_request`; it names the one ringing, and Orbit ignores any other id). Orbit stopping ends the ring on screen
+  too. A reminder's `kind` (timer, alarm) is shown on the Reminders page and kept when the reminder is edited. Preview scenes:
+  `live-ringing`, `live-ringing-reminders`.
 - **Music** (`src/music.rs`, `music_view.rs`): `music.json`. The window only has to understand a Spotify link (`parse_link`, checked
   against `tests/fixtures/spotify_links.json`, which the Python side also reads); Orbit names the playlist from Spotify's public oEmbed
   page. The Play button sends `{"type": "play", "id": ...}` over the link (`link::message::play_request`); the id has to be one saved in
@@ -134,7 +143,7 @@ file's own icon in Explorer is not set (that needs a Windows resource file at bu
 - `src/orbit/` the sphere. `state` (the 11 states), `params` (what each does, blended on change), `controller` (the shared
   state, level and timers), `sim` (one sphere's clock and blend, produces the numbers for a frame), `geometry` (the points),
   `gpu` + `sphere.wgsl` (drawing), `compositor` (paints a sphere in every Rune `effect` slot).
-- `src/link/` the connection: `message` (what Orbit sends, as types, and the two things the window may send), `endpoint` (which
+- `src/link/` the connection: `message` (what Orbit sends, as types, and the three things the window may send: an answer, a Play and a Stop), `endpoint` (which
   addresses are allowed), and the thread that connects, reads, writes, and reconnects.
 - `src/view.rs` the window (sidebar and the page in its panel; Home is the stage), `sidebar.rs`, `widgets.rs` and `icons.rs` (the
   shared pieces and Lucide line icons), and one view per page: `commands_view`, `reminders_view`, `notes_view`, `music_view`,
@@ -153,7 +162,7 @@ table, so it is repeated there at the same revision: update both together.
 
 Headless pictures, without a window (debug build): `cargo run -- --snap out.png --size 1280x800 --scene live-confirm --at 1`.
 Scenes: the 11 states, `live-speaking`, `live-confirm`, `live-retrying`, `live-refused`, and the pages: `reminders`, `reminders-form`,
-`notes`, `notes-open`, `notes-tasks`, `music-empty`, `music`, `settings-general`, `settings-recording-talk`, `settings-commands`
+`notes`, `notes-open`, `notes-tasks`, `notes-lists`, `live-ringing`, `music-empty`, `music`, `settings-general`, `settings-recording-talk`, `settings-commands`
 and the other `settings-*` ones (`--list-scenes` has them all). A script can click in a scene too:
 `--scene settings-recording-talk --script click.json --snap out.png` with `{"events": [{"t": 0.1, "type": "tap", "x": 500, "y": 250, "button": "forward"}]}`
 records Mouse 5 as the talk key.

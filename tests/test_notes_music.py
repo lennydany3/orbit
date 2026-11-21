@@ -197,3 +197,26 @@ def test_the_example_reminders_file_is_read_as_the_window_wrote_it():
     assert r.reminders[0].extra == {"note": "mine"}
     assert [h["title"] for h in r.history] == ["Stretch"] and r.seen == datetime(2026, 11, 22, 7, 0)
     assert [x.title for x in r.active()] == ["Call mom", "Take medicine"]
+
+
+# ------------------------------------------------------------------ lists: the shopping list (the Rust side reads the same example)
+def test_the_example_lists_file_is_read_as_the_window_wrote_it_and_written_back_the_same(tmp_path):
+    source = FIXTURES / "notes_lists_example.json"
+    n = NotesStore(source)
+    assert [(t.text, t.list) for t in n.tasks] == [("Call mom", ""), ("Tomato", "shopping"), ("Pasta", "shopping"), ("Toothbrush", "packing")]
+    assert n.list_names() == [("", 1), ("shopping", 2), ("packing", 1)], "the plain task list first"
+    copy = tmp_path / "notes.json"
+    copy.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    n = NotesStore(copy)
+    n.add_task("Pay rent", datetime(2026, 11, 22, 14, 33))                            # any change saves the whole file
+    saved = json.loads(copy.read_text(encoding="utf-8"))
+    assert saved["tasks"][:4] == json.loads(source.read_text(encoding="utf-8"))["tasks"], "a plain task has no list field and nothing else is lost"
+    assert "list" not in saved["tasks"][4] and saved["tasks"][4]["text"] == "Pay rent"
+
+
+def test_a_list_is_named_the_same_way_as_the_window_names_it():
+    from orbit.notes import clean_list
+
+    for said, kept in [("Shopping", "shopping"), ("  Packing   list ", "packing list"), ("to-do", "to-do"), ("-x", "x"), ("a_b", "a b"), ("Café", "caf"),
+                       ("", ""), ("!!!", ""), (None, ""), (7, ""), ("one two three four five six seven eight nine", "one two three four five six se")]:
+        assert clean_list(said) == kept, said

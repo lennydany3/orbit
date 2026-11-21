@@ -236,3 +236,55 @@ def test_times_are_written_without_seconds_unless_there_are_some():
     assert userdata.to_text(datetime(2026, 11, 22, 17, 0, 30)) == "2026-11-22T17:00:30"
     assert userdata.from_text("2026-11-22T17:00:30") == datetime(2026, 11, 22, 17, 0, 30)
     assert userdata.from_text("2026-11-22 17:00") is None and userdata.from_text(5) is None
+
+
+# ------------------------------------------------------------------ what it was asked as (it decides how it rings)
+def test_a_reminder_remembers_whether_it_was_a_timer_an_alarm_or_a_reminder(tmp_path):
+    store = R.ReminderStore(tmp_path / "r.json")
+    store.add("Pasta", NOW, "none", NOW, "timer")
+    store.add("Wake up", NOW, "none", NOW, "alarm")
+    store.add("Stretch", NOW, "none", NOW)
+    store.add("Odd", NOW, "none", NOW, "whatever")
+    assert [r.kind for r in store.reminders] == ["timer", "alarm", "reminder", "reminder"]
+    saved = json.loads((tmp_path / "r.json").read_text(encoding="utf-8"))["reminders"]
+    assert [r.get("kind") for r in saved] == ["timer", "alarm", None, None], "a plain reminder looks exactly as before: no new field"
+    assert [r.kind for r in R.ReminderStore(tmp_path / "r.json").reminders] == ["timer", "alarm", "reminder", "reminder"]
+
+
+def test_an_old_file_with_no_kind_or_a_strange_one_still_loads(tmp_path):
+    (tmp_path / "r.json").write_text(json.dumps({"version": 1, "reminders": [
+        {"id": "r-1", "title": "A", "due": "2026-11-23T09:00"}, {"id": "r-2", "title": "B", "due": "2026-11-23T09:00", "kind": 7},
+        {"id": "r-3", "title": "C", "due": "2026-11-23T09:00", "kind": "sing"}]}), encoding="utf-8")
+    assert [r.kind for r in R.ReminderStore(tmp_path / "r.json").reminders] == ["reminder"] * 3
+
+
+def test_a_repeating_timer_keeps_its_kind_when_it_moves_on(tmp_path):
+    store = R.ReminderStore(tmp_path / "r.json")
+    store.add("Medicine", NOW, "daily", NOW, "alarm")
+    (taken, _), = store.take_due(NOW + timedelta(minutes=1))
+    assert taken.kind == "alarm" and [r.kind for r in store.reminders] == ["alarm"]
+
+
+def test_the_asked_kind_comes_out_of_the_sentence():
+    assert [ask(t).kind for t in ("set a timer for 5 minutes", "put a timer for 30 seconds", "start a countdown for 2 minutes", "wake me up at 6:30",
+                                  "set an alarm for 7am", "remind me in 10 minutes", "set a remainder in one minute")] == \
+        ["timer", "timer", "timer", "alarm", "alarm", "reminder", "reminder"]
+
+
+def test_what_is_said_when_one_with_no_title_comes_due(tmp_path):
+    store = R.ReminderStore(tmp_path / "r.json")
+    plain = store.add("Reminder", NOW, "none", NOW)
+    assert R.announcement(plain) == "This is your reminder." and R.announcement(plain, late=True) == "This is your reminder, a bit late."
+    assert R.announcement(store.add("Reminder", NOW, "none", NOW, "timer")) == "Your timer is up."
+    assert R.announcement(store.add("Reminder", NOW, "none", NOW, "alarm")) == "Your alarm is going off."
+    assert R.announcement(store.add("Stretch", NOW, "none", NOW)) == "Reminder: Stretch."
+    assert R.announcement(store.add("Pasta", NOW, "none", NOW, "timer")) == "Timer: Pasta."
+    assert R.announcement(store.add("Wake the kids", NOW, "none", NOW, "alarm"), late=True) == "Alarm, a bit late: Wake the kids."
+
+
+@pytest.mark.parametrize("text, seconds", [
+    ("snooze for ten minutes", 600), ("in 30 seconds", 30), ("give me five more minutes", 300), ("remind me again in an hour", 3600),
+    ("again in 1 hour 30 minutes", 5400), ("two minutes", 120), ("snooze", None), ("not now", None), ("thanks", None),
+])
+def test_a_length_of_time_said_anywhere_in_a_sentence(text, seconds):
+    assert R.spoken_length(text) == seconds

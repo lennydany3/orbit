@@ -16,7 +16,7 @@ only while Orbit is doing something.
   voice, by clicking, or with a key chord. Everything Orbit does is printed first and logged with secrets redacted.
 - **You can watch it work.** Orbit's own pointer glides to what it is about to click, presses it with a ripple, carries a window
   across monitors by its title bar, and a small "working" pill shows while a job runs ([details](#seeing-what-orbit-does)).
-- **Tested.** 1719 Python tests and 318 Rust tests pass.
+- **Tested.** 1888 Python tests and 334 Rust tests pass.
 
 ## Contents
 
@@ -124,6 +124,10 @@ the box at the bottom says whether Orbit is connected and what it is doing.
     <td align="center"><img src="docs/screenshots/page-music.png" alt="The Music page with saved playlists" width="420"><br><sub><b>Music</b>: your Spotify playlists</sub></td>
     <td align="center"><img src="docs/screenshots/settings-general.png" alt="Settings, General: audio and the hold-to-talk key" width="420"><br><sub><b>Settings</b>: audio and how you talk</sub></td>
   </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/page-tasks.png" alt="The Tasks tab with a shopping list chosen" width="420"><br><sub><b>Lists</b>: "add tomato and pasta to my shopping list"</sub></td>
+    <td align="center"><img src="docs/screenshots/ringing-timer.png" alt="A ringing timer: a banner with a Stop button" width="420"><br><sub>A <b>timer</b> rings until you say "ok thanks" or press Stop</sub></td>
+  </tr>
 </table>
 
 ```
@@ -219,18 +223,39 @@ whenever the other side changes them. None of this needs the language model.
 ("Reminder: call mom.") and the window shows it on the bell; one that came due while Orbit was off is still said if it was in the
 last six hours. The page has the list (switch off, edit, delete), a form with quick buttons ("In 10 min", "This evening"...) and
 repeats (every day, weekdays, week, month), and a list of what went off lately. A time with no am or pm is the next one that comes
-round ("at 5" is the afternoon if that is still ahead); an alarm is always the morning.
+round ("at 5" is the afternoon if that is still ahead); an alarm is always the morning. Said back the way you asked it: "set a timer
+for 30 seconds" is "Okay, a timer for 30 seconds." (and "remainder", which is what speech-to-text often writes for "reminder",
+means a reminder).
+
+**A reminder or timer rings until you say you have heard it.** When one is due Orbit plays its sound, over and over: a gentle bell
+for a reminder, digital beeps for a timer or an alarm clock (two different sounds, from TuneTank's sound effects; see
+[`src/orbit/voice/alarms/README.md`](src/orbit/voice/alarms/README.md) for which, how they were prepared and the licence note).
+About every 9 seconds it goes quiet for 4 so it can hear you, and says what it is (the first time, then every third). Say **"ok"**,
+**"okay"**, **"thanks"**, **"thank you"**, **"thx"**, **"fine"**, **"alright"**, **"got it"**, **"stop"** and the like (also
+"thanks for reminding me") and it stops (a thank you gets "You're welcome."). Say **"snooze"**, **"remind me again in 10 minutes"** or
+**"give me five more minutes"** and it rings again then (5 minutes if you do not say). Something else you say ("what is the weather")
+does not stop it. Holding the talk key stops it at once (and what you say next is a normal request), and so does the **Stop** button
+on the window's banner or on the floating orb's card. The sphere pulses with the sound.
+It gives up after 10 minutes if nobody answers, so a PC nobody is at does not ring all day (`ORBIT_ALARM_MAX_S`, 0 = never;
+`ORBIT_ALARM=off` makes reminders be said once, out loud, like before). It rings at the speaking volume and on the speaker chosen in
+Settings. Snoozing works after the key stopped it too: "snooze" brings back what rang in the last half hour.
 
 **Notes and tasks.** "Note down the wifi is on the router", "take a note that I parked on level 3", "what notes do I have", "read my
 last note"; "add milk to my tasks", "what's on my to do list", "mark milk as done", "I finished the eggs" (only when that is one of
 your tasks: otherwise it is just chat), "clear my completed tasks". On the page: a search box, the Notes and Tasks tabs, a note
 editor that saves a moment after you stop typing (Ctrl+K makes a new note), and a checklist.
 
+**Lists, like the shopping list.** "Add tomato, pasta and milkshake to the shopping list" puts three things on a list called
+shopping (nothing goes to the language model, so nothing is made up): "what's on my shopping list", "remove pasta from my shopping
+list", "mark tomato as done", "clear my shopping list" (asks yes or no first), "what lists do I have". "Grocery list" and "groceries"
+mean the shopping list, and any other name works ("add a toothbrush to my packing list"). On the Tasks tab each list is a chip with
+how many are to do, a box starts a new one, and what you add goes on the list you are looking at.
+
 **Music.** Paste a Spotify link (a playlist, album, artist, track or podcast; `open.spotify.com/...` or a `spotify:` address) on the
 Music page and Orbit keeps it by name. It asks Spotify's public page what it is called (nothing about you is sent, and no login is
 needed for that), or you can rename it. Then "play my gym playlist" plays it, "what playlists do I have" lists them, and the Play
-button on the page asks Orbit to play it (the one other thing the window may send over the link: it names a playlist you saved, and
-nothing else). Playing needs the Spotify login like the rest of the Spotify tools. Links from Apple Music, YouTube or Deezer are
+button on the page asks Orbit to play it (one of the only three things the window may send over the link, with answering a question and
+Stopping a ringing reminder: it names a playlist you saved, and nothing else). Playing needs the Spotify login like the rest of the Spotify tools. Links from Apple Music, YouTube or Deezer are
 refused with the reason.
 
 ### Tray, cost and safety of the link
@@ -467,12 +492,13 @@ src/orbit/
     os_layer/     apps, windows, monitors, volume, media keys, UI Automation + OCR clicks, processes
     browser_layer/ your Brave profile (UI Automation) and Orbit's own automated window (Playwright)
   llm/            Ollama (local) and Groq (cloud)
-  voice/          microphone, wake word, VAD, echo cancellation, speech-to-text, voice, the voice loop, ending a conversation
+  voice/          microphone, wake word, VAD, echo cancellation, speech-to-text, voice, the voice loop, ending a conversation,
+                  the ringing alarm (alarm.py, and the two sounds in alarms/)
   ipc/            the WebSocket link to the desktop app
   reminders.py, notes.py, playlists.py, userdata.py   the files the window and Orbit share, and understanding "remind me ... at 5"
   visual/         the on-screen animations: Orbit's pointer, the click ripple, the working pill
 ui/               orbit-ui: the tray app and sphere (Rust + Rune)
-tests/            1719 Python tests, plus shared fixtures the Rust side is tested against
+tests/            1888 Python tests, plus shared fixtures the Rust side is tested against
 docs/screenshots/ the pictures in this file
 ```
 

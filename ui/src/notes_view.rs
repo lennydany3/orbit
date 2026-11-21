@@ -6,10 +6,10 @@ use rune::{Color, El, ScrollSpec, auto_grow, col, edit_access, el, icon, row, te
 use crate::app::App;
 use crate::datetime::Stamp;
 use crate::icons;
-use crate::notes::{Note, Tab, Task};
+use crate::notes::{Note, Tab, Task, list_title};
 use crate::reminders::{clock_text, day_text};
 use crate::view::Ink;
-use crate::widgets::{Look, button, icon_button, icon_label_button, notice, t, tab, tab_strip};
+use crate::widgets::{Look, badge, button, caps, chip, icon_button, icon_label_button, notice, t, tab, tab_strip};
 
 pub const LIST_W: f32 = 312.0;
 
@@ -26,6 +26,7 @@ fn search_box(s: &App, ink: &Ink) -> El {
     let placeholder = if s.notes.tab == Tab::Notes { "Search notes" } else { "Search tasks" };
     let input = text_input(&s.notes.search, t(13.0, 400.0))
         .key("note-search-input")
+        .label(placeholder)
         .single_line()
         .grow(1.0)
         .min_w(0.0)
@@ -72,7 +73,7 @@ fn left(s: &App, ink: &Ink) -> El {
                     .child(row().key("ctrl-k").px(9.0).h(30.0).center().radius(7.0).border(1.0, ink.hair_strong).child(text("Ctrl K").font(t(11.0, 500.0).mono()).color(ink.muted))),
             )
             .child(note_list(s, ink)),
-        Tab::Tasks => col_left.child(add_task_row(s, ink)).child(task_list(s, ink)),
+        Tab::Tasks => col_left.child(list_chips(s, ink)).child(add_task_row(s, ink)).child(task_list(s, ink)),
     };
     col_left
 }
@@ -193,14 +194,61 @@ fn empty(ink: &Ink) -> El {
 
 // ---- tasks ---------------------------------------------------------------------------------------------------------------------------
 
-fn add_task_row(s: &App, ink: &Ink) -> El {
-    let input = text_input(&s.notes.new_task, t(13.0, 400.0))
-        .key("new-task-input")
+/// Which list to look at (and add to): All, the plain Tasks, and each list Orbit or you made ("add tomato to my shopping list"),
+/// with a box to start a new one.
+fn list_chips(s: &App, ink: &Ink) -> El {
+    let mut chips = row().key("list-chips").w_full().gap(6.0).flex_wrap().gaps(6.0, 6.0);
+    let choices = s.notes.list_choices();
+    if choices.len() > 2 || s.notes.list.as_deref().is_some_and(|l| !l.is_empty()) {
+        for (list, label, open) in choices {
+            let key = match list.as_deref() {
+                None => "list-all".to_owned(),
+                Some("") => "list-plain".to_owned(),
+                Some(name) => format!("list-{}", name.replace(' ', "-")),
+            };
+            let on = s.notes.list == list;
+            let shown = if open > 0 && list.is_some() { format!("{label} \u{b7} {open}") } else { label };
+            chips = chips.child(chip(key, &shown, on, ink).on_press(move |s: &mut App| s.notes.select_list(list.clone())));
+        }
+    }
+    let input = text_input(&s.notes.new_list, t(12.5, 400.0))
+        .key("new-list-input")
+        .label("New list name")
         .single_line()
         .grow(1.0)
         .min_w(0.0)
         .color(ink.fg)
-        .placeholder("Add a task\u{2026}", ink.muted)
+        .placeholder("New list, like shopping\u{2026}", ink.muted)
+        .on_edit(edit_access(|s: &mut App| s.notes.list_edit()))
+        .on_submit(|s: &mut App, _| {
+            s.notes.start_list();
+        });
+    col().key("lists").w_full().gap(8.0).child(chips).child(
+        row()
+            .key("new-list-row")
+            .w_full()
+            .gap(8.0)
+            .items_center()
+            .child(row().key("new-list").grow(1.0).min_w(0.0).h(32.0).px(12.0).items_center().radius(9.0).fill(ink.field).border(1.0, Color::WHITE.alpha(0.10)).child(input))
+            .child(icon_button("add-list", &icons::PLUS, "Start the list", ink.accent_text).on_press(|s: &mut App| {
+                s.notes.start_list();
+            })),
+    )
+}
+
+fn add_task_row(s: &App, ink: &Ink) -> El {
+    let placeholder = match s.notes.list.as_deref() {
+        Some(name) if !name.is_empty() => format!("Add to {}\u{2026}", list_title(name).to_lowercase()),
+        _ => "Add a task\u{2026}".to_owned(),
+    };
+    let input = text_input(&s.notes.new_task, t(13.0, 400.0))
+        .key("new-task-input")
+        .label("Add a task")
+        .single_line()
+        .grow(1.0)
+        .min_w(0.0)
+        .color(ink.fg)
+        .placeholder(&placeholder, ink.muted)
         .on_edit(edit_access(|s: &mut App| s.notes.task_edit()))
         .on_submit(|s: &mut App, _| {
             s.notes.add_task(&Stamp::now());
@@ -223,9 +271,13 @@ fn task_matches(task: &Task, words: &[String]) -> bool {
 
 fn task_list(s: &App, ink: &Ink) -> El {
     let words: Vec<String> = s.notes.search.text.to_lowercase().split_whitespace().map(str::to_owned).collect();
-    let tasks: Vec<&Task> = s.notes.data.tasks.iter().filter(|t| task_matches(t, &words)).collect();
+    let tasks: Vec<&Task> = s.notes.data.tasks.iter().filter(|t| s.notes.in_view(t) && task_matches(t, &words)).collect();
     if tasks.is_empty() {
-        let said = if s.notes.data.tasks.is_empty() { "No tasks yet." } else { "No tasks match that." };
+        let said = match (s.notes.tasks_in_view(), s.notes.list.as_deref()) {
+            (0, Some(name)) if !name.is_empty() => format!("Nothing on the {} list yet.", name),
+            (0, _) => "No tasks yet.".to_owned(),
+            _ => "No tasks match that.".to_owned(),
+        };
         return text(said).key("no-tasks").font(t(12.5, 400.0)).color(ink.muted).px(4.0);
     }
     let mut list = col().key("task-list").w_full().gap(2.0);
@@ -260,6 +312,7 @@ fn task_list(s: &App, ink: &Ink) -> El {
                         .children(done.then(|| icon(&icons::CHECK, 12.0).color(Color::WHITE))),
                 )
                 .child(text(task.text.clone()).font(t(13.0, 400.0)).color(if done { ink.muted } else { ink.fg }).wrap().grow(1.0).min_w(0.0))
+                .children((s.notes.list.is_none() && !task.list.is_empty()).then(|| badge(&list_title(&task.list), ink).key(format!("task-{}-list", task.id))))
                 .child(icon_button(format!("task-{}-remove", task.id), &icons::CLOSE, "Remove the task", ink.muted).on_press(move |s: &mut App| {
                     s.notes.delete_task(&remove);
                 })),
@@ -270,7 +323,11 @@ fn task_list(s: &App, ink: &Ink) -> El {
 
 fn tasks_summary(s: &App, ink: &Ink) -> El {
     let open = s.notes.open_tasks();
-    let done = s.notes.data.tasks.len() - open;
+    let done = s.notes.tasks_in_view() - open;
+    let which = match s.notes.list.as_deref() {
+        None => "ALL LISTS".to_owned(),
+        Some(name) => list_title(name).to_uppercase(),
+    };
     let headline = match (open, done) {
         (0, 0) => "Nothing to do".to_owned(),
         (0, _) => "All done".to_owned(),
@@ -284,6 +341,7 @@ fn tasks_summary(s: &App, ink: &Ink) -> El {
         .center()
         .gap(12.0)
         .child(icon(&icons::TASKS, 28.0).color(ink.accent_text))
+        .child(caps(&which, ink).key("tasks-which"))
         .child(text(headline).font(t(20.0, 650.0)).color(ink.fg))
         .child(text(if done > 0 { format!("{done} finished") } else { "Nothing finished yet".to_owned() }).font(t(12.5, 400.0)).color(ink.muted));
     if done > 0 {
@@ -292,6 +350,13 @@ fn tasks_summary(s: &App, ink: &Ink) -> El {
         }));
     }
     panel
-        .child(text("Say \u{201c}add milk to my tasks\u{201d} and it appears here. Say \u{201c}mark milk as done\u{201d} to tick it off.").font(t(12.0, 400.0)).color(ink.muted).align(rune::Align::Center).wrap().max_w(330.0))
+        .child(
+            text("Say \u{201c}add tomato and pasta to my shopping list\u{201d} and they appear here, on their own list. Say \u{201c}mark tomato as done\u{201d} to tick one off.")
+                .font(t(12.0, 400.0))
+                .color(ink.muted)
+                .align(rune::Align::Center)
+                .wrap()
+                .max_w(330.0),
+        )
         .child(notice(s.notes.notice.as_ref().map(|n| (n.text.as_str(), n.good)), ink))
 }

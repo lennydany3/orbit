@@ -182,3 +182,57 @@ fn what_the_pages_save_for_reminders_notes_and_music_is_what_orbit_understands_a
     assert_eq!(m.data.playlists[0].name, "Gym Mix");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_shopping_list_and_a_timer_are_understood_by_both_sides_and_survive_the_windows_saves() {
+    use orbit_ui::datetime::Stamp;
+    use orbit_ui::notes::NotesState;
+    use orbit_ui::reminders::RemindersState;
+    let root = project_root();
+    let python = python_for(&root);
+    if !python.exists() {
+        eprintln!("SKIPPED: no Python at {}", python.display());
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("orbit-ui-cross-lists-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (rem, notes) = (dir.join("reminders.json"), dir.join("notes.json"));
+    let now = Stamp::parse("2026-11-22T14:30").unwrap();
+
+    // Orbit writes: "add tomato, pasta and milkshake to the shopping list", "add pay rent to my tasks", a timer and an alarm
+    let script = "import sys; from datetime import datetime; from pathlib import Path; \
+                  from orbit.reminders import ReminderStore; from orbit.notes import NotesStore; \
+                  n = NotesStore(Path(sys.argv[2])); n.add_tasks(['Tomato', 'Pasta', 'Milkshake'], datetime(2026, 11, 22, 14, 30), 'shopping'); n.add_task('Pay rent', datetime(2026, 11, 22, 14, 31)); \
+                  r = ReminderStore(Path(sys.argv[1])); r.add('Pasta', datetime(2026, 11, 22, 14, 40), 'none', datetime(2026, 11, 22, 14, 30), 'timer'); \
+                  r.add('Wake up', datetime(2026, 11, 23, 6, 30), 'none', datetime(2026, 11, 22, 14, 30), 'alarm'); print('{}')";
+    python_json(&python, &root, script, &[&rem, &notes]);
+
+    // the window reads them, and adds to the shopping list, ticks one, and switches the timer off
+    let mut n = NotesState::open(notes.clone());
+    assert_eq!(n.data.list_names(), [("".to_owned(), 1), ("shopping".to_owned(), 3)], "the plain list first");
+    assert_eq!(n.data.tasks.iter().map(|t| t.list.as_str()).collect::<Vec<_>>(), ["shopping", "shopping", "shopping", ""]);
+    n.select_list(Some("shopping".into()));
+    n.new_task.replace_text("Bread");
+    assert!(n.add_task(&now));
+    let tomato = n.data.tasks.iter().find(|t| t.text == "Tomato").unwrap().id.clone();
+    assert!(n.toggle_task(&tomato));
+    let mut r = RemindersState::open(rem.clone());
+    assert_eq!(r.data.items.iter().map(|x| x.kind()).collect::<Vec<_>>(), ["timer", "alarm"]);
+    let timer = r.data.items[0].id.clone();
+    assert!(r.toggle(&timer, &now));
+
+    // Orbit reads what the window saved
+    let script = "import json,sys; from pathlib import Path; from orbit.reminders import ReminderStore; from orbit.notes import NotesStore; \
+                  r = ReminderStore(Path(sys.argv[1])); n = NotesStore(Path(sys.argv[2])); \
+                  print(json.dumps({'tasks': [[t.text, t.list, t.done] for t in n.tasks], 'lists': n.list_names(), \
+                  'reminders': [[x.title, x.kind, x.enabled] for x in r.reminders]}, ensure_ascii=True))";
+    let seen = python_json(&python, &root, script, &[&rem, &notes]);
+    assert_eq!(
+        seen["tasks"],
+        serde_json::json!([["Tomato", "shopping", true], ["Pasta", "shopping", false], ["Milkshake", "shopping", false], ["Pay rent", "", false], ["Bread", "shopping", false]])
+    );
+    assert_eq!(seen["lists"], serde_json::json!([["", 1], ["shopping", 3]]));
+    assert_eq!(seen["reminders"], serde_json::json!([["Pasta", "timer", false], ["Wake up", "alarm", true]]), "the window switched the timer off and did not forget it is a timer");
+    let _ = std::fs::remove_dir_all(&dir);
+}

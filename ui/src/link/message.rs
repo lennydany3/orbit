@@ -1,4 +1,4 @@
-//! What Orbit sends, as typed values, and the one thing the window may send back. The messages are
+//! What Orbit sends, as typed values, and the few things the window may send back. The messages are
 //! documented in `src/orbit/ipc/protocol.py` in the Orbit project; this is their Rust reading.
 //!
 //! Parsing is forgiving about what it does not know (an unknown message or state is dropped, never an error), because
@@ -18,8 +18,11 @@ pub enum Incoming {
     Reply { text: String, spoken: String, kind: String, emotion: String },
     Confirm { id: i64, question: String, action: String },
     ConfirmDone { id: i64, answer: bool, by: String },
-    /// A reminder just came due (Orbit says it aloud itself; the window shows it and re-reads the list).
-    Reminder { id: String, title: String, text: String },
+    /// A reminder just came due (Orbit says it aloud itself; the window shows it and re-reads the list). `kind` is "reminder", "timer"
+    /// or "alarm"; `ringing`: it keeps ringing until it is stopped (by voice, the talk key, or the window's Stop button).
+    Reminder { id: String, title: String, text: String, kind: String, ringing: bool },
+    /// The ringing stopped (so the Stop button goes away).
+    AlarmStopped { id: String },
     Error(String),
 }
 
@@ -62,7 +65,16 @@ pub fn parse(raw: &str) -> Vec<Incoming> {
         })()),
         Some("confirm") => one((|| Some(Incoming::Confirm { id: v.get("id")?.as_i64()?, question: text(&v, "question").unwrap_or_default(), action: text(&v, "action")? }))()),
         Some("confirm_done") => one((|| Some(Incoming::ConfirmDone { id: v.get("id")?.as_i64()?, answer: v.get("answer")?.as_bool()?, by: text(&v, "by").unwrap_or_default() }))()),
-        Some("reminder") => one((|| Some(Incoming::Reminder { id: text(&v, "id")?, title: text(&v, "title")?, text: text(&v, "text").unwrap_or_default() }))()),
+        Some("reminder") => one((|| {
+            Some(Incoming::Reminder {
+                id: text(&v, "id")?,
+                title: text(&v, "title")?,
+                text: text(&v, "text").unwrap_or_default(),
+                kind: text(&v, "kind").filter(|k| matches!(k.as_str(), "timer" | "alarm")).unwrap_or_else(|| "reminder".to_owned()),
+                ringing: v.get("ringing").and_then(Value::as_bool).unwrap_or(false),
+            })
+        })()),
+        Some("alarm_stopped") => one(text(&v, "id").map(|id| Incoming::AlarmStopped { id })),
         Some("error") => one(text(&v, "message").map(Incoming::Error)),
         Some(_) => Vec::new(),
     }
@@ -73,10 +85,15 @@ pub fn confirm_answer(id: i64, yes: bool) -> String {
     json!({"type": "confirm", "id": id, "yes": yes}).to_string()
 }
 
-/// The Play button on one of the saved playlists: the other thing the window may send. It names the playlist by the id it has in
+/// The Play button on one of the saved playlists: one of the few things the window may send. It names the playlist by the id it has in
 /// `music.json`, nothing else, so it can only ever start something the user saved.
 pub fn play_request(playlist_id: &str) -> String {
     json!({"type": "play", "id": playlist_id}).to_string()
+}
+
+/// The Stop button on a reminder or timer that is ringing: it names the one that is ringing, so it can only ever silence that.
+pub fn dismiss_request(reminder_id: &str) -> String {
+    json!({"type": "dismiss", "id": reminder_id}).to_string()
 }
 
 #[cfg(test)]
@@ -160,8 +177,32 @@ mod tests {
     fn a_reminder_that_came_due() {
         assert_eq!(
             parse(r#"{"type":"reminder","id":"r-1","title":"Call mom","text":"Reminder: Call mom."}"#),
-            [Incoming::Reminder { id: "r-1".into(), title: "Call mom".into(), text: "Reminder: Call mom.".into() }]
+            [Incoming::Reminder { id: "r-1".into(), title: "Call mom".into(), text: "Reminder: Call mom.".into(), kind: "reminder".into(), ringing: false }]
         );
         assert!(parse(r#"{"type":"reminder","title":"no id"}"#).is_empty() && parse(r#"{"type":"reminder","id":"r-1"}"#).is_empty());
+    }
+
+    #[test]
+    fn a_reminder_that_is_ringing_and_what_kind_it_is() {
+        assert_eq!(
+            parse(r#"{"type":"reminder","id":"r-2","title":"Pasta","text":"Your timer is up.","kind":"timer","ringing":true}"#),
+            [Incoming::Reminder { id: "r-2".into(), title: "Pasta".into(), text: "Your timer is up.".into(), kind: "timer".into(), ringing: true }]
+        );
+        let alarm = parse(r#"{"type":"reminder","id":"r-3","title":"Wake up","kind":"alarm"}"#);
+        assert!(matches!(&alarm[..], [Incoming::Reminder { kind, ringing: false, .. }] if kind == "alarm"));
+        let odd = parse(r#"{"type":"reminder","id":"r-4","title":"x","kind":"sing","ringing":"yes"}"#);
+        assert!(matches!(&odd[..], [Incoming::Reminder { kind, ringing: false, .. }] if kind == "reminder"), "an unknown kind is a reminder, and only a real true rings");
+    }
+
+    #[test]
+    fn the_ringing_stopping() {
+        assert_eq!(parse(r#"{"type":"alarm_stopped","id":"r-2","by":"voice"}"#), [Incoming::AlarmStopped { id: "r-2".into() }]);
+        assert!(parse(r#"{"type":"alarm_stopped"}"#).is_empty());
+    }
+
+    #[test]
+    fn the_stop_button_names_the_one_that_is_ringing_and_nothing_else() {
+        let v: Value = serde_json::from_str(&dismiss_request("r-3f9a1c2b")).unwrap();
+        assert_eq!(v, json!({"type": "dismiss", "id": "r-3f9a1c2b"}));
     }
 }

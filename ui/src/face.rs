@@ -1,5 +1,6 @@
 //! The floating orb: what shows over your work while Orbit is doing something. A small dark circle with the sphere in it and,
-//! when Orbit needs a yes or no, the question above it. What was said is not shown here (the window has it).
+//! when Orbit needs a yes or no, the question above it, or a card with a Stop button when a reminder or timer is ringing.
+//! What was said is not shown here (the window has it).
 //!
 //! This is its own window (a Rune overlay, so it never takes focus and clicks pass straight through it), so it has its own
 //! state: a copy of what the hub knows, pushed here whenever it changes. The only part that takes clicks is the question's
@@ -8,7 +9,7 @@
 use rune::tok::TextStyle;
 use rune::{Align, AppHandle, Color, Cx, El, col, effect, el, row, text};
 
-use crate::app::{App, Ask};
+use crate::app::{App, Ask, Ring};
 use crate::layout::{CARD_W, Place, SPARE};
 use crate::orbit::{HasOrbit, Orbit};
 use crate::settings;
@@ -23,6 +24,8 @@ pub const HEIGHT: f32 = 112.0 + SPARE;
 pub struct Face {
     pub orbit: Orbit,
     pub ask: Option<Ask>,
+    /// A reminder or timer that is ringing (shown when there is no question: a question is the more urgent).
+    pub ring: Option<Ring>,
     /// Whether the yes and no chords are listening for the answer (they only are while a question is open).
     pub keys: bool,
     /// Those two chords, as written in the settings file.
@@ -42,12 +45,12 @@ impl HasOrbit for Face {
 
 impl Face {
     pub fn new(hub: Option<AppHandle<App>>) -> Face {
-        Face { orbit: Orbit::new(), ask: None, keys: false, yes: settings::DEFAULT_YES.into(), no: settings::DEFAULT_NO.into(), hub, place: Place::default() }
+        Face { orbit: Orbit::new(), ask: None, ring: None, keys: false, yes: settings::DEFAULT_YES.into(), no: settings::DEFAULT_NO.into(), hub, place: Place::default() }
     }
 
     /// The overlay's size for what it shows now.
     pub fn size(&self) -> (f32, f32) {
-        (WIDTH, self.place.diameter + SPARE + if self.ask.is_some() { ASK_EXTRA } else { 0.0 })
+        (WIDTH, self.place.diameter + SPARE + if self.ask.is_some() || self.ring.is_some() { ASK_EXTRA } else { 0.0 })
     }
 
     /// What decides whether the overlay needs redrawing: everything the view reads, with the level in whole percents (it
@@ -57,6 +60,7 @@ impl Face {
             epoch: self.orbit.epoch,
             level: (self.orbit.level * 50.0).round() as i32,
             ask: self.ask.as_ref().map(|a| (a.id, a.sent)),
+            ring: self.ring.as_ref().map(|r| (r.id.clone(), r.sent)),
             keys: self.keys,
             chords: (self.yes.clone(), self.no.clone()),
             place: self.place,
@@ -74,6 +78,7 @@ pub struct FaceKey {
     epoch: u32,
     level: i32,
     ask: Option<(i64, Option<bool>)>,
+    ring: Option<(String, bool)>,
     keys: bool,
     chords: (String, String),
     place: Place,
@@ -102,10 +107,14 @@ pub fn view(f: &Face, cx: &mut Cx<Face>) -> El {
     // The orb is at the bottom of its window with the card above it, or at the top with the card below it (see `layout`).
     let mut root = col().key("face").w_full().h_full().items_start().gap(14.0);
     root = if f.place.flip { root.justify_start() } else { root.justify_end() };
-    let card = f.ask.as_ref().map(|ask| {
-        let keys = f.keys.then(|| format!("{} yes \u{b7} {} no", settings::compact(&f.yes), settings::compact(&f.no)));
-        row().key("ask-line").w_full().pl(f.place.card_x).child(ask_card(ask, keys, &ink))
-    });
+    let card = match (&f.ask, &f.ring) {
+        (Some(ask), _) => {
+            let keys = f.keys.then(|| format!("{} yes \u{b7} {} no", settings::compact(&f.yes), settings::compact(&f.no)));
+            Some(row().key("ask-line").w_full().pl(f.place.card_x).child(ask_card(ask, keys, &ink)))
+        }
+        (None, Some(ring)) => Some(row().key("ring-line").w_full().pl(f.place.card_x).child(ring_card(ring, &ink))),
+        (None, None) => None,
+    };
     match (card, f.place.flip) {
         (Some(card), false) => root.child(card).child(line),
         (Some(card), true) => root.child(line).child(card),
@@ -144,6 +153,50 @@ fn ask_card(ask: &Ask, keys: Option<String>, ink: &Ink) -> El {
         )
         .child(answers)
         .child(text(keys.unwrap_or_default()).font(t(11.0, 400.0)).color(ink.muted))
+}
+
+/// A reminder or timer is ringing. The card and its Stop button are the only parts that take clicks.
+fn ring_card(ring: &Ring, ink: &Ink) -> El {
+    let stop = if ring.sent {
+        text("Stopping\u{2026}").font(t(12.0, 400.0)).color(ink.muted)
+    } else {
+        row()
+            .key("ring-stop")
+            .role("button")
+            .label("Stop")
+            .hit()
+            .h(32.0)
+            .w(120.0)
+            .center()
+            .radius(8.0)
+            .fill(ink.fg)
+            .border(1.0, ink.fg)
+            .on_press(|f: &mut Face| {
+                if let Some(hub) = f.hub.clone() {
+                    hub.update(move |app, tx| {
+                        app.stop_alarm();
+                        app.sync_shell(crate::clock::now(tx.clock()));
+                    });
+                }
+            })
+            .child(text("Stop").font(t(13.0, 500.0)).color(Color::BLACK).a11y_hidden())
+    };
+    col()
+        .key("ring")
+        .role("dialog")
+        .label(ring.heading())
+        .hit()
+        .w(CARD_W)
+        .padding(18.0)
+        .gap(12.0)
+        .items_center()
+        .radius(14.0)
+        .fill(hex("#0A0A0C").alpha(0.96))
+        .border(1.0, ink.hair_strong)
+        .child(text(ring.heading()).font(t(11.0, 400.0).tracking(1.54)).color(ink.muted))
+        .child(text(&ring.text).font(t(15.0, 400.0)).color(ink.fg).align(Align::Center).wrap().max_w(CARD_W - 40.0))
+        .child(stop)
+        .child(text("or say \u{201c}ok thanks\u{201d}").font(t(11.0, 400.0)).color(ink.muted))
 }
 
 fn answer(key: &str, label: &str, yes: bool, ink: &Ink) -> El {
@@ -237,6 +290,23 @@ mod tests {
         assert!(!f.wants_answer_keys(), "already answered: release the keys");
         f.ask = None;
         assert!(!f.wants_answer_keys());
+    }
+
+    fn ring() -> Ring {
+        Ring { id: "r-1".into(), title: "Pasta".into(), kind: "timer".into(), text: "Your timer is up.".into(), sent: false }
+    }
+
+    #[test]
+    fn the_overlay_grows_to_hold_a_ringing_reminder_and_redraws_when_stop_is_pressed() {
+        let mut f = Face::new(None);
+        let calm = f.key();
+        f.ring = Some(ring());
+        assert_eq!(f.size(), (WIDTH, HEIGHT + ASK_EXTRA));
+        let ringing = f.key();
+        assert_ne!(ringing, calm);
+        f.ring.as_mut().unwrap().sent = true;
+        assert_ne!(f.key(), ringing, "Stop pressed: the button gives way to the waiting line");
+        assert!(!f.wants_answer_keys(), "the yes and no chords belong to a question, not to a ringing reminder");
     }
 
     #[test]

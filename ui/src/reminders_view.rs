@@ -96,6 +96,11 @@ fn reminder_row(s: &App, r: &Reminder, now: &Stamp, ink: &Ink) -> El {
     let when = when_text(r, now);
     let tone = if r.enabled { ink.fg } else { ink.muted };
     let detail = if overdue { format!("Overdue \u{b7} {when}") } else if r.enabled { when } else { format!("Off \u{b7} {when}") };
+    let detail = match r.kind() {
+        "timer" => format!("Timer \u{b7} {detail}"),
+        "alarm" => format!("Alarm \u{b7} {detail}"),
+        _ => detail,
+    };
     let controls = if s.reminders.confirm_delete.as_deref() == Some(r.id.as_str()) {
         let yes = id.clone();
         row()
