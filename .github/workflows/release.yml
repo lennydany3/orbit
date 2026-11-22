@@ -1,0 +1,132 @@
+# Every push to `main` becomes a release: the tests run, Orbit is built (the engine with PyInstaller, the window with Cargo),
+# wrapped in the installer, and published on GitHub Releases as `Orbit-Setup-<version>.exe`. Installed copies of Orbit look at the
+# latest release (ui/src/updater.rs) and offer to update themselves.
+#
+# The version is `<VERSION file>.<run number>`, e.g. 1.0.17: edit VERSION to start a new 1.1 / 2.0 line; the last number only goes up.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".gitignore"
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false      # two quick merges make two releases, in order; never cancel one half way
+
+permissions:
+  contents: write                # to create the release and its tag
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install Orbit and its test tools
+        run: pip install -e ".[dev,voice,ipc]"
+      - name: Python tests
+        run: pytest -q
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ui
+      - name: Rust tests (the window's own logic; the ones that start Orbit need a microphone and are left to your own PC)
+        working-directory: ui
+        run: cargo test --lib
+
+  release:
+    needs: test
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out the version
+        id: version
+        shell: bash
+        run: |
+          base="$(tr -d '[:space:]' < VERSION)"
+          version="${base}.${{ github.run_number }}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          # The first `version = "..."` line of each file is the package's own.
+          sed -i "0,/^version = \".*\"/s//version = \"${version}\"/" ui/Cargo.toml pyproject.toml
+          echo "Building Orbit ${version}"
+
+      # ---- the engine (Python) ----
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install Orbit and PyInstaller
+        run: pip install -e ".[voice,ipc]" pyinstaller numpy
+      - name: Build the engine
+        run: pyinstaller packaging/orbit-engine.spec --noconfirm --distpath build/dist --workpath build/work
+      - name: Check that the built engine starts and answers
+        shell: bash
+        env:
+          ORBIT_DATA: ${{ runner.temp }}/orbit-data
+        run: |
+          out="$(build/dist/orbit-engine/orbit-engine.exe --no-llm "what time is it")"
+          echo "$out"
+          echo "$out" | grep -qi "it's"
+
+      # ---- the window (Rust) ----
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ui
+      - name: Build the window
+        working-directory: ui
+        run: cargo build --release
+
+      # ---- the installer ----
+      - name: Find Inno Setup
+        id: inno
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+          if (-not (Test-Path $iscc)) { throw "Inno Setup is not installed" }
+          "iscc=$iscc" >> $env:GITHUB_OUTPUT
+      - name: Build the installer
+        shell: pwsh
+        run: '& "${{ steps.inno.outputs.iscc }}" "/DAppVersion=${{ steps.version.outputs.version }}" installer\orbit.iss'
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $file = "installer\Output\Orbit-Setup-${{ steps.version.outputs.version }}.exe"
+          $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+          "$hash  $(Split-Path $file -Leaf)" | Out-File -Encoding ascii "$file.sha256"
+          Write-Host "$hash  $(Get-Item $file | % Length) bytes"
+
+      # ---- publish ----
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          gh release create "v${version}" \
+            "installer/Output/Orbit-Setup-${version}.exe" \
+            "installer/Output/Orbit-Setup-${version}.exe.sha256" \
+            --target "${{ github.sha }}" \
+            --title "Orbit ${version}" \
+            --generate-notes \
+            --latest

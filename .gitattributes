@@ -1,0 +1,2 @@
+# The Rust and Python tests compare the example files in tests/fixtures byte for byte, so they must be checked out with LF on every machine.
+tests/fixtures/** text eol=lf

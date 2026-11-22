@@ -50,6 +50,7 @@ class NullBridge:
     def killed(self) -> None: ...
     def reminder(self, reminder_id, title, text, kind="reminder", ringing=False) -> None: ...
     def alarm_stopped(self, reminder_id, by) -> None: ...
+    def notice(self, text) -> None: ...
 
     def poll_answer(self):
         return None
@@ -184,6 +185,11 @@ class UiBridge:
         self._publish(protocol.level(value))
 
     # ---- what was said ----
+    @_safe
+    def notice(self, text: str) -> None:
+        """A line about getting ready (a model being downloaded). An empty one takes it off the face."""
+        self._publish(protocol.notice(text))
+
     @_safe
     def transcript(self, who: str, text: str) -> None:
         self._publish(protocol.transcript(who, text))

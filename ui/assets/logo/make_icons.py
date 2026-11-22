@@ -5,6 +5,7 @@ remade at any time:
 
 writes:
     orbit-icon-256.png    the APP TILE: a white rounded square with a dashed black ring and the satellite. Window, taskbar, Alt+Tab.
+    orbit.ico             the same tile at 16 to 256 px in one file: the .exe's icon, the installer's, and the shortcuts'.
     orbit-tray-32.rgba    the TASKBAR / 16 mark (a dashed ring and one dot on white), 32 x 32 straight-alpha RGBA rows. The tray icon.
     ../../src/logo_dots.rs   every dot of the primary mark, read from the SVG's `orbit-mark` group (x, y, radius, opacity).
 The tile and tray numbers below are copied from the SVG's last row; if they change there, change them here.
@@ -74,6 +75,18 @@ def png(rgba: np.ndarray) -> bytes:
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
 
 
+def ico(sizes=(16, 24, 32, 48, 64, 128, 256)) -> bytes:
+    """A Windows icon file holding one PNG per size (Windows Vista and newer read PNG frames; 256 is stored as 0)."""
+    frames = [png(mark(n, **(TILE if n > 24 else SMALL))) for n in sizes]
+    head = struct.pack("<HHH", 0, 1, len(frames))
+    offset = 6 + 16 * len(frames)
+    table = b""
+    for n, data in zip(sizes, frames):
+        table += struct.pack("<BBBBHHII", n % 256, n % 256, 0, 0, 1, 32, len(data), offset)
+        offset += len(data)
+    return head + table + b"".join(frames)
+
+
 def primary_dots(svg: str):
     """(x, y, r, opacity) of every circle in the `orbit-mark` group, with the opacity of its group (or its own) applied."""
     start = svg.index('<g id="orbit-mark"')
@@ -107,6 +120,7 @@ def dots_source(dots) -> str:
 def main() -> None:
     here = Path(__file__).parent
     (here / "orbit-icon-256.png").write_bytes(png(mark(256, **TILE)))
+    (here / "orbit.ico").write_bytes(ico())
     (here / "orbit-tray-32.rgba").write_bytes(mark(32, **SMALL).tobytes())
     dots = primary_dots((here / "orbit-dot-sphere.svg").read_text(encoding="utf-8"))
     (here / ".." / ".." / "src" / "logo_dots.rs").write_text(dots_source(dots), encoding="utf-8", newline="\n")

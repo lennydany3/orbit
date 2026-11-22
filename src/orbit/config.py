@@ -1,12 +1,33 @@
 """All tunable settings in one place."""
 import ctypes
 import os
+import sys
 import uuid
 from pathlib import Path
 
 from .env import load_env
 
-load_env(Path(__file__).resolve().parents[2] / ".env")   # API keys (GROQ_API_KEY, SARVAM_API_KEY) come from this git-ignored file
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+FROZEN = bool(getattr(sys, "frozen", False))                       # True in the installed app (built with PyInstaller)
+BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", None) or PROJECT_ROOT)  # where files that ship with the program live (read-only)
+
+
+def _data_dir() -> Path:
+    """Where what is *yours* lives: settings, notes, reminders, logs, keys and downloaded models.
+
+    The installed app keeps them in the Orbit folder in %APPDATA%, so an update (or an uninstall) never touches them and the program folder can
+    stay read-only. Run from the source, it is the project folder, as it always was. `ORBIT_DATA` overrides both."""
+    chosen = os.environ.get("ORBIT_DATA")
+    if chosen:
+        return Path(chosen)
+    if FROZEN:
+        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Orbit"
+    return PROJECT_ROOT
+
+
+DATA_DIR = _data_dir()
+
+load_env(DATA_DIR / ".env")   # API keys (GROQ_API_KEY, SARVAM_API_KEY) come from this git-ignored file
 
 APP_NAME = "Orbit"  # the only place the product name lives: rename here.
 
@@ -41,8 +62,6 @@ MAX_HISTORY_TURNS = 6         # earlier requests the model can see (so 'close it
 MAX_HISTORY_CHARS = 5000      # hard cap on remembered text, to protect the small context window
 VERIFY_RETRIES = 1            # re-run an action once if it fails or fails to verify
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
 # --- Browser layer ---
 BROWSER = os.environ.get("ORBIT_BROWSER", "brave").lower()  # "brave" or "chrome": which installed browser Orbit drives
 # Where "open <website>" goes: "mine" = a link opened in your own Brave profile (your logins work; Orbit reads, clicks, scrolls and
@@ -51,7 +70,7 @@ BROWSER = os.environ.get("ORBIT_BROWSER", "brave").lower()  # "brave" or "chrome
 BROWSER_MODE = os.environ.get("ORBIT_BROWSER_MODE", "mine").lower()
 BRAVE_PROFILE = os.environ.get("ORBIT_BRAVE_PROFILE", "Personal")  # the Brave profile name shown in Brave's profile menu
 BROWSER_HEADLESS = False        # visible window: you can watch it work, and fullscreen is real
-BROWSER_PROFILE_DIR = PROJECT_ROOT / ".browser-profile"  # Orbit-only profile: never your real browser data
+BROWSER_PROFILE_DIR = DATA_DIR / ".browser-profile"  # Orbit-only profile: never your real browser data
 BRAVE_PATHS = [
     Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "BraveSoftware/Brave-Browser/Application/brave.exe",
     Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")) / "BraveSoftware/Brave-Browser/Application/brave.exe",
@@ -93,7 +112,7 @@ SCREENSHOT_DIR = Path(os.environ.get("ORBIT_SCREENSHOT_DIR") or _pictures_folder
 SCREENSHOT_CLIPBOARD = os.environ.get("ORBIT_SCREENSHOT_CLIPBOARD", "1").lower() not in ("0", "off", "false", "no")
 
 # --- Safety ---
-LOG_DIR = PROJECT_ROOT / "logs"
+LOG_DIR = DATA_DIR / "logs"
 # Tools may only touch files under these folders.
 ALLOWED_DIRS = [
     Path.home() / "Downloads",

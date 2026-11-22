@@ -6,6 +6,8 @@ __pycache__/
 .env
 .browser-profile/
 models/
+# the small models that ship inside the installer (the big ones download on first run)
+!/packaging/models/
 tests/voice/fixtures/*.wav
 tests/voice/fixtures_*/
 
@@ -18,3 +20,8 @@ reminders.json
 notes.json
 music.json
 *.json.bak
+
+# Build output (see packaging/ and installer/)
+build/
+dist/
+installer/Output/

@@ -65,7 +65,7 @@ MAX_DEVICE = 200
 
 def path() -> Path:
     """Where the settings file is."""
-    return Path(os.environ.get("ORBIT_SETTINGS") or config.PROJECT_ROOT / "settings.json")
+    return Path(os.environ.get("ORBIT_SETTINGS") or config.DATA_DIR / "settings.json")
 
 
 @dataclass(frozen=True)

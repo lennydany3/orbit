@@ -12,7 +12,7 @@ MIC_DEVICE = os.environ.get("ORBIT_MIC")         # device index or part of its n
 SPEAKER_DEVICE = os.environ.get("ORBIT_SPEAKER")  # same for playback
 
 # --- Models (downloaded once with your approval, then cached here; never fetched at run time) ---
-MODELS_DIR = app_config.PROJECT_ROOT / "models"
+MODELS_DIR = app_config.DATA_DIR / "models"
 SILERO_MODEL = MODELS_DIR / "silero_vad.onnx"
 
 # --- Speech-to-text (faster-whisper, local, CPU only: the GPU belongs to the LLM) ---

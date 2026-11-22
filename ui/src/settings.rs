@@ -34,9 +34,10 @@ pub const MAX_DEVICE: usize = 200;
 pub const DEFAULT_ORB_X: f32 = 1.0;
 pub const DEFAULT_ORB_Y: f32 = 1.0;
 
-/// The settings file: `ORBIT_SETTINGS`, or `settings.json` in the project folder (the same place Orbit looks).
+/// The settings file: `ORBIT_SETTINGS`, or `settings.json` in the data folder (the project folder, or %APPDATA%\Orbit when installed:
+/// the same place Orbit looks).
 pub fn path() -> PathBuf {
-    std::env::var_os("ORBIT_SETTINGS").map(PathBuf::from).unwrap_or_else(|| crate::spawn::project_root().join("settings.json"))
+    std::env::var_os("ORBIT_SETTINGS").map(PathBuf::from).unwrap_or_else(|| crate::spawn::data_dir().join("settings.json"))
 }
 
 // ---- keys -------------------------------------------------------------------------------------------------------------

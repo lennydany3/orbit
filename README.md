@@ -39,7 +39,21 @@ only while Orbit is doing something.
 Several requests in one sentence work ("open Spotify, then play my favourite music on the speaker"). Simple commands are handled
 by fast rules with no model call.
 
-## Setup (Windows 11)
+## Install (Windows 11)
+
+1. Download **Orbit-Setup-x.y.z.exe** from the [latest release](https://github.com/lennydany3/orbit/releases/latest) and run it.
+   It installs for your account only (no administrator rights) and walks you through the options, including pasting a free
+   [Groq](https://console.groq.com/keys) key so Orbit can chat and handle harder requests.
+2. The first start downloads the voice models once (about 600 MB, less with a Sarvam key). The sidebar says so while it happens.
+3. Say "hey orbit", or hold Right Ctrl. Orbit lives in the tray; its menu has **API keys...** (where Groq, Sarvam and Spotify keys go,
+   in `%APPDATA%\Orbit\.env`), **Check for updates...** and **Open Orbit's folder**.
+
+**Updates are automatic.** Every change merged to `main` is published as a new release; an installed Orbit checks for one every few
+hours, downloads it in the background and shows **Restart and update** (sidebar and tray) when it is ready. Nothing is installed without
+that click. Your settings, notes and reminders live in `%APPDATA%\Orbit` and are never touched by an update. How releases are made:
+[docs/RELEASING.md](docs/RELEASING.md).
+
+## Setup from source (Windows 11)
 
 **Orbit (Python 3.12):**
 

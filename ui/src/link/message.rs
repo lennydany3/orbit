@@ -23,6 +23,8 @@ pub enum Incoming {
     Reminder { id: String, title: String, text: String, kind: String, ringing: bool },
     /// The ringing stopped (so the Stop button goes away).
     AlarmStopped { id: String },
+    /// A line about what Orbit is doing to get ready (downloading the voice models). Empty: nothing now.
+    Notice(String),
     Error(String),
 }
 
@@ -75,6 +77,7 @@ pub fn parse(raw: &str) -> Vec<Incoming> {
             })
         })()),
         Some("alarm_stopped") => one(text(&v, "id").map(|id| Incoming::AlarmStopped { id })),
+        Some("notice") => one(text(&v, "text").map(Incoming::Notice)),
         Some("error") => one(text(&v, "message").map(Incoming::Error)),
         Some(_) => Vec::new(),
     }

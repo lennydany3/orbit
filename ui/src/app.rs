@@ -26,6 +26,8 @@ use crate::reminders::RemindersState;
 use crate::settings;
 use crate::shell::Shell;
 use crate::spawn::{Kind, Spawned};
+use crate::tray::TrayView;
+use crate::updater::Updater;
 use crate::userdata;
 use crate::watcher::{self, Watcher};
 
@@ -147,6 +149,8 @@ pub struct Live {
     pub last_message: String,
     /// What went wrong, if anything: a bad address, Orbit refusing, Orbit stopping.
     pub notice: Option<String>,
+    /// What Orbit says it is busy with while it gets ready (the first start downloads the voice models).
+    pub setup_note: Option<String>,
     pacer: Pacer,
     level: f32,
     pub caption: Option<Caption>,
@@ -167,6 +171,7 @@ impl Default for Live {
             url: TextEdit::new("ws://127.0.0.1:8765/?token="),
             last_message: String::new(),
             notice: None,
+            setup_note: None,
             pacer: Pacer::new(),
             level: 0.0,
             caption: None,
@@ -233,6 +238,8 @@ pub struct App {
     watcher: Option<Watcher>,
     /// What Orbit last said about a reminder, to show a moment.
     pub reminder_said: Option<String>,
+    /// Looking for a newer Orbit on GitHub, and having it ready to install.
+    pub updater: Updater,
 }
 
 impl Default for App {
@@ -256,6 +263,7 @@ impl Default for App {
             scan: Scan::Idle,
             watcher: None,
             reminder_said: None,
+            updater: Updater::default(),
         }
     }
 }
@@ -572,6 +580,7 @@ impl App {
 
     /// Remembers what wakes the UI when the link thread has news. Set once, before connecting.
     pub fn set_waker(&mut self, waker: Waker) {
+        self.updater = self.updater.with_waker(waker.clone());
         self.live.waker = waker;
     }
 
@@ -605,6 +614,7 @@ impl App {
 
     fn drop_link(&mut self, t: f64) {
         self.live.link = None;
+        self.live.setup_note = None;
         if self.live_open() {
             self.go_dark(t);
         }
@@ -716,6 +726,7 @@ impl App {
                     self.live.confirm = None;
                 }
             }
+            Incoming::Notice(text) => self.live.setup_note = Some(text).filter(|t| !t.trim().is_empty()),
             Incoming::Error(why) => self.live.notice = Some(why),
         }
     }
@@ -794,9 +805,33 @@ impl App {
         if let (Some(why), true) = (&self.prefs.orb_error, std::env::var_os("ORBIT_UI_DEBUG").is_some()) {
             eprintln!("[hub] orb chord: {why}");
         }
+        self.shell.sync_tray(self.tray_view());
         let visible = self.presence.visible(self.active() || self.previewing(), t);
         let face = self.face();
         self.shell.apply(face, visible, self.prefs.settings.sounds);
+    }
+
+    /// What the tray menu says right now: what Orbit is doing, the orb's chord, and where the update stands.
+    pub fn tray_view(&self) -> TrayView {
+        let header = match self.live.status {
+            Status::Open => match &self.live.setup_note {
+                Some(_) => "Orbit \u{b7} getting ready\u{2026}".to_owned(),
+                None => format!("Orbit \u{b7} {}", self.orbit.state.label()),
+            },
+            Status::Connecting => "Orbit \u{b7} starting\u{2026}".to_owned(),
+            Status::Closed | Status::Error => "Orbit \u{b7} not answering".to_owned(),
+            Status::Off => "Orbit \u{b7} not running".to_owned(),
+        };
+        TrayView { header, orb_chord: Some(settings::pretty(&self.prefs.hotkeys().orb)), update: self.updater.state() }
+    }
+
+    /// "Restart and update": runs the installer that was downloaded, and ends this program so the installer can replace it.
+    pub fn install_update(&mut self) {
+        if self.updater.install_ready()
+            && let Some(hub) = &self.shell.hub
+        {
+            hub.quit();
+        }
     }
 
     /// Pins the orb on screen, or lets it go again (the hotkey and the tray icon).
