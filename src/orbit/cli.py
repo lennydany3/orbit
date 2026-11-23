@@ -92,6 +92,25 @@ def build_agent(use_llm: bool = True, model: str = config.MODEL, fake_tools: boo
     return agent
 
 
+NO_MODEL_NOTE = "No language model yet: simple commands work. Add a Groq key (tray menu, API keys) for chat and harder requests."
+
+
+def _installed_llm_choice(provider: str | None) -> tuple[bool, str]:
+    """The installed app has no Ollama of its own. With a Groq key, or Ollama answering on this PC, the model is used as usual;
+    with neither, Orbit runs on its fast rules alone (and says so) instead of failing on every sentence that is not a command."""
+    from .llm.factory import resolve_provider
+
+    try:
+        if resolve_provider(provider) == "groq":
+            return True, ""
+        import httpx
+
+        httpx.get(config.OLLAMA_HOST, timeout=1.5)
+        return True, ""
+    except Exception:  # noqa: BLE001 - no Ollama, or a provider that cannot be used: rules only
+        return False, NO_MODEL_NOTE
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         return _main(argv)
@@ -136,8 +155,11 @@ def _main(argv: list[str] | None) -> int:
         config.VISUALS = False
     browser_session.use(args.browser)
     config.BROWSER_MODE = args.browser_mode
+    use_llm, llm_note = not args.no_llm, ""
+    if use_llm and config.FROZEN:
+        use_llm, llm_note = _installed_llm_choice(args.llm)
     try:
-        agent = build_agent(use_llm=not args.no_llm, model=args.model, fake_tools=args.fake_tools, llm_provider=args.llm,
+        agent = build_agent(use_llm=use_llm, model=args.model, fake_tools=args.fake_tools, llm_provider=args.llm,
                             friend=not args.no_friend)
     except LLMError as e:
         print(f"Cannot start the language model: {e}")
@@ -159,12 +181,18 @@ def _main(argv: list[str] | None) -> int:
         if args.ipc and link is None:
             return 2
         if args.exit_with_parent:
-            import _thread
+            from .ipc.lifetime import stop_like_ctrl_c, watch_parent
 
-            from .ipc.lifetime import watch_parent
-
-            watch_parent(sys.stdin.fileno(), _thread.interrupt_main)
+            watch_parent(sys.stdin.fileno(), stop_like_ctrl_c)
         try:
+            if config.FROZEN:                        # the installed app: put the models in place before the voice loads them
+                from .voice.provision import ensure_models
+
+                ensure_models(print, link.bridge.notice if link else None)
+            if llm_note:
+                print(llm_note)
+                if link:
+                    link.bridge.notice(llm_note)
             result = run_voice(agent, device=args.mic or voice_config.MIC_DEVICE, wake_enabled=not args.no_wake,
                                follow_up=False if args.no_follow_up else None, ui=link.bridge if link else None)
         except KeyboardInterrupt:                  # the window went away while voice was still loading

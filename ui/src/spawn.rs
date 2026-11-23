@@ -41,6 +41,32 @@ pub fn free_port() -> std::io::Result<u16> {
     Ok(TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
 }
 
+/// The installed engine: `engine\orbit-engine.exe` beside this program, when there is one. Only the installer puts it there, so its
+/// presence is what tells an installed Orbit from one run out of the source folder.
+pub fn installed_engine() -> Option<PathBuf> {
+    let beside = std::env::current_exe().ok()?.parent()?.join("engine").join("orbit-engine.exe");
+    beside.is_file().then_some(beside)
+}
+
+/// Is this the installed app (as opposed to `cargo run` in the project)?
+pub fn is_installed() -> bool {
+    installed_engine().is_some()
+}
+
+/// Where what is yours lives: `ORBIT_DATA`; for the installed app the Orbit folder in `%APPDATA%` (so an update or an uninstall
+/// never touches it); from the source, the project folder. The engine is told the same place (`ORBIT_DATA`), so both sides agree.
+pub fn data_dir() -> PathBuf {
+    if let Some(chosen) = std::env::var_os("ORBIT_DATA") {
+        return PathBuf::from(chosen);
+    }
+    if is_installed()
+        && let Some(appdata) = std::env::var_os("APPDATA")
+    {
+        return PathBuf::from(appdata).join("Orbit");
+    }
+    project_root()
+}
+
 /// The Orbit project folder: this one's parent, unless `ORBIT_ROOT` says otherwise.
 pub fn project_root() -> PathBuf {
     std::env::var_os("ORBIT_ROOT")
@@ -64,6 +90,29 @@ pub fn plan(kind: Kind, root: &Path, python: PathBuf, port: u16, token: String) 
     Plan { program: python, args, token, cwd: root.to_path_buf(), url }
 }
 
+/// Starts the engine with no console window, and sends what it prints to `logs\engine.log` (the window itself has no console, so
+/// without this the engine's output would have nowhere to go).
+#[cfg(windows)]
+fn quiet(command: &mut Command, data: &Path) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+    let logs = data.join("logs");
+    let _ = std::fs::create_dir_all(&logs);
+    let log = std::fs::File::create(logs.join("engine.log")).ok();
+    match log.and_then(|f| f.try_clone().ok().map(|g| (f, g))) {
+        Some((out, err)) => {
+            command.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+        }
+        None => {
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn quiet(_command: &mut Command, _data: &Path) {}
+
 /// A running Orbit that this window started.
 pub struct Spawned {
     child: Child,
@@ -73,22 +122,41 @@ pub struct Spawned {
 
 impl Spawned {
     pub fn start(kind: Kind) -> Result<Spawned, String> {
-        let root = project_root();
-        let python = python_for(&root);
-        if !python.exists() {
-            return Err(format!("Python not found at {} (set ORBIT_PYTHON, or create the project's .venv)", python.display()));
-        }
         let port = free_port().map_err(|e| format!("no free port: {e}"))?;
-        let plan = plan(kind, &root, python, port, random_token());
-        let mut child = Command::new(&plan.program)
+        let data = data_dir();
+        let plan = match installed_engine() {
+            // Installed: the engine is a program of its own (no Python on this PC is needed) and it runs in the data folder.
+            Some(engine) => {
+                if kind == Kind::Demo {
+                    return Err("the scripted demo is only in the source folder".to_owned());
+                }
+                let _ = std::fs::create_dir_all(&data);
+                let mut plan = plan(kind, &data, engine, port, random_token());
+                plan.args.drain(..2);                                  // "-m orbit": the engine already is `python -m orbit`
+                plan
+            }
+            None => {
+                let root = project_root();
+                let python = python_for(&root);
+                if !python.exists() {
+                    return Err(format!("Python not found at {} (set ORBIT_PYTHON, or create the project's .venv)", python.display()));
+                }
+                plan(kind, &root, python, port, random_token())
+            }
+        };
+        let mut command = Command::new(&plan.program);
+        command
             .args(&plan.args)
             .current_dir(&plan.cwd)
             .env("ORBIT_IPC_TOKEN", &plan.token)
             .env("ORBIT_SETTINGS", crate::settings::path())
             .env("PYTHONIOENCODING", "utf-8")
-            .stdin(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("could not start Orbit: {e}"))?;
+            .stdin(Stdio::piped());
+        if is_installed() {
+            command.env("ORBIT_DATA", &data);
+            quiet(&mut command, &data);
+        }
+        let mut child = command.spawn().map_err(|e| format!("could not start Orbit: {e}"))?;
         let stdin = child.stdin.take();
         Ok(Spawned { child, stdin, url: plan.url })
     }

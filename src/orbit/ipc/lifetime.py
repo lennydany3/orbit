@@ -48,6 +48,18 @@ def _ended(fd: int) -> bool:
         return True
 
 
+def stop_like_ctrl_c(grace_s: float = 8.0) -> None:
+    """What to do when the window is gone: stop the way Ctrl+C would, and if the main thread cannot get to it within `grace_s`
+    (it is inside a network call that never returns, such as a model download on a dead connection) end the process anyway,
+    so an Orbit with no window never lingers."""
+    import _thread
+
+    _thread.interrupt_main()
+    timer = threading.Timer(grace_s, os._exit, args=(0,))
+    timer.daemon = True
+    timer.start()
+
+
 def watch_parent(fd: int, on_gone: Callable[[], None], poll_s: float = 0.2) -> threading.Thread:
     """Calls `on_gone()` once, from a background thread, when the pipe on `fd` (standard input) loses its other end."""
 

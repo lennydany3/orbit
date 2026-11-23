@@ -1,3 +1,6 @@
+// The installed program has no console window (a debug build keeps one, for the logs while working on it).
+#![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
+
 //! Orbit's face. A particle sphere that shows what Orbit is doing, drawn on the GPU with Rune.
 //!
 //! It lives in the tray. When Orbit is doing something a small orb floats up over your work (bottom right, above the
@@ -10,6 +13,7 @@
 //!   --spawn-demo     the same with a scripted turn and a yes/no question, no microphone needed
 //!   --url ws://127.0.0.1:PORT/?token=...   show an Orbit that is already running (`python -m orbit --voice --ipc`)
 //!   --window         open the window as well as the tray
+//!   (installed, no options) start Orbit and open the window: what the Start menu and the desktop icon do
 //!   --autostart on|off|status   start Orbit (--spawn) when you sign in to Windows; never done unless you ask
 //!
 //! Headless, for checking the look without a window:
@@ -36,6 +40,16 @@ use orbit_ui::spawn::Kind;
 use orbit_ui::view;
 use rune::{Align, AppSpec, Key, KeyEvent, OverlayInput, OverlayOptions, OverlaySpec, ScreenEdge, Waker, WindowSpec};
 
+/// What the program was asked to do. The installed program started with nothing at all (the Start menu, the desktop icon) means
+/// "start Orbit and show its window"; Windows starting it at sign-in passes `--spawn`, which stays in the tray.
+fn launch_args() -> Vec<String> {
+    let mut args = rune::extra_args().to_vec();
+    if args.is_empty() && orbit_ui::spawn::is_installed() {
+        args = vec!["--spawn".to_owned(), "--window".to_owned()];
+    }
+    args
+}
+
 fn debug() -> bool {
     std::env::var_os("ORBIT_UI_DEBUG").is_some()
 }
@@ -50,8 +64,10 @@ fn setup(s: &mut App, waker: Waker) {
         return;                                    // a snapshot starts nothing and connects to nothing
     }
     s.start_background();                          // looking at the data files Orbit changes, and at the audio devices
+    s.updater.start_schedule();                    // a newer release on GitHub (only when installed)
     s.sync_shell(clock::now(0.0));                 // the orb's hotkey, from the settings, from the very start
-    let mut args = rune::extra_args().iter();
+    let launch = launch_args();
+    let mut args = launch.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--spawn" => s.spawn(Kind::Orbit, 0.0),
@@ -207,6 +223,15 @@ fn spec() -> AppSpec<App> {
                 s.on_event(Event::Status(Status::Open), 0.0);
                 s.on_event(Event::Message(r#"{"type":"reminder","id":"r-3f9a1c2b","title":"Call mom","text":"Reminder: Call mom.","ringing":true}"#.to_owned()), 0.0);
             }),
+            ("update-ready", |s| {
+                live(s, "idle", &[]);
+                let release = orbit_ui::updater::Release {
+                    version: "1.0.7".into(), url: "https://github.com/lennydany3/orbit/releases/download/v1.0.7/Orbit-Setup-1.0.7.exe".into(),
+                    file_name: "Orbit-Setup-1.0.7.exe".into(), sha256: None, size: 0, page: String::new(),
+                };
+                s.updater = orbit_ui::updater::Updater::with_state(orbit_ui::updater::Update::Ready(release, "x".into()));
+            }),
+            ("getting-ready", |s| live(s, "idle", &[r#"{"type":"notice","text":"Getting Orbit ready: downloading the voice (2 of 3)…"}"#])),
             ("settings-general", |s| settings_scene(s, Section::General)),
             ("settings-general-talk", |s| {
                 settings_scene(s, Section::General);
@@ -374,9 +399,16 @@ fn main() {
     }
 
     // With no instructions there is nothing else to look at, so the window opens; with --spawn and friends it stays in the tray.
-    let args = rune::extra_args();
+    let args = launch_args();
     let starts_orbit = args.iter().any(|a| matches!(a.as_str(), "--spawn" | "--spawn-demo" | "--url"));
     let open_window = args.iter().any(|a| a == "--window") || !starts_orbit;
+
+    // One Orbit at a time: a second start brings the first one's window up and ends.
+    let single = match orbit_ui::single::claim() {
+        orbit_ui::single::Claim::Second => return,
+        orbit_ui::single::Claim::First(guard) => Some(guard),
+        orbit_ui::single::Claim::Unavailable => None,
+    };
 
     // modifier_keys: a Ctrl, Alt or Shift pressed on its own reaches the page, so Right Ctrl can be picked as the key to hold to talk.
     let mut app = rune::App::new(spec()).windowless().modifier_keys().compositor(SphereCompositor::default());
@@ -388,6 +420,10 @@ fn main() {
     let app = app.init(move || {
         App::default().with_shell(Shell::new(orb, hub_in_state, tray)).with_settings(SettingsState::open(prefs_file.clone())).with_data(&prefs_file)
     });
+    if let Some(guard) = single {
+        let wake = hub.clone();
+        guard.serve(move || wake.open());
+    }
     if open_window {
         hub.open();
     }

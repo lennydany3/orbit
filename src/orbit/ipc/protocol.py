@@ -16,6 +16,8 @@ Orbit -> face
                                                      A timer or alarm adds "kind": "timer" | "alarm"; one that is ringing adds
                                                      "ringing": true, and the face shows a Stop button until the next message.
     {"type": "alarm_stopped", "id": "r-3f9a", "by": "voice" | "key" | "ui" | "timeout" | "killed"}   it stopped ringing
+    {"type": "notice", "text": "..."}                a line about what Orbit is doing to get ready ("Downloading the voice models ...");
+                                                     an empty text clears it
     {"type": "error", "message": "..."}              about the face's last message
 
 The state and level messages have no "type" on purpose: they are the format the design's page already understands.
@@ -117,6 +119,10 @@ def reminder(reminder_id: str, title: str, text: str, kind: str = "reminder", ri
 
 def alarm_stopped(reminder_id: str, by: str) -> dict:
     return {"type": "alarm_stopped", "id": str(reminder_id)[:40], "by": by}
+
+
+def notice(text: str) -> dict:
+    return {"type": "notice", "text": _clip(text)}
 
 
 def error(message: str) -> dict:

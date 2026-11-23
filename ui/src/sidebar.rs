@@ -1,10 +1,13 @@
-//! The sidebar: Orbit's mark and name with the notifications bell, the pages, Settings at the bottom, and whether Orbit is connected.
+//! The sidebar: Orbit's mark and name with the notifications bell, the pages, Settings at the bottom, and below that a card only when
+//! there is something to say: an update ready to install, what Orbit is busy getting ready, or that it is not running. When all is well
+//! there is nothing (what Orbit is doing is on the sphere, and in the tray menu's header).
 
 use rune::{Color, El, Icon, col, el, icon, row, text};
 
 use crate::app::{App, Page};
 use crate::icons;
 use crate::link::Status;
+use crate::updater::Update;
 use crate::view::Ink;
 use crate::widgets::{badge, caps, t};
 
@@ -31,8 +34,7 @@ pub(crate) fn sidebar(s: &App, ink: &Ink) -> El {
         .child(item(s, "nav-music", &icons::MUSIC, Page::Music, Some("BETA"), ink))
         .child(el().key("sidebar-fill").grow(1.0))
         .child(item(s, "nav-settings", &icons::SETTINGS, Page::Settings, None, ink))
-        .child(el().key("status-gap").h(8.0))
-        .child(status(s, ink))
+        .children(footer(s, ink))
 }
 
 /// The mark, the name, and the bell with the number of reminders that went off since it was last looked at.
@@ -104,32 +106,83 @@ fn item(s: &App, key: &'static str, glyph: &'static Icon, page: Page, tag: Optio
     line
 }
 
-/// Whether Orbit is connected, and what it is doing.
-fn status(s: &App, ink: &Ink) -> El {
-    let linked = s.live.status;
-    let (dot, words) = match linked {
-        Status::Open => (hex_ok(), format!("Connected \u{b7} {}", s.orbit.state.label())),
-        Status::Connecting => (ink.muted, "Connecting\u{2026}".to_owned()),
-        Status::Closed => (hex_wait(), "Orbit is not answering\u{2026}".to_owned()),
-        Status::Error => (ink.bad, "Could not connect".to_owned()),
-        Status::Off => (ink.muted, "Orbit is not running".to_owned()),
-    };
+/// What goes under Settings, if anything: an update ready to install first, then what Orbit is getting ready, then a problem.
+fn footer(s: &App, ink: &Ink) -> Vec<El> {
+    let card = match s.updater.state() {
+        Update::Ready(release, _) => Some(update_card(&release.version, ink)),
+        Update::Downloading(release) => Some(note(format!("Downloading Orbit {}\u{2026}", release.version), hex_wait(), ink)),
+        _ => None,
+    }
+    .or_else(|| s.live.setup_note.clone().map(|text| note(text, hex_wait(), ink)))
+    .or_else(|| problem(s, ink));
+    match card {
+        Some(card) => vec![el().key("status-gap").h(8.0), card],
+        None => Vec::new(),
+    }
+}
+
+/// "Update ready", with the one button that installs it.
+fn update_card(version: &str, ink: &Ink) -> El {
+    col()
+        .key("update-card")
+        .w_full()
+        .px(12.0)
+        .py(12.0)
+        .gap(8.0)
+        .radius(10.0)
+        .fill(ink.accent.alpha(0.14))
+        .border(1.0, ink.accent.alpha(0.45))
+        .child(
+            row()
+                .key("update-title")
+                .gap(8.0)
+                .items_center()
+                .child(el().key("update-dot").size(8.0, 8.0).radius(4.0).fill(ink.accent_text))
+                .child(text(format!("Update ready \u{b7} {version}")).font(t(12.0, 600.0)).color(ink.fg).truncate().grow(1.0).min_w(0.0)),
+        )
+        .child(
+            row()
+                .key("update-install")
+                .role("button")
+                .label("Restart and update Orbit")
+                .focusable(true)
+                .w_full()
+                .h(30.0)
+                .center()
+                .radius(8.0)
+                .fill(ink.accent)
+                .hover(Color::WHITE.alpha(0.08))
+                .on_press(|s: &mut App| s.install_update())
+                .child(text("Restart and update").font(t(12.0, 600.0)).color(Color::WHITE).a11y_hidden()),
+        )
+}
+
+/// A quiet one-line card with a coloured dot.
+fn note(words: String, dot: Color, ink: &Ink) -> El {
     row()
         .key("status")
         .w_full()
-        .h(40.0)
+        .min_h(40.0)
         .px(12.0)
+        .py(8.0)
         .gap(9.0)
         .items_center()
         .radius(10.0)
         .fill(Color::WHITE.alpha(0.04))
         .border(1.0, ink.hair)
         .child(el().key("status-dot").size(8.0, 8.0).radius(4.0).fill(dot))
-        .child(text(words).font(t(12.0, 400.0)).color(ink.fg).truncate().grow(1.0).min_w(0.0))
+        .child(text(words).font(t(12.0, 400.0)).color(ink.fg).wrap().grow(1.0).min_w(0.0))
 }
 
-fn hex_ok() -> Color {
-    crate::view::hex("#58C98A")
+/// Only when something is wrong: Orbit stopped, or the window cannot reach it. (Connecting is not a problem, and connected says nothing.)
+fn problem(s: &App, ink: &Ink) -> Option<El> {
+    let (dot, words) = match s.live.status {
+        Status::Open | Status::Connecting => return None,
+        Status::Closed => (hex_wait(), "Orbit is not answering\u{2026}".to_owned()),
+        Status::Error => (ink.bad, s.live.notice.clone().unwrap_or_else(|| "Could not connect".to_owned())),
+        Status::Off => (ink.muted, s.live.notice.clone().unwrap_or_else(|| "Orbit is not running".to_owned())),
+    };
+    Some(note(words, dot, ink))
 }
 
 fn hex_wait() -> Color {

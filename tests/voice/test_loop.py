@@ -208,6 +208,32 @@ def test_hold_to_talk_turn_runs_the_agent_and_speaks_a_short_reply():
     assert any(line.startswith("Orbit: Okay, I would do this: open spotify") for line in out)   # the full reply is shown
 
 
+def test_a_turn_feeds_the_latency_numbers_into_the_monitor_and_the_report_shows_the_p90():
+    from orbit.voice.monitor import Monitor
+
+    sim, loop, keys, tts, _, out = build("open spotify", monitor=Monitor())
+    user_holds_key_and_talks(sim, loop, keys)
+    sim.stop_when = lambda: loop.turns == 1 and loop.st.is_(State.IDLE)
+    loop.run()
+    timings = loop.monitor.timings
+    for name in ("speech-to-text", "agent", "transcribe (end of speech -> text)", "reply -> first audio", "end of speech -> first spoken word"):
+        assert len(timings[name]) == 1, name
+    assert "last word -> first spoken word (incl. end-of-speech wait)" not in timings          # hold-to-talk has no end-of-speech wait
+    assert "p90" in loop.monitor.report()
+
+
+def test_a_wake_word_turn_also_records_the_time_from_the_last_word():
+    from orbit.voice.monitor import Monitor
+
+    sim, loop, keys, tts, wake, _ = build("Hey Orbit, open Spotify.", with_wake=True, monitor=Monitor())
+    sim.when(lambda: sim.reads > 5, lambda: setattr(wake, "armed", True))
+    sim.when(lambda: loop.st.is_(State.LISTENING) and sim.talk == 0 and not loop.heard, lambda: setattr(sim, "talk", 15))
+    sim.stop_when = lambda: loop.turns == 1
+    loop.run()
+    total = loop.monitor.timings["end of speech -> first spoken word"][0]
+    assert loop.monitor.timings["last word -> first spoken word (incl. end-of-speech wait)"] == [pytest.approx(total + config.VAD_END_SILENCE_S)]
+
+
 def test_the_spoken_reply_is_the_short_version_but_the_screen_has_all_of_it():
     class Verbose:
         safety = type("S", (), {"confirm": None})()

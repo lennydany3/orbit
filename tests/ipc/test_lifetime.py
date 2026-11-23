@@ -74,3 +74,28 @@ def test_a_real_child_is_interrupted_like_ctrl_c_when_its_parent_closes_the_pipe
         watchdog.cancel()
         if child.poll() is None:
             child.kill()
+
+
+def test_a_stuck_main_thread_is_not_left_running_forever(monkeypatch):
+    """stop_like_ctrl_c interrupts the main thread, and arms a daemon timer that ends the process if that does not work."""
+    import _thread
+    import threading
+
+    from orbit.ipc import lifetime
+
+    interrupted, armed = [], []
+
+    class FakeTimer:
+        def __init__(self, interval, function, args=()):
+            armed.append((interval, function, args))
+            self.daemon = False
+
+        def start(self):
+            armed.append("started")
+
+    monkeypatch.setattr(_thread, "interrupt_main", lambda: interrupted.append(True))
+    monkeypatch.setattr(threading, "Timer", FakeTimer)
+    lifetime.stop_like_ctrl_c(grace_s=3.0)
+    assert interrupted == [True]
+    assert armed[0][0] == 3.0 and armed[0][1] is lifetime.os._exit and armed[0][2] == (0,)
+    assert armed[1] == "started"

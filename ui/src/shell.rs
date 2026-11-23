@@ -3,12 +3,13 @@
 
 use std::time::{Duration, Instant};
 
-use rune::{AppHandle, OverlayHandle, OverlayPlacement, Shortcut, ShortcutError, ShortcutId, Tray, TrayEvent, TrayIcon, TrayItem, TraySpec};
+use rune::{AppHandle, OverlayHandle, OverlayPlacement, Shortcut, ShortcutError, ShortcutId, Tray, TrayEvent, TrayIcon, TraySpec};
 
 use crate::app::App;
 use crate::face::{Face, FaceKey};
 use crate::settings::Sounds;
 use crate::sound::{Chime, Cue, Player};
+use crate::tray::{self, TrayView};
 
 /// How the orb leaves: a quick fade (Windows and macOS; elsewhere it just goes).
 const FADE_OUT: Duration = Duration::from_millis(260);
@@ -34,15 +35,28 @@ pub struct Shell {
     /// When a show or hide gets a sound, and how it is played. (Quiet unless made with `new`: only the real window speaks.)
     chime: Chime,
     pub player: Player,
+    /// What the tray menu last said, so it is only rebuilt when it changes.
+    tray_view: Option<TrayView>,
 }
 
 impl Shell {
     pub fn new(orb: OverlayHandle<Face>, hub: AppHandle<App>, tray: Option<Tray>) -> Shell {
-        Shell { orb: Some(orb), hub: Some(hub), tray, shown: false, last_key: None, last_size: None, last_rect: None, answer_keys: None, orb_chord: None, orb_refused: None, chime: Chime::default(), player: Player::speaking() }
+        Shell { orb: Some(orb), hub: Some(hub), tray, shown: false, last_key: None, last_size: None, last_rect: None, answer_keys: None, orb_chord: None, orb_refused: None, chime: Chime::default(), player: Player::speaking(), tray_view: None }
     }
 
     pub fn has_tray(&self) -> bool {
         self.tray.is_some()
+    }
+
+    /// Brings the tray menu and tooltip up to date (only when what they say has changed).
+    pub fn sync_tray(&mut self, view: TrayView) {
+        let Some(tray) = &self.tray else { return };
+        if self.tray_view.as_ref() == Some(&view) {
+            return;
+        }
+        tray.set_menu(tray::menu(&view));
+        tray.set_tooltip(view.tooltip());
+        self.tray_view = Some(view);
     }
 
     /// Plays the pop-up tone at the volume in `sounds`, for the Settings page to let you hear a change (nothing if it is off).
@@ -187,25 +201,43 @@ pub fn tray_icon() -> TrayIcon {
     TrayIcon::rgba(crate::logo::TRAY_SIZE, crate::logo::TRAY_SIZE, crate::logo::tray_rgba())
 }
 
-/// The tray icon and its menu. Every action goes through the hub, on the app's own thread; the tray's thread only forwards.
+/// The tray icon and its menu (see `tray`). Every action goes through the hub, on the app's own thread; the tray's thread only forwards.
 pub fn make_tray(hub: AppHandle<App>) -> Option<Tray> {
-    let spec = TraySpec::new("orbit.face", "Orbit", tray_icon()).tooltip("Orbit").menu(vec![
-        TrayItem::action("orb", "Show or hide the orb"),
-        TrayItem::action("window", "Open the Orbit window"),
-        TrayItem::action("settings", "Settings\u{2026}"),
-        TrayItem::Separator,
-        TrayItem::action("quit", "Quit Orbit"),
-    ]);
+    let spec = TraySpec::new("orbit.face", "Orbit", tray_icon()).tooltip("Orbit").menu(tray::menu(&TrayView::default()));
     let tray = Tray::new(spec, move |event| match event {
         TrayEvent::Activate { .. } => hub.update(|app, tx| app.toggle_pin(crate::clock::now(tx.clock()))),
         TrayEvent::Menu(id) => match id.as_str() {
-            "orb" => hub.update(|app, tx| app.toggle_pin(crate::clock::now(tx.clock()))),
-            "window" => hub.open(),
-            "settings" => {
+            tray::id::ORB => hub.update(|app, tx| app.toggle_pin(crate::clock::now(tx.clock()))),
+            tray::id::WINDOW => hub.open(),
+            tray::id::SETTINGS => {
                 hub.update(|app, _| app.open_settings(crate::editor::Section::General));
                 hub.open();
             }
-            "quit" => hub.quit(),
+            tray::id::CHECK => hub.update(|app, _| app.updater.check_now()),
+            tray::id::INSTALL => {
+                let quit = hub.clone();
+                hub.update(move |app, _| {
+                    if app.updater.install_ready() {
+                        quit.quit();                      // the installer is running: it needs Orbit gone to replace it
+                    }
+                });
+            }
+            tray::id::NOTES => hub.update(|app, _| {
+                if let Some(release) = app.updater.state().ready() {
+                    let _ = crate::openers::open_release_page(&release.page);
+                }
+            }),
+            tray::id::KEYS => {
+                if let Err(why) = crate::openers::open_keys_file() {
+                    eprintln!("orbit-ui: {why}");
+                }
+            }
+            tray::id::DATA => {
+                if let Err(why) = crate::openers::open_folder(&crate::spawn::data_dir()) {
+                    eprintln!("orbit-ui: {why}");
+                }
+            }
+            tray::id::QUIT => hub.quit(),
             _ => {}
         },
         _ => {}
