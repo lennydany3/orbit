@@ -42,5 +42,5 @@ where = ["src"]
 "orbit.voice" = ["alarms/*.wav", "alarms/*.md"]      # the reminder and timer sounds
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
