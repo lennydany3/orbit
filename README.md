@@ -9,9 +9,9 @@ only while Orbit is doing something.
   <img src="docs/screenshots/sphere-speaking.png" alt="Orbit's window: the particle sphere while Orbit speaks a reply" width="860">
 </p>
 
-- **Local by default, cloud when you add keys.** With no keys, the language model (Qwen2.5 7B via Ollama), speech-to-text
-  (Whisper) and the voice (Piper) all run on this PC and nothing leaves it. Add a Groq and/or Sarvam key and each part switches
-  to the cloud on its own, for much lower latency.
+- **Your voice stays on this PC.** Speech-to-text (Parakeet, [fast](#fast-speech-to-text)) and the voice (Piper) always run
+  locally. The language model is local too (Qwen2.5 7B via Ollama) until you add a Groq key, which switches it to the cloud for
+  much lower latency. The only keys Orbit uses are Groq and Spotify.
 - **Safe by design.** Risky actions (closing a window, quitting an app, buying, sending, deleting) ask you yes or no first, by
   voice, by clicking, or with a key chord. Everything Orbit does is printed first and logged with secrets redacted.
 - **You can watch it work.** Orbit's own pointer glides to what it is about to click, presses it with a ripple, carries a window
@@ -44,8 +44,8 @@ by fast rules with no model call.
 1. Download **Orbit-Setup-x.y.z.exe** from the [latest release](https://github.com/lennydany3/orbit/releases/latest) and run it.
    It installs for your account only (no administrator rights) and walks you through the options, including pasting a free
    [Groq](https://console.groq.com/keys) key so Orbit can chat and handle harder requests.
-2. The first start downloads the voice models once (about 600 MB, less with a Sarvam key). The sidebar says so while it happens.
-3. Say "hey orbit", or hold Right Ctrl. Orbit lives in the tray; its menu has **API keys...** (where Groq, Sarvam and Spotify keys go,
+2. The first start downloads the voice models once (about 800 MB). The sidebar says so while it happens.
+3. Say "hey orbit", or hold Right Ctrl. Orbit lives in the tray; its menu has **API keys...** (where the Groq and Spotify keys go,
    in `%APPDATA%\Orbit\.env`), **Check for updates...** and **Open Orbit's folder**.
 
 **Updates are automatic.** Every change merged to `main` is published as a new release; an installed Orbit checks for one every few
@@ -65,7 +65,8 @@ that click. Your settings, notes and reminders live in `%APPDATA%\Orbit` and are
    `--fake-tools` adds the Step 1 test tools).
 5. Voice (optional), download the models once; this is the only thing that touches the network for voice, and only when you run it:
    ```
-   python -m orbit.voice.fetch_models whisper small.en tiny.en
+   python -m orbit.voice.fetch_models parakeet parakeet-tdt-0.6b-v2-int8
+   python -m orbit.voice.fetch_models whisper tiny.en
    python -m orbit.voice.fetch_models piper en_US-amy-medium
    python -m orbit.voice.fetch_models wakeword hey_mycroft
    python -m orbit --voice
@@ -73,7 +74,7 @@ that click. Your settings, notes and reminders live in `%APPDATA%\Orbit` and are
 6. Spotify (optional): create an app at developer.spotify.com (redirect URI `http://127.0.0.1:8888/callback`, Web API), add your
    account under User Management, then `setx SPOTIFY_CLIENT_ID "<client id>"`, open a new terminal and run
    `python -m orbit auth spotify` once.
-7. Cloud (optional): copy `.env.example` to `.env` and add `GROQ_API_KEY` / `SARVAM_API_KEY` (see [Cloud mode](#cloud-mode-groq--sarvam-ai)).
+7. Cloud (optional): copy `.env.example` to `.env` and add `GROQ_API_KEY` (see [Cloud mode](#cloud-mode-groq)).
 
 **The desktop app (Rust, optional)**, in `ui/`: install [Rust](https://rustup.rs) (the toolchain is pinned to 1.99.1 and
 installs itself), then `cargo run --release -- --spawn`. It starts Orbit for you and puts it in the tray.
@@ -333,31 +334,49 @@ as the text prompt, and speaks a short reply.
 - **Kill switch:** Ctrl+Alt+Esc stops the microphone instantly; Orbit carries on in text mode. If voice cannot start (no
   microphone, a missing model) it says why and falls back to the text prompt instead of crashing.
 - **Where the time goes** (printed after each turn): on the author's PC, about 3.2 s from the end of speech to the first spoken
-  word with local models (speech-to-text about 2.0 s dominates), about 2.8 s with hold-to-talk. A busy PC is slower. Cloud mode
-  is the way to bring this down.
+  word with local models when speech-to-text was Whisper (about 2.0 s of it). Parakeet brings a short command's speech-to-text
+  from about 2.4 s down to about 0.4 s (see [Fast speech-to-text](#fast-speech-to-text)). A busy PC is slower.
 
 Dev bench without a microphone or a real agent: `python -m orbit.voice.loop --echo-agent --wav replay.wav` (a stand-in agent that
 repeats your request; "close notepad" pretends to be risky so you can try the spoken yes / no).
 
-### Cloud mode: Groq + Sarvam AI
+### Fast speech-to-text
 
-Groq runs the language model; Sarvam does speech-to-text and the voice. Both are optional and independent.
+Speech-to-text runs on this PC with NVIDIA's Parakeet TDT 0.6B (int8, through sherpa-onnx), built the way the dictation app
+[Handy](https://github.com/cjpais/Handy) makes its transcription fast (`src/orbit/voice/stt_fast.py`):
 
-1. Get keys: Groq at <https://console.groq.com/keys>, Sarvam at <https://dashboard.sarvam.ai>.
-2. Copy `.env.example` to `.env` and paste them in (`.env` is git-ignored; a variable set in your terminal overrides the file):
+1. **A faster model.** Parakeet is a transducer: it reads the audio once and emits words. Whisper's encoder always works on a
+   padded 30 s window, so a 2 s command cost as much as 30 s of audio. Measured on the author's PC (12 threads, 4 used):
+   a 2.5 s clip takes 0.41 s with Parakeet vs 2.36 s with Whisper `small.en`; a 7.4 s clip 0.92 s vs 2.61 s.
+2. **Loaded once, kept warm.** The model is loaded and run once at start-up, then stays in memory.
+3. **Only speech reaches it.** Silero VAD trims silence on the capture path, as before.
+4. **Decoding while you talk.** While you hold the talk key, the audio is cut at natural pauses (after at least 4 s, at a pause
+   of 0.35 s or more) and each finished piece is decoded in the background. When you let go, only the last piece is left. Cuts are
+   only made in silence, never inside a word. Wake-word turns keep the early transcription that starts at a 0.55 s pause.
+5. **Off the mic thread.** Decoding runs in one worker thread, in order; the microphone loop never waits for it.
+
+Parakeet takes no vocabulary hint the way Whisper did, so a small table (`VOCAB_FIXES` in `voice/stt.py`) spells the names Orbit
+cares about ("get hub" -> GitHub, "you tube" -> YouTube, "echo pop" -> Echo Pop).
+
+Settings (`.env`): `ORBIT_STT` = `auto` (Parakeet when downloaded, otherwise Whisper) | `parakeet` | `whisper`;
+`ORBIT_PARAKEET_MODEL` = `parakeet-tdt-0.6b-v2-int8` (English) or `parakeet-tdt-0.6b-v3-int8` (25 European languages);
+`ORBIT_STT_THREADS` (4); `ORBIT_LIVE_DECODE` = `on` | `off`. Whisper `tiny.en` still double-checks the wake word.
+
+### Cloud mode: Groq
+
+Groq runs the language model. It is optional; without a key Orbit uses the local model (Ollama).
+
+1. Get a key at <https://console.groq.com/keys>.
+2. Copy `.env.example` to `.env` and paste it in (`.env` is git-ignored; a variable set in your terminal overrides the file):
    ```
    GROQ_API_KEY=gsk_...
-   SARVAM_API_KEY=...
    ```
-3. Check them: `python -m orbit.cloud_check` (one tiny request each, prints the seconds each took).
-4. Run as usual. Each part switches to the cloud when its key exists (`ORBIT_LLM`, `ORBIT_STT`, `ORBIT_TTS` = `auto` | the cloud
-   name | the local engine; `--llm ollama` forces the local model for one run). `ORBIT_LANGUAGE` picks the language you speak
-   (`en-IN`, `hi-IN`, ...); the other settings are listed in `.env.example`.
+3. Check it: `python -m orbit.cloud_check` (one tiny request, prints the seconds it took).
+4. Run as usual. `ORBIT_LLM` = `auto` | `groq` | `ollama` (`--llm ollama` forces the local model for one run); the other
+   settings are listed in `.env.example`.
 
-Only the speech clip trimmed by the local silence detector is uploaded (never the always-on microphone stream); the wake word
-and echo cancellation stay local, and Orbit saves no audio. If the internet or a service fails, Orbit falls back to Whisper /
-Piper / Windows voice for the next minute instead of waiting on timeouts; the language model has no automatic fallback (use
-`--llm ollama`).
+Your voice never leaves the PC: speech-to-text, the voice, the wake word and echo cancellation all run locally, and Orbit saves
+no audio. Only the text of your request goes to Groq. The language model has no automatic fallback (use `--llm ollama`).
 
 ### Wake word: "Hey Orbit"
 
@@ -384,8 +403,8 @@ you are stressed or low and it slows down and is kind. It remembers the last 8 e
   before. Anything else is chat, answered by a friend persona with no tools. Obvious cases are decided by simple word checks;
   only unclear ones cost one tiny extra model call. Turn it off with `--no-friend` or `ORBIT_FRIEND=0`.
 - **Emotion.** Every chat reply starts with a hidden feeling tag (neutral, happy, excited, proud, caring, sad, teasing, calm,
-  serious) that sets the voice's speed and expressiveness. Honest limit: Sarvam's voice only lets us change pace and how varied
-  the delivery is, so most of the feeling comes from the words. Offline, Piper only changes speed.
+  serious) that sets the voice's speed. Honest limit: Piper can only change its speed, so most of the feeling comes from the
+  words.
 - **Spoken whole.** Chat replies are spoken in full (up to 5 sentences), and the conversation stays open for 8 s after a reply.
 - **Safety.** Roasts are playful and only about what you did (procrastination, snacks, sleep), never looks, family, religion,
   money or health. If you sound low it skips the jokes. If you say something that sounds like hurting yourself it drops the
@@ -484,8 +503,8 @@ links are opened. Web search uses Google.
 ## Privacy
 
 - **Local by default.** Microphone capture, wake word, voice-activity detection, echo cancellation and hotkeys always run on this
-  PC. With no API keys, nothing leaves the PC. With keys, the speech clip, the reply text and your requests go to Sarvam and
-  Groq; Orbit prints which mode it is in when voice starts.
+  PC, and so do speech-to-text and the voice. With no API keys, nothing leaves the PC. With a Groq key, the text of your requests
+  goes to Groq; Orbit prints which mode it is in when voice starts.
 - **The screen is read only when you ask about it** ("what does this mean?"), and then only the window under your mouse pointer, as
   text. It goes to the language model for that answer (to Groq in cloud mode; nowhere in local mode), with passwords, keys, tokens
   and card numbers masked first. See [Ask about your screen](#ask-about-your-screen).

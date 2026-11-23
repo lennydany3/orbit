@@ -203,11 +203,12 @@ class VoiceLoop:
                  aec: EchoCanceller | None = None, reference: ReferenceTimeline | None = None, barge_in: bool = config.BARGE_IN,
                  media_check=None, ui=None, prefs=None, reminders=None, wake_enabled: bool = True, lock: frozenset = frozenset(),
                  alarm=None, alarm_ring_s: float = config.ALARM_RING_S, alarm_listen_s: float = config.ALARM_LISTEN_S,
-                 alarm_max_s: float = config.ALARM_MAX_S, alarm_settle_s: float = config.ALARM_SETTLE_S):
+                 alarm_max_s: float = config.ALARM_MAX_S, alarm_settle_s: float = config.ALARM_SETTLE_S, live_decode=None):
         """`prefs` (voice.prefs.LivePrefs) lets the Settings page change the volume, devices, wake word and follow-up while Orbit runs;
         `lock` names what the command line chose and the page must not change ("wake", "follow_up", "mic", "speaker").
         `reminders` (reminders.ReminderStore) is what is said aloud when a reminder comes due.
-        `alarm` (alarm.AlarmPlayer) makes a reminder or timer ring until you say "ok thanks" (without it, it is only said once)."""
+        `alarm` (alarm.AlarmPlayer) makes a reminder or timer ring until you say "ok thanks" (without it, it is only said once).
+        `live_decode` makes a stt_fast.LiveDecode for each hold-to-talk turn, so the speech is decoded while you are still talking."""
         self.agent, self.mic, self.transcriber, self.tts = agent, mic, transcriber, tts
         self.prefs, self.reminders, self.wake_enabled, self._locked = prefs, reminders, wake_enabled, lock
         self._wanted = None                        # settings read from the file and not applied yet (devices change between turns)
@@ -243,6 +244,7 @@ class VoiceLoop:
         self.mode = ""                       # how the current turn started: "wake", "ptt", "followup"
         self.preroll: deque = deque(maxlen=4)
         self.ptt_frames: list = []
+        self.live_decode, self._live = live_decode, None   # decoding a hold-to-talk turn while it is recorded (see stt_fast.py)
         self.heard = False
         self.future: Future | None = None          # the current helper job: speech-to-text, or speech
         self.agent_future: Future | None = None    # the agent call; kept apart because a confirmation reuses `future` meanwhile
@@ -284,6 +286,12 @@ class VoiceLoop:
         self._resume_mic()
         self._reset_listeners()
         self.mode, self.heard, self._spec = "", False, None
+        self._drop_live()
+
+    def _drop_live(self) -> None:
+        if self._live is not None:
+            self._live.cancel()
+            self._live = None
 
     @staticmethod
     def _text_of(future: Future):
@@ -415,7 +423,12 @@ class VoiceLoop:
             return
         self.turn = TurnTimer(self._clock)
         self.turn.mark("speech_end")
-        self._begin_transcribe(clip)
+        live, self._live = self._live, None
+        pieces = live.pieces if live is not None else 0
+        early = live.finish(clip) if live is not None else None      # None: nothing was cut while you talked, decode it whole
+        if early is not None and self.verbose:
+            self.out(f"  ({pieces} of {pieces + 1} pieces were decoded while you talked)")
+        self._begin_transcribe(clip, early)
 
     # ---- listening ----
     def _start_listening(self, mode: str, reason: str) -> None:
@@ -426,6 +439,11 @@ class VoiceLoop:
         self._resume_mic()
         self.mode, self.heard, self._spec = mode, False, None
         self.ptt_frames = keep
+        self._drop_live()
+        if mode == "ptt" and self.live_decode is not None:
+            self._live = self.live_decode()
+            for frame in keep:
+                self._live.feed(frame)
         if self.segmenter:
             self.segmenter.reset()
         self.st.to(State.LISTENING, reason)
@@ -449,6 +467,8 @@ class VoiceLoop:
         if self.mode == "ptt":
             if frame is not None:
                 self.ptt_frames.append(frame)
+                if self._live is not None:
+                    self._live.feed(frame)
                 if len(self.ptt_frames) * config.FRAME_MS / 1000 >= config.PTT_MAX_S:
                     self.out(f"  (reached the {config.PTT_MAX_S:.0f}s limit)")
                     self._finish_ptt()
@@ -727,11 +747,14 @@ class VoiceLoop:
         return True
 
     # ---- transcribing -> thinking ----
-    def _begin_transcribe(self, clip: np.ndarray) -> None:
+    def _begin_transcribe(self, clip: np.ndarray, early: Future | None = None) -> None:
+        """`early`: the text already being finished by live decoding (hold-to-talk), used instead of decoding the clip again."""
         self._pause_mic()
         self.st.to(State.TRANSCRIBING, f"{len(clip) / config.SAMPLE_RATE:.1f}s of speech")
         spec, self._spec = self._spec, None
-        if spec is not None and len(spec[0]) == len(clip) and np.array_equal(spec[0], clip):
+        if early is not None:
+            self.future = early
+        elif spec is not None and len(spec[0]) == len(clip) and np.array_equal(spec[0], clip):
             self.future = spec[1]                      # you really had stopped: the early transcription is already under way
             if self.verbose:
                 self.out("  (using the early transcription)")
@@ -1042,16 +1065,12 @@ class EchoAgent:
 def privacy_note(transcriber, tts, llm_description: str = "") -> str:
     """One honest line about what leaves this PC. The wake word, voice-activity detection and echo cancellation always stay local."""
     sends = []
-    if getattr(transcriber, "name", "") == "sarvam":
-        sends.append("what you say after the wake word goes to Sarvam (speech-to-text)")
-    if any(getattr(e, "name", "") == "sarvam" for e in getattr(tts, "engines", [])):
-        sends.append("Orbit's replies go to Sarvam (text-to-speech)")
     if "cloud" in llm_description:
         sends.append("your requests go to Groq (language model)")
     if not sends:
         return "Speech-to-text, the wake word and the voice all run on this PC. Nothing is recorded or sent anywhere."
-    return ("Cloud mode: " + "; ".join(sends) + ". The wake word, silence detection and echo cancellation stay on this PC, "
-            "and audio is never saved by Orbit.")
+    return ("Cloud mode: " + "; ".join(sends) + ". Your voice never leaves this PC: speech-to-text, the wake word, the voice, "
+            "silence detection and echo cancellation all run here, and audio is never saved by Orbit.")
 
 
 def _make_alarm(device, volume: float, out):
@@ -1079,8 +1098,8 @@ def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bo
     from .audio_io import FileMic, MicStream, device_label
     from .hotkey import Hotkeys
     from .monitor import Monitor, lower_priority
-    from .cloud import build_transcriber
     from .prefs import LivePrefs
+    from .stt import build_transcriber
     from .tts import make_tts
     from .vad import SileroVAD, SpeechSegmenter
 
@@ -1092,6 +1111,13 @@ def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bo
         lower_priority()
         out("Loading voice (speech-to-text, wake word, voice) ...")
         transcriber = build_transcriber(log=out)
+        out(f"  speech-to-text: {transcriber.name} {transcriber.model_name} (loaded in {transcriber.load_s:.1f}s, on this PC)")
+        live_decode = None
+        if config.LIVE_DECODE and getattr(transcriber, "live_chunking", False):
+            from .stt_fast import LiveDecode
+
+            live_vad = SileroVAD()                                            # its own: the VAD is stateful (reset for every turn)
+            live_decode = lambda: LiveDecode(transcriber, live_vad)           # noqa: E731 - one session per hold-to-talk turn
         segmenter = SpeechSegmenter(SileroVAD(), pause_s=config.SPECULATIVE_PAUSE_S if config.SPECULATIVE_STT else None)
         check_vad = SileroVAD()
         wake = None
@@ -1125,7 +1151,8 @@ def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bo
     loop = VoiceLoop(agent, mic, transcriber, tts, keys, wake, segmenter, check_vad,
                      follow_up=use_follow_up, out=out, verbose=verbose, monitor=Monitor(),
                      aec=EchoCanceller() if reference is not None else None, reference=reference, ui=ui,
-                     prefs=prefs, reminders=ReminderStore(), wake_enabled=wake is not None and chosen.voice.wake_word, lock=locked, alarm=alarm)
+                     prefs=prefs, reminders=ReminderStore(), wake_enabled=wake is not None and chosen.voice.wake_word, lock=locked, alarm=alarm,
+                     live_decode=live_decode)
     agent.safety.confirm = loop.confirm              # risky actions are confirmed by voice from now on
     if ui is not None and hasattr(tts, "set_audio_listener"):
         tts.set_audio_listener(ui.audio_block)         # the face shows Orbit's voice level while it speaks

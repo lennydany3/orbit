@@ -15,7 +15,29 @@ SPEAKER_DEVICE = os.environ.get("ORBIT_SPEAKER")  # same for playback
 MODELS_DIR = app_config.DATA_DIR / "models"
 SILERO_MODEL = MODELS_DIR / "silero_vad.onnx"
 
-# --- Speech-to-text (faster-whisper, local, CPU only: the GPU belongs to the LLM) ---
+# --- Speech-to-text. Everything is local; nothing is sent anywhere. See stt_fast.py for why the default engine is fast ---
+STT_PROVIDER = os.environ.get("ORBIT_STT", "auto").lower()       # auto = Parakeet if downloaded, else Whisper | parakeet | whisper
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+# Parakeet TDT 0.6B (int8, sherpa-onnx, CPU): the fast default engine.
+PARAKEET_DIR = MODELS_DIR / "parakeet"            # one folder per model, e.g. models/parakeet/parakeet-tdt-0.6b-v2-int8
+PARAKEET_MODEL = os.environ.get("ORBIT_PARAKEET_MODEL", "parakeet-tdt-0.6b-v2-int8")   # v2 = English (best); v3 = 25 European languages
+PARAKEET_THREADS = int(_float_env("ORBIT_STT_THREADS", 4))
+PARAKEET_TAIL_PAD_S = 0.25                        # silence added after the clip so a word cut off by letting go of the key is kept
+# Decoding while you talk (hold-to-talk): once this much audio has built up, the next pause this long cuts off a piece to decode
+# at once. Cuts are only made in silence. When you let go, only the last piece is left.
+LIVE_DECODE = os.environ.get("ORBIT_LIVE_DECODE", "on").strip().lower() not in ("0", "off", "no", "false")
+LIVE_MIN_CHUNK_S = _float_env("ORBIT_LIVE_MIN_CHUNK_S", 4.0)
+LIVE_CUT_SILENCE_S = _float_env("ORBIT_LIVE_CUT_SILENCE_S", 0.35)
+
+# faster-whisper: the fallback engine (and the wake-word check below). CPU only: the GPU belongs to the LLM.
 WHISPER_DIR = MODELS_DIR / "whisper"             # one folder per model, e.g. models/whisper/base.en
 WHISPER_MODEL = "small.en"                       # chosen from the V2 benchmark: about 11% word error on real recordings vs 18-26% for base.en
 WHISPER_COMPUTE = "int8"
@@ -29,19 +51,6 @@ FIXTURES_DIR = app_config.PROJECT_ROOT / "tests" / "voice" / "fixtures"
 PIPER_DIR = MODELS_DIR / "piper"                 # <voice>.onnx + <voice>.onnx.json
 PIPER_VOICE = "en_US-hfc_female-medium"          # a female voice, chosen in V3 (amy and lessac are also downloaded)
 PIPER_LENGTH_SCALE = 1.0                         # below 1.0 = faster speech, above = slower
-
-# --- Cloud speech (Sarvam AI). "auto" = use Sarvam when SARVAM_API_KEY is set, with the local engines above as the fallback ---
-STT_PROVIDER = os.environ.get("ORBIT_STT", "auto").lower()       # auto | sarvam | local
-TTS_PROVIDER = os.environ.get("ORBIT_TTS", "auto").lower()       # auto | sarvam | local
-SARVAM_BASE_URL = "https://api.sarvam.ai"
-SARVAM_TIMEOUT_S = 10.0                          # a slow or missing network must not freeze a voice turn: give up and use the local engine
-SARVAM_COOLDOWN_S = 60.0                         # after a failure, use the local engine for this long before trying the cloud again
-SARVAM_STT_MODEL = os.environ.get("ORBIT_SARVAM_STT_MODEL", "saarika:v2.5")
-SARVAM_LANGUAGE = os.environ.get("ORBIT_LANGUAGE", "en-IN")      # what you speak: en-IN, hi-IN, ta-IN ... or "unknown" to auto-detect
-SARVAM_TTS_MODEL = os.environ.get("ORBIT_SARVAM_TTS_MODEL", "bulbul:v3")
-SARVAM_SPEAKER = os.environ.get("ORBIT_SARVAM_SPEAKER", "ritu")   # the voice Orbit speaks with (bulbul:v3: ritu, priya, neha, kavya, shubh, aditya, rahul, ...)
-SARVAM_TTS_RATE = 22_050                         # Hz of the audio Sarvam returns (it is resampled to 16 kHz for echo cancellation)
-SARVAM_TTS_PACE = 1.0                            # 1.0 = normal speed
 
 # --- Wake word (openWakeWord, CPU, ONNX) and push-to-talk ---
 WAKEWORD_DIR = MODELS_DIR / "openwakeword"
@@ -112,18 +121,17 @@ AEC = True                                       # echo cancellation for that (o
 CHAT_SPOKEN_MAX_SENTENCES = 5                    # a chat reply is spoken almost whole (command replies stay at 2 sentences)
 CHAT_SPOKEN_MAX_CHARS = 520
 FOLLOW_UP_CHAT_S = 8.0                           # after a chat reply, the conversation stays open this long without the wake word
-# How each emotion is spoken: (pace multiplier, expressiveness 0..1). Sarvam's bulbul:v3 exposes exactly these two knobs
-# (pace and temperature); the rest of the feeling comes from the words themselves. Piper only uses the pace.
-EMOTION_STYLE = {
-    "neutral": (1.00, None),                     # None = Sarvam's default
-    "happy": (1.05, 0.80),
-    "excited": (1.15, 0.95),
-    "proud": (1.00, 0.80),
-    "caring": (0.92, 0.65),
-    "sad": (0.88, 0.60),
-    "teasing": (1.06, 0.95),
-    "calm": (0.95, 0.55),
-    "serious": (0.95, 0.40),
+# How fast each emotion is spoken (pace multiplier). Piper can only change its speed; the rest of the feeling comes from the words.
+EMOTION_PACE = {
+    "neutral": 1.00,
+    "happy": 1.05,
+    "excited": 1.15,
+    "proud": 1.00,
+    "caring": 0.92,
+    "sad": 0.88,
+    "teasing": 1.06,
+    "calm": 0.95,
+    "serious": 0.95,
 }
 
 # --- Not acting on background sound ---

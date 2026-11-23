@@ -1,5 +1,10 @@
 # Orbit voice latency: architecture and optimization plan
 
+> **Update (stt-update branch):** Sarvam has been removed. Speech-to-text is now local Parakeet TDT 0.6B through sherpa-onnx,
+> with decoding while the talk key is held (`voice/stt_fast.py`, README "Fast speech-to-text"); Whisper is the fallback and the
+> wake-word check. The voice is Piper, then the Windows voice. The only API keys are Groq and Spotify. Sarvam mentions below
+> describe the old design.
+
 Audience: the Claude Code instance that will implement this in the Orbit repo.
 Scope: make a voice turn faster, from the end of the user's speech to Orbit's first spoken word. Covers STT, the
 agent/LLM handoff and TTS. Accuracy must not get worse.

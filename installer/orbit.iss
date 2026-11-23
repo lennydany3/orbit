@@ -67,7 +67,6 @@ KeysTitle=Connect Orbit's brain
 KeysSubtitle=Optional. You can do this later from the tray menu (API keys).
 KeysBody=Orbit answers questions and chats using Groq, a free service. Paste a key from console.groq.com/keys. Leave it empty to use only the simple commands for now.
 KeysGroq=Groq key (language model):
-KeysSarvam=Sarvam key (faster, cloud speech, optional):
 
 [Tasks]
 Name: "desktopicon"; Description: "Add a shortcut to the desktop"; GroupDescription: "Shortcuts:"; Flags: unchecked
@@ -176,7 +175,6 @@ procedure InitializeWizard;
 begin
   KeysPage := CreateInputQueryPage(wpSelectTasks, CustomMessage('KeysTitle'), CustomMessage('KeysSubtitle'), CustomMessage('KeysBody'));
   KeysPage.Add(CustomMessage('KeysGroq'), False);
-  KeysPage.Add(CustomMessage('KeysSarvam'), False);
   DressTheWizard;
 end;
 
@@ -196,15 +194,14 @@ end;
 
 procedure SaveKeys;
 var
-  Groq, Sarvam, Text: String;
+  Groq, Text: String;
 begin
   Groq := CleanKey(KeysPage.Values[0]);
-  Sarvam := CleanKey(KeysPage.Values[1]);
-  if ((Groq = '') and (Sarvam = '')) or FileExists(EnvFile) then
+  if (Groq = '') or FileExists(EnvFile) then
     Exit;
   Text := '# Orbit''s keys. Edit this file from the tray menu (API keys...), then restart Orbit.' + #13#10;
   Text := Text + 'GROQ_API_KEY=' + Groq + #13#10;
-  Text := Text + 'SARVAM_API_KEY=' + Sarvam + #13#10;
+  Text := Text + 'SPOTIFY_CLIENT_ID=' + #13#10;
   ForceDirectories(ExtractFilePath(EnvFile));
   SaveStringToFile(EnvFile, Text, False);
 end;

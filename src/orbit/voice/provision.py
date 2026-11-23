@@ -4,8 +4,9 @@ The installed app ships the small models (the voice-activity detector and the wa
 first time it runs, into the models folder in your Orbit data folder:
 
   * Whisper `tiny.en`   (75 MB)  checks that a wake word really was "hey orbit"
-  * Whisper `small.en`  (480 MB) turns your speech into text, only if there is no Sarvam key to do that in the cloud
-  * the Piper voice     (65 MB)  speaks, the fallback when there is no Sarvam key or no network
+  * Parakeet TDT 0.6B   (640 MB) turns your speech into text, fast (see stt_fast.py); Whisper `small.en` (480 MB) instead
+                                 when ORBIT_STT=whisper
+  * the Piper voice     (65 MB)  speaks
 
 It is a one-time download, shown on the face as a notice, and never runs from source: there `python -m orbit.voice.fetch_models`
 is still the way, so nothing is fetched behind your back. Anything that fails is reported and skipped: Orbit starts anyway and
@@ -43,16 +44,18 @@ def copy_bundled(source: Path | None = None, target: Path | None = None) -> list
 
 def missing() -> list[tuple[str, str]]:
     """What still has to be downloaded: (kind, name) pairs, smallest first."""
-    from .cloud import sarvam_key
+    from .stt_fast import parakeet_ready
 
     need: list[tuple[str, str]] = []
     if config.WAKE_VERIFY and not (config.WHISPER_DIR / config.WAKE_VERIFY_MODEL / "model.bin").exists():
         need.append(("whisper", config.WAKE_VERIFY_MODEL))
     if not (config.PIPER_DIR / f"{config.PIPER_VOICE}.onnx").exists():
         need.append(("piper", config.PIPER_VOICE))
-    local_stt = config.STT_PROVIDER == "local" or not sarvam_key()
-    if local_stt and not (config.WHISPER_DIR / config.WHISPER_MODEL / "model.bin").exists():
-        need.append(("whisper", config.WHISPER_MODEL))
+    if config.STT_PROVIDER in ("whisper", "local"):
+        if not (config.WHISPER_DIR / config.WHISPER_MODEL / "model.bin").exists():
+            need.append(("whisper", config.WHISPER_MODEL))
+    elif not parakeet_ready(config.PARAKEET_MODEL):
+        need.append(("parakeet", config.PARAKEET_MODEL))
     return need
 
 
@@ -68,8 +71,9 @@ def ensure_models(say: Say = print, notify: Say | None = None) -> bool:
         step = f"({number} of {len(todo)})"
         notify(f"Getting Orbit ready: downloading {'the voice' if kind == 'piper' else 'a speech model'} {step}…")
         say(f"Downloading {kind} {name} {step}")
+        fetch = {"piper": fetch_models.fetch_piper, "parakeet": fetch_models.fetch_parakeet}.get(kind, fetch_models.fetch_whisper)
         try:
-            code = fetch_models.fetch_piper([name]) if kind == "piper" else fetch_models.fetch_whisper([name])
+            code = fetch([name])
         except Exception as e:  # noqa: BLE001 - offline, disk full, ...: carry on without it
             say(f"  could not download {name}: {type(e).__name__}: {e}")
             code = 1

@@ -55,7 +55,7 @@ The installer's pictures are drawn by `python installer/make_wizard_images.py`; 
 
 - **Unsigned.** The installer is not code-signed, so Windows SmartScreen shows "unknown publisher" the first time ("More info", "Run
   anyway"). A code-signing certificate removes that; add it to the workflow with `signtool` before the checksum step.
-- **Keys are never shipped.** Groq, Sarvam and Spotify keys belong to each person; the installer can save the ones they paste to
+- **Keys are never shipped.** Groq and Spotify keys belong to each person; the installer can save the ones they paste to
   `%APPDATA%\Orbit\.env`.
 - **Models.** The small ones (voice-activity detector, the "hey orbit" wake word) are in `packaging/models/` and ship inside the installer;
   the speech and voice models download on first run (`orbit/voice/provision.py`).
