@@ -1110,6 +1110,9 @@ def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bo
     try:
         lower_priority()
         out("Loading voice (speech-to-text, wake word, voice) ...")
+        # Speech-to-text loads FIRST, before anything else that uses ONNX Runtime (Silero VAD, the wake word). Parakeet's sherpa-onnx
+        # ships its own onnxruntime.dll (1.28) and the onnxruntime package another (1.20); Windows loads one DLL of a name per
+        # process, so whichever loads first serves both. The newer one runs the older package fine; the other way round it does not.
         transcriber = build_transcriber(log=out)
         out(f"  speech-to-text: {getattr(transcriber, 'name', 'local')} {getattr(transcriber, 'model_name', '')} "
             f"(loaded in {getattr(transcriber, 'load_s', 0.0):.1f}s, on this PC)")

@@ -22,6 +22,7 @@ pub mod pacer;
 pub mod presence;
 pub mod settings;
 pub mod settings_view;
+pub mod setup;
 pub mod sidebar;
 pub mod shell;
 pub mod reminders;

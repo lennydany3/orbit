@@ -1,6 +1,8 @@
-; Orbit's installer (Inno Setup 6). Build it from the project folder, after the two programs are built:
+; The installer that does the work (Inno Setup 6). Nobody sees it: Orbit's own installer (ui/src/setup, `orbit-setup.exe`) carries
+; it inside and runs it very silently, and draws every screen itself. Build it from the project folder, after the programs are built:
 ;
-;     iscc /DAppVersion=1.0.7 installer\orbit.iss          ->  installer\Output\Orbit-Setup-1.0.7.exe
+;     iscc /DAppVersion=1.0.7 installer\orbit.iss          ->  installer\Output\Orbit-Core-Setup-1.0.7.exe
+;     python installer\pack.py --version 1.0.7            ->  installer\Output\Orbit-Setup-1.0.7.exe   (what is published)
 ;
 ; It installs for the current user only (no administrator rights, no UAC prompt), which is also what lets Orbit update itself
 ; silently later: the program replaces its own installer-made files in a folder it owns.
@@ -39,7 +41,7 @@ UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
 SetupIconFile=..\ui\assets\logo\orbit.ico
 OutputDir=Output
-OutputBaseFilename=Orbit-Setup-{#AppVersion}
+OutputBaseFilename=Orbit-Core-Setup-{#AppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -86,8 +88,9 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 ; Installed by hand: offer to start it. Updated by Orbit itself (silent): start it again with no question, so it comes straight back.
+; Orbit's own installer passes /NOLAUNCH=1 on a first install: its last screen has the "Start Orbit" button instead.
 Filename: "{app}\{#AppExe}"; Description: "Start Orbit"; Flags: nowait postinstall skipifsilent runasoriginaluser
-Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser; Check: WizardSilent
+Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser; Check: ShouldRelaunch
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{localappdata}\Orbit\updates"
@@ -104,6 +107,12 @@ const
 
 var
   KeysPage: TInputQueryWizardPage;
+
+// A silent run starts Orbit again when it is done (an update), unless the caller starts it itself.
+function ShouldRelaunch: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:NOLAUNCH|0}') <> '1');
+end;
 
 // ---- the dark look --------------------------------------------------------------------------------------------------------
 

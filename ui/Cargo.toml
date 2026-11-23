@@ -15,6 +15,11 @@ path = "src/lib.rs"
 name = "orbit-ui"
 path = "src/main.rs"
 
+# Orbit's installer: its own window and screens, with the Inno Setup installer appended to it (installer/pack.py).
+[[bin]]
+name = "orbit-setup"
+path = "src/bin/orbit-setup.rs"
+
 [dependencies]
 rune = { git = "https://github.com/anomalyco/rune", rev = "8fbc395190dbff430db9d9fc515bb6ac8cc7d13d" }
 bytemuck = { version = "1.25", features = ["derive"] }
