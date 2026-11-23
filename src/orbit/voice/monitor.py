@@ -92,8 +92,9 @@ class Monitor:
             lines.append("CPU/RAM: run was too short for a sample (needs at least one full interval).")
         for name, values in self.timings.items():
             ms = sorted(v * 1000 for v in values)
+            p90 = ms[min(len(ms) - 1, int(len(ms) * 0.90))]
             p95 = ms[min(len(ms) - 1, int(len(ms) * 0.95))]
             cpu = self.stage_cpu.get(name)
             cpu_txt = f"  cpu avg {statistics.fmean(cpu):.1f}%" if cpu else ""
-            lines.append(f"{name}: n={len(ms)}  median {statistics.median(ms):.2f} ms  p95 {p95:.2f} ms  max {ms[-1]:.2f} ms{cpu_txt}")
+            lines.append(f"{name}: n={len(ms)}  median {statistics.median(ms):.2f} ms  p90 {p90:.2f} ms  p95 {p95:.2f} ms  max {ms[-1]:.2f} ms{cpu_txt}")
         return "\n".join(lines)

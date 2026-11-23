@@ -902,7 +902,7 @@ class VoiceLoop:
         if "speech_end" in self.turn.marks and "first_audio" in self.turn.marks:
             self.out("  [turn] " + self.turn.summary(config.VAD_END_SILENCE_S if self.mode != "ptt" else 0.0))
             if self.monitor is not None:
-                self.monitor.add_timing("end of speech -> first spoken word", self.turn.gap("speech_end", "first_audio"))
+                self._record_turn_timings()
         self.turns += 1
         if self._closing:
             self._idle("conversation ended by you: waiting for the wake word")
@@ -925,6 +925,20 @@ class VoiceLoop:
                 self.out("[listening] (Orbit asked a question: just answer, no wake word needed)")
         else:
             self._idle("finished")
+
+    def _record_turn_timings(self) -> None:
+        """Feed the four numbers that matter for latency into the monitor's end-of-run report (median / p90 each).
+        ("agent" is recorded as soon as the reply is ready; "speech-to-text" is the engine's own compute time, which a speculative
+        transcription can make shorter than what the user waited, so the wall-clock "transcribe" below is the one to compare.)"""
+        for name, a, b in (("transcribe (end of speech -> text)", "speech_end", "text"),
+                           ("reply -> first audio", "reply", "first_audio"),
+                           ("end of speech -> first spoken word", "speech_end", "first_audio")):
+            gap = self.turn.gap(a, b)
+            if gap is not None:
+                self.monitor.add_timing(name, gap)
+        total = self.turn.gap("speech_end", "first_audio")
+        if total is not None and self.mode != "ptt":
+            self.monitor.add_timing("last word -> first spoken word (incl. end-of-speech wait)", total + config.VAD_END_SILENCE_S)
 
     def _media_check(self) -> bool:
         """Is media playing? Asked in a helper thread with a short deadline, so a slow answer never stalls the loop."""
