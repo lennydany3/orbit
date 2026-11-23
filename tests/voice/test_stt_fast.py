@@ -189,3 +189,10 @@ def test_parakeet_needs_its_files(tmp_path, monkeypatch):
 ])
 def test_names_are_spelled_the_way_orbit_expects(heard, expected):
     assert apply_vocab_fixes(heard) == expected
+
+
+def test_both_engines_name_themselves_for_the_start_up_line():
+    """run_voice prints the engine's name, model and load time: both real engines must have them (Whisper once did not)."""
+    for engine in (stt.Transcriber, stt_fast.ParakeetTranscriber):
+        assert isinstance(engine.name, str) and engine.name
+    assert stt.Transcriber.name == "whisper" and stt_fast.ParakeetTranscriber.name == "parakeet"

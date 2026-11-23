@@ -30,6 +30,8 @@ class Transcript:
 
 
 class Transcriber:
+    name = "whisper"
+
     def __init__(
         self,
         model: str = config.WHISPER_MODEL,

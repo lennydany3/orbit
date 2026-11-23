@@ -1111,7 +1111,8 @@ def run_voice(agent, *, device: str | None = config.MIC_DEVICE, wake_enabled: bo
         lower_priority()
         out("Loading voice (speech-to-text, wake word, voice) ...")
         transcriber = build_transcriber(log=out)
-        out(f"  speech-to-text: {transcriber.name} {transcriber.model_name} (loaded in {transcriber.load_s:.1f}s, on this PC)")
+        out(f"  speech-to-text: {getattr(transcriber, 'name', 'local')} {getattr(transcriber, 'model_name', '')} "
+            f"(loaded in {getattr(transcriber, 'load_s', 0.0):.1f}s, on this PC)")
         live_decode = None
         if config.LIVE_DECODE and getattr(transcriber, "live_chunking", False):
             from .stt_fast import LiveDecode
