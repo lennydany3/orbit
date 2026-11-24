@@ -90,8 +90,8 @@ def test_missing_key_is_a_clear_error(monkeypatch):
 
 # ---- .env ----
 def test_parse_env_handles_comments_quotes_and_export():
-    text = '# keys\nGROQ_API_KEY="gsk_abc"\nexport SARVAM_API_KEY = sk_123  # inline\n\nbroken line\nEMPTY=\n'
-    assert parse_env(text) == {"GROQ_API_KEY": "gsk_abc", "SARVAM_API_KEY": "sk_123", "EMPTY": ""}
+    text = '# keys\nGROQ_API_KEY="gsk_abc"\nexport SPOTIFY_CLIENT_ID = sk_123  # inline\n\nbroken line\nEMPTY=\n'
+    assert parse_env(text) == {"GROQ_API_KEY": "gsk_abc", "SPOTIFY_CLIENT_ID": "sk_123", "EMPTY": ""}
 
 
 def test_load_env_never_overrides_the_real_environment(tmp_path, monkeypatch):

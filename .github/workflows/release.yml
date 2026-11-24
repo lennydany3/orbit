@@ -1,5 +1,5 @@
 # Every push to `main` becomes a release: the tests run, Orbit is built (the engine with PyInstaller, the window with Cargo),
-# wrapped in the installer, and published on GitHub Releases as `Orbit-Setup-<version>.exe`. Installed copies of Orbit look at the
+# wrapped in Orbit's own installer (ui/src/setup, with the Inno Setup one inside it: installer/pack.py), and published on GitHub Releases as `Orbit-Setup-<version>.exe`. Installed copies of Orbit look at the
 # latest release (ui/src/updater.rs) and offer to update themselves.
 #
 # The version is `<VERSION file>.<run number>`, e.g. 1.0.17: edit VERSION to start a new 1.1 / 2.0 line; the last number only goes up.
@@ -90,9 +90,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ui
-      - name: Build the window
+      - name: Build the window and the installer's window
         working-directory: ui
-        run: cargo build --release
+        run: cargo build --release --bin orbit-ui --bin orbit-setup
 
       # ---- the installer ----
       - name: Find Inno Setup
@@ -105,9 +105,11 @@ jobs:
           }
           if (-not (Test-Path $iscc)) { throw "Inno Setup is not installed" }
           "iscc=$iscc" >> $env:GITHUB_OUTPUT
-      - name: Build the installer
+      - name: Build the inner installer (Inno Setup; nobody sees its screens)
         shell: pwsh
         run: '& "${{ steps.inno.outputs.iscc }}" "/DAppVersion=${{ steps.version.outputs.version }}" installer\orbit.iss'
+      - name: Put it inside Orbit's own installer
+        run: python installer/pack.py --version ${{ steps.version.outputs.version }}
       - name: Checksum
         shell: pwsh
         run: |

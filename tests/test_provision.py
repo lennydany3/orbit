@@ -19,23 +19,27 @@ def test_shipped_models_are_copied_once_and_never_overwritten(tmp_path):
 def test_the_big_models_are_only_wanted_when_they_are_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(voice_config, "WHISPER_DIR", tmp_path / "whisper")
     monkeypatch.setattr(voice_config, "PIPER_DIR", tmp_path / "piper")
-    monkeypatch.delenv("SARVAM_API_KEY", raising=False)
+    monkeypatch.setattr(voice_config, "PARAKEET_DIR", tmp_path / "parakeet")
+    monkeypatch.setattr(voice_config, "STT_PROVIDER", "auto")
     kinds = [kind for kind, _ in provision.missing()]
-    assert kinds == ["whisper", "piper", "whisper"]
-    for sub in (f"whisper/{voice_config.WAKE_VERIFY_MODEL}", f"whisper/{voice_config.WHISPER_MODEL}"):
-        (tmp_path / sub).mkdir(parents=True)
-        (tmp_path / sub / "model.bin").write_bytes(b"x")
+    assert kinds == ["whisper", "piper", "parakeet"]
+    (tmp_path / "whisper" / voice_config.WAKE_VERIFY_MODEL).mkdir(parents=True)
+    (tmp_path / "whisper" / voice_config.WAKE_VERIFY_MODEL / "model.bin").write_bytes(b"x")
     (tmp_path / "piper").mkdir()
     (tmp_path / "piper" / f"{voice_config.PIPER_VOICE}.onnx").write_bytes(b"x")
+    model = tmp_path / "parakeet" / voice_config.PARAKEET_MODEL
+    model.mkdir(parents=True)
+    for name in ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"):
+        (model / name).write_bytes(b"x")
     assert provision.missing() == []
 
 
-def test_with_a_sarvam_key_the_local_speech_model_is_not_downloaded(tmp_path, monkeypatch):
+def test_with_whisper_chosen_the_big_whisper_is_downloaded_instead(tmp_path, monkeypatch):
     monkeypatch.setattr(voice_config, "WHISPER_DIR", tmp_path / "whisper")
     monkeypatch.setattr(voice_config, "PIPER_DIR", tmp_path / "piper")
-    monkeypatch.setenv("SARVAM_API_KEY", "k" * 12)
-    monkeypatch.setattr(voice_config, "STT_PROVIDER", "auto")
-    assert [name for _, name in provision.missing()] == [voice_config.WAKE_VERIFY_MODEL, voice_config.PIPER_VOICE]
+    monkeypatch.setattr(voice_config, "PARAKEET_DIR", tmp_path / "parakeet")
+    monkeypatch.setattr(voice_config, "STT_PROVIDER", "whisper")
+    assert [name for _, name in provision.missing()] == [voice_config.WAKE_VERIFY_MODEL, voice_config.PIPER_VOICE, voice_config.WHISPER_MODEL]
 
 
 def test_the_data_folder_is_the_project_when_run_from_source():

@@ -27,7 +27,7 @@ def _data_dir() -> Path:
 
 DATA_DIR = _data_dir()
 
-load_env(DATA_DIR / ".env")   # API keys (GROQ_API_KEY, SARVAM_API_KEY) come from this git-ignored file
+load_env(DATA_DIR / ".env")   # API keys (GROQ_API_KEY, SPOTIFY_CLIENT_ID) come from this git-ignored file
 
 APP_NAME = "Orbit"  # the only place the product name lives: rename here.
 

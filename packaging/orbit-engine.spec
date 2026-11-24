@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 root = Path(SPECPATH).parent
 
 datas, binaries, hiddenimports = [], [], []
-for package in ("piper", "faster_whisper", "ctranslate2", "openwakeword", "onnxruntime", "sounddevice", "playwright", "pyttsx3", "pycaw", "comtypes"):
+for package in ("piper", "sherpa_onnx", "faster_whisper", "ctranslate2", "openwakeword", "onnxruntime", "sounddevice", "playwright", "pyttsx3", "pycaw", "comtypes"):
     try:
         d, b, h = collect_all(package)
     except Exception as e:                                   # a package that is not installed is simply not shipped

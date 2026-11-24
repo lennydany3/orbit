@@ -1,5 +1,8 @@
 """Speech-to-text: faster-whisper on the CPU, loaded once, run in a worker thread so the mic loop never waits for it.
 
+The default engine is now Parakeet (stt_fast.py, much faster on short commands); Whisper is the fallback when Parakeet's model is
+not downloaded, and it still checks the wake word (wakeword.py). build_transcriber() below picks the engine.
+
 ctranslate2 (the engine under faster-whisper) releases Python's GIL while it computes, so the mic/VAD loop in the
 main thread keeps its 80 ms rhythm while a transcription runs. Process priority is lowered by monitor.lower_priority().
 Only VAD-trimmed speech clips should ever be passed in, never silence (Whisper invents text for silence).
@@ -27,6 +30,8 @@ class Transcript:
 
 
 class Transcriber:
+    name = "whisper"
+
     def __init__(
         self,
         model: str = config.WHISPER_MODEL,
@@ -66,6 +71,49 @@ class Transcriber:
 
     def close(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)
+
+
+# ---- which engine turns speech into text ----
+def build_transcriber(provider: str = config.STT_PROVIDER, log=print):
+    """The speech-to-text engine. Everything runs on this PC; nothing is sent anywhere.
+
+    auto     = Parakeet (fast, see stt_fast.py) when its model is downloaded, otherwise Whisper
+    parakeet = Parakeet only (an error if it cannot load)
+    whisper  = faster-whisper only (the engine Orbit used before)"""
+    provider = {"local": "whisper"}.get(provider, provider)       # "local" was the old name for Whisper
+    if provider not in ("auto", "parakeet", "whisper"):
+        raise ValueError(f"Unknown speech-to-text engine '{provider}'. Use auto, parakeet or whisper.")
+    if provider == "whisper":
+        return Transcriber()
+    from .stt_fast import ParakeetTranscriber
+
+    if provider == "parakeet":
+        return ParakeetTranscriber()
+    try:
+        return ParakeetTranscriber()
+    except (FileNotFoundError, ImportError, RuntimeError) as e:
+        log(f"  [voice] fast speech-to-text (Parakeet) unavailable ({str(e).splitlines()[0]}); using Whisper")
+    return Transcriber()
+
+
+# ---- vocabulary fixes for engines that cannot take a hint (Parakeet has no initial_prompt) ----
+VOCAB_FIXES: tuple[tuple[str, str], ...] = (
+    (r"\bget ?hub\b", "GitHub"),
+    (r"\bgit ?hub\b", "GitHub"),
+    (r"\byou ?tube\b", "YouTube"),
+    (r"\bspot ?ify\b", "Spotify"),
+    (r"\becho ?pop\b", "Echo Pop"),
+    (r"\blow[ -]?fi\b", "lofi"),
+    (r"\blo-fi\b", "lofi"),
+    (r"^(hey )?orbits?\b", lambda m: ("Hey " if m.group(1) else "") + "Orbit"),      # "orbits, open notepad" -> "Orbit, ..."
+)
+
+
+def apply_vocab_fixes(text: str) -> str:
+    """Spells the names Orbit cares about the way the rest of Orbit expects them ("get hub" -> "GitHub")."""
+    for pattern, replacement in VOCAB_FIXES:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    return text
 
 
 # ---- accuracy helpers (used by the benchmark and the fixture tests) ----

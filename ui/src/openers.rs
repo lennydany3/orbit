@@ -110,7 +110,8 @@ mod tests {
 
     #[test]
     fn the_keys_template_names_both_keys() {
-        assert!(KEYS_TEMPLATE.contains("GROQ_API_KEY=") && KEYS_TEMPLATE.contains("SARVAM_API_KEY="));
+        assert!(KEYS_TEMPLATE.contains("GROQ_API_KEY=") && KEYS_TEMPLATE.contains("SPOTIFY_CLIENT_ID="));
+        assert!(!KEYS_TEMPLATE.contains("SARVAM"), "Sarvam is gone: speech runs on this PC");
     }
 
     #[test]
